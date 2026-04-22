@@ -1,4 +1,4 @@
-// Package agent runs the Claude Code subprocess and captures its outcome.
+// Package agent runs the agent subprocess and captures its outcome.
 package agent
 
 import (
@@ -27,14 +27,14 @@ const (
 	reasonTimeout
 )
 
-// Run spawns Claude Code, streams its output, parses stream-json, and
-// returns an Outcome (success, failure, cancelled, or timeout). On
-// cancellation or no-activity timeout, forwards SIGTERM with grace
-// before SIGKILL.
-func Run(ctx context.Context, cfg *config.Config) result.Outcome {
-	agentVersion := DetectVersion()
+// Run spawns the agent subprocess via the Installer, streams its output,
+// parses stream-json, and returns an Outcome (success, failure, cancelled,
+// or timeout). On cancellation or no-activity timeout, forwards SIGTERM
+// with grace before SIGKILL.
+func Run(ctx context.Context, cfg *config.Config, installer Installer) result.Outcome {
+	agentVersion := installer.DetectVersion()
 
-	cmd := exec.Command("claude", buildArgs(cfg)...)
+	cmd := exec.Command(installer.Binary(), installer.BuildArgs(cfg)...)
 	cmd.Dir = cfg.WorkDir
 	cmd.Env = buildEnv(cfg)
 
@@ -59,7 +59,7 @@ func Run(ctx context.Context, cfg *config.Config) result.Outcome {
 		return withVersion(agentVersion, result.Outcome{
 			Status:   result.StatusFailure,
 			ExitCode: result.ExitExecutionFailure,
-			Error:    fmt.Sprintf("failed to start claude: %v", err),
+			Error:    fmt.Sprintf("failed to start %s: %v", installer.Binary(), err),
 		})
 	}
 
@@ -78,7 +78,7 @@ func Run(ctx context.Context, cfg *config.Config) result.Outcome {
 
 	select {
 	case err := <-done:
-		return withVersion(agentVersion, buildOutcome(err, parser, stderrBuf.String()))
+		return withVersion(agentVersion, buildOutcome(err, parser, stderrBuf.String(), installer.Binary()))
 	case <-ctx.Done():
 		return withVersion(agentVersion, gracefulShutdown(cmd, done, parser, reasonSignal, cfg.NoActivityTimeout))
 	case <-timeoutReached:
@@ -87,23 +87,8 @@ func Run(ctx context.Context, cfg *config.Config) result.Outcome {
 	}
 }
 
-func buildArgs(cfg *config.Config) []string {
-	args := []string{
-		"-p", cfg.StepPrompt,
-		"--output-format", "stream-json",
-		"--dangerously-skip-permissions",
-	}
-	if cfg.MaxTurns != "" {
-		args = append(args, "--max-turns", cfg.MaxTurns)
-	}
-	if cfg.Model != "" {
-		args = append(args, "--model", cfg.Model)
-	}
-	return args
-}
-
 // buildEnv forwards the parent env plus optional extras. Credential
-// path dispatch happens inside Claude Code via CLAUDE_CODE_USE_BEDROCK.
+// path dispatch happens inside the agent via CLAUDE_CODE_USE_BEDROCK.
 func buildEnv(cfg *config.Config) []string {
 	env := os.Environ()
 	if cfg.PreviousStepsSummary != "" {
@@ -146,10 +131,10 @@ func gracefulShutdown(cmd *exec.Cmd, done <-chan error, parser *streamParser, re
 	return base
 }
 
-// buildOutcome maps a subprocess exit to an Outcome. Claude Code can
-// exit 0 while reporting is_error in stream-json (e.g., max turns);
-// both route through classifyFailure.
-func buildOutcome(err error, parser *streamParser, stderrText string) result.Outcome {
+// buildOutcome maps a subprocess exit to an Outcome. The agent can exit
+// 0 while reporting is_error in stream-json (e.g., max turns); both
+// route through classifyFailure.
+func buildOutcome(err error, parser *streamParser, stderrText, binary string) result.Outcome {
 	if err == nil && !parser.isError {
 		return result.Outcome{
 			Status:         result.StatusSuccess,
@@ -160,11 +145,11 @@ func buildOutcome(err error, parser *streamParser, stderrText string) result.Out
 			Turns:          parser.turns,
 		}
 	}
-	return classifyFailure(err, parser, stderrText)
+	return classifyFailure(err, parser, stderrText, binary)
 }
 
 // classifyFailure picks exit code 2 for auth / rate-limit failures, 1 otherwise.
-func classifyFailure(err error, parser *streamParser, stderrText string) result.Outcome {
+func classifyFailure(err error, parser *streamParser, stderrText, binary string) result.Outcome {
 	authFailure := parser.isAuthFailure() || hasAuthKeyword(strings.ToLower(stderrText))
 
 	exitCode := result.ExitExecutionFailure
@@ -175,7 +160,7 @@ func classifyFailure(err error, parser *streamParser, stderrText string) result.
 	return result.Outcome{
 		Status:         result.StatusFailure,
 		ExitCode:       exitCode,
-		Error:          failureMessage(err, parser),
+		Error:          failureMessage(err, parser, binary),
 		ChangesSummary: parser.changesSummary,
 		FilesChanged:   parser.filesChangedSorted(),
 		TokenUsage:     parser.usage,
@@ -183,20 +168,20 @@ func classifyFailure(err error, parser *streamParser, stderrText string) result.
 	}
 }
 
-func failureMessage(err error, parser *streamParser) string {
+func failureMessage(err error, parser *streamParser, binary string) string {
 	switch {
 	case err != nil && isExitError(err):
-		return fmt.Sprintf("claude exited with error: %v", err)
+		return fmt.Sprintf("%s exited with error: %v", binary, err)
 	case err != nil:
-		return fmt.Sprintf("failed to run claude: %v", err)
+		return fmt.Sprintf("failed to run %s: %v", binary, err)
 	case parser.isError && parser.errorSubtype != "" && parser.changesSummary != "":
-		return fmt.Sprintf("claude reported error (%s): %s", parser.errorSubtype, parser.changesSummary)
+		return fmt.Sprintf("%s reported error (%s): %s", binary, parser.errorSubtype, parser.changesSummary)
 	case parser.isError && parser.errorSubtype != "":
-		return fmt.Sprintf("claude reported error: %s", parser.errorSubtype)
+		return fmt.Sprintf("%s reported error: %s", binary, parser.errorSubtype)
 	case parser.isError:
-		return "claude reported error"
+		return binary + " reported error"
 	default:
-		return "claude reported error with no detail"
+		return binary + " reported error with no detail"
 	}
 }
 

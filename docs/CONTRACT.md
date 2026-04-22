@@ -45,7 +45,8 @@ fails fast otherwise.
 | `PREVIOUS_STEPS_SUMMARY` | Human-readable context of prior steps in a multi-step consumer scenario. agentbox passes it verbatim into the agent's prompt. |
 | `MAX_TURNS` | Hard cap on agent turns. Default: uncapped (trust wall-clock / no-activity detector). |
 | `MODEL` | Override default model (e.g. `opus`, `haiku`, or a pinned version). Default: Claude Code's internal default. |
-| `AGENT_TYPE` | v1 accepts only `claude-code` (default). v2+ will dispatch to Codex, Aider, etc. |
+| `AGENT_TYPE` | Which agent to install and run. v1 supports only `claude-code` (default). v2+ adds other agents. Unsupported values are rejected at startup. |
+| `CLAUDE_CODE_VERSION` | Pinned Claude Code version installed on first container run. Baked into the image as an ENV default; overridable at runtime for debugging. Ignored when `AGENT_TYPE` is not `claude-code`. |
 | `NO_ACTIVITY_TIMEOUT` | Go duration string (e.g. `20m`, `90s`). If no agent output arrives within this window, agentbox kills the subprocess and exits with status `timeout` (exit code 4). Default: `20m`. Set to `0` to disable. |
 | `RESULT_PATH` | Override where `/result.json` is written. Default: `/tmp/result.json`. |
 

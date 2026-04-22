@@ -4,43 +4,76 @@
 
 agentbox is a Docker container that runs an AI coding agent (Claude
 Code in v1) against a bind-mounted working directory. It receives
-credentials and a prompt via environment variables, spawns the agent,
-streams its output, and writes a structured result file on exit.
+credentials and a prompt via environment variables, installs the
+selected agent, spawns it, streams its output, and writes a structured
+result file on exit.
 
 ## Container Model
 
 ```
 Container (one Docker container, one PID namespace, one filesystem)
-  ├── entrypoint.sh (install agent if needed, exec orchestrator)
-  └── agentbox (Go binary — effective PID 1)
-       └── claude (subprocess via os/exec)
-            └── agent subprocesses (bash, git, npm, python, etc.)
+  └── agentbox (Go binary — ENTRYPOINT, PID 1)
+       └── agent subprocess (claude in v1) via os/exec
+            └── agent's own subprocesses (bash, git, npm, python, etc.)
 ```
 
-Single container, subprocess pattern — no Docker-in-Docker.
+Single container, subprocess pattern — no Docker-in-Docker, no
+entrypoint shell script. The Go binary handles env validation,
+agent installation, subprocess lifecycle, signal forwarding, and
+result.json writing.
 
-## Claude Code Distribution Model
+## Image
 
-agentbox does not bundle Claude Code in the published image. At
-container startup, `entrypoint.sh` runs `npm install -g
-@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}` inside the user's
-container, pulling from Anthropic's official npm registry.
+Built via multi-stage Dockerfile:
 
-Cost: ~15-30 seconds of startup latency per container. Mitigable via a
-shared npm cache volume across spawns.
+- **Stage 1 (`golang:1.24-bookworm`):** compiles the agentbox Go binary
+  statically for `linux/amd64`.
+- **Stage 2 (`debian:bookworm-slim`):** minimal runtime. Contains the
+  language runtimes agents need (Node.js 20 for npm-based agents,
+  Python 3 + pip for pip-based agents), `git`, and `build-essential`.
+  The agentbox binary is copied from Stage 1. Runs as a non-root user
+  (UID 1000).
 
-### Version Pinning
+The published runtime image is ~500 MB. The builder stage doesn't ship.
 
-Each published agentbox image tag corresponds to one pinned Claude Code
-version. Inspect it without running the container via the image's
-`com.anthropic.claude-code.version` label.
+## Agent Install at Startup
 
-For one-off builds against a different version:
+Each supported agent has an `Installer` that knows:
+
+- how to install the agent package (e.g., `npm install -g
+  @anthropic-ai/claude-code@<version>` for Claude Code)
+- what binary to exec (`claude`, `aider`, etc.)
+- how to build its command-line arguments
+- how to detect the installed version
+
+At container startup, agentbox reads `AGENT_TYPE` from the env,
+resolves the installer, and runs `installer.Ensure()` — a no-op if the
+agent is already present, otherwise an install from the official
+package registry (npm / pypi). Install output goes to stderr so it
+appears in container logs.
+
+Language runtimes are pre-installed at image build time (not at
+startup), so `npm install` and `pip install --user` run as the
+non-root user without privilege escalation. Cold-start latency is
+dominated by the agent-package install (~15-30s for Claude Code on a
+cold npm cache).
+
+Agent packages are installed from Anthropic's / PyPI's official
+registries at runtime by the user's container — agentbox does not
+redistribute proprietary agent code in its image.
+
+## Version Pinning
+
+Each agent's version is pinned as a Docker `ARG` (build-time default,
+overridable via `--build-arg`) and exposed as an `ENV` so the Go
+binary sees it at runtime. The pinned version is also recorded in an
+image label (e.g., `com.anthropic.claude-code.version`).
+
+For a one-off build against a different version:
 
 ```sh
 docker build --build-arg CLAUDE_CODE_VERSION=X.Y.Z -t agentbox:custom .
 ```
-
 
 ## Trust Boundary
 

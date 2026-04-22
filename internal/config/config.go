@@ -20,6 +20,7 @@ type Config struct {
 	Model                string
 	MaxTurns             string
 	AgentType            string
+	AgentVersion         string
 
 	// NoActivityTimeout is zero when the detector is disabled.
 	NoActivityTimeout time.Duration
@@ -61,9 +62,7 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("WORK_DIR %q is not accessible: %w", c.WorkDir, err)
 	}
 
-	if c.AgentType != "claude-code" {
-		return nil, fmt.Errorf("AGENT_TYPE %q is not supported in v1 (only claude-code)", c.AgentType)
-	}
+	c.AgentVersion = agentVersionForType(c.AgentType)
 
 	timeout, err := parseNoActivityTimeout(os.Getenv("NO_ACTIVITY_TIMEOUT"))
 	if err != nil {
@@ -76,6 +75,17 @@ func Load() (*Config, error) {
 	}
 
 	return c, nil
+}
+
+// agentVersionForType reads the env var that holds the pinned version
+// for the given agent. Unknown types return "" (the installer dispatch
+// will reject them later with a clearer error).
+func agentVersionForType(agentType string) string {
+	switch agentType {
+	case "claude-code":
+		return os.Getenv("CLAUDE_CODE_VERSION")
+	}
+	return ""
 }
 
 // parseNoActivityTimeout returns the default for "", zero for "0", or

@@ -17,6 +17,7 @@ func setEnv(t *testing.T, want map[string]string) {
 		"MODEL",
 		"MAX_TURNS",
 		"AGENT_TYPE",
+		"CLAUDE_CODE_VERSION",
 		"NO_ACTIVITY_TIMEOUT",
 		"ANTHROPIC_API_KEY",
 		"CLAUDE_CODE_USE_BEDROCK",
@@ -291,21 +292,24 @@ func TestLoad_OptionalFieldsPassThrough(t *testing.T) {
 	}
 }
 
-func TestLoad_UnsupportedAgentType(t *testing.T) {
+func TestLoad_AgentVersionReadFromEnv(t *testing.T) {
 	workDir := t.TempDir()
 	setEnv(t, map[string]string{
-		"STEP_PROMPT":       "do the thing",
-		"WORK_DIR":          workDir,
-		"ANTHROPIC_API_KEY": "sk-ant-test",
-		"AGENT_TYPE":        "codex",
+		"STEP_PROMPT":         "do the thing",
+		"WORK_DIR":            workDir,
+		"ANTHROPIC_API_KEY":   "sk-ant-test",
+		"CLAUDE_CODE_VERSION": "2.1.117",
 	})
 
-	_, err := Load()
-	if err == nil {
-		t.Fatal("expected error for unsupported AGENT_TYPE")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if !strings.Contains(err.Error(), "codex") {
-		t.Errorf("error should mention the unsupported type: %v", err)
+	if cfg.AgentType != "claude-code" {
+		t.Errorf("AgentType = %q, want claude-code (default)", cfg.AgentType)
+	}
+	if cfg.AgentVersion != "2.1.117" {
+		t.Errorf("AgentVersion = %q, want 2.1.117", cfg.AgentVersion)
 	}
 }
 
