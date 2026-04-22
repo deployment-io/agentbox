@@ -5,14 +5,15 @@
 
 **Run AI coding agents in a Docker container with a predictable contract.**
 
-agentbox is an open-source orchestrator that runs an AI coding agent
-(Claude Code in v1) against a bind-mounted working directory. You give
-it a prompt and credentials via environment variables; it installs the
-agent, runs it, streams its output to stdout, and writes a structured
-result to `/result.json`. Consumers don't have to think about stream-json
-parsing, subprocess lifecycle, signal handling, or version pinning —
-agentbox handles it so the same invocation shape works across CI, a
-managed platform, or a local terminal.
+agentbox is an open-source orchestrator that runs AI coding agents in
+a Docker container. You give it a prompt and credentials via environment
+variables; it installs the agent, runs it, streams its output to stdout,
+and writes a structured result to `/result.json`. Consumers don't have
+to think about stream-json parsing, subprocess lifecycle, signal handling,
+or version pinning — agentbox handles it so the same invocation shape
+works across CI, a managed platform, or a local terminal. Pluggable for
+multiple agent backends via a simple `Installer` contract; v1 ships with
+Claude Code.
 
 It's the execution runtime behind [deployment.io](https://deployment.io)
 Tasks but is designed to stand alone — useful to anyone running agents
