@@ -67,11 +67,64 @@ over the network). Mitigable via a per-runner shared npm cache volume
 if consumers opt in. Not typically a concern for Tasks that run
 minutes-to-hours.
 
-### Pinning discipline
+### Version Pinning Policy
 
-`CLAUDE_CODE_VERSION` is set as an ENV in the Dockerfile. Each agentbox
-release corresponds to one Claude Code version. Users who need a
-specific Claude Code version pin agentbox's image tag accordingly.
+`CLAUDE_CODE_VERSION` is pinned to an exact version in the Dockerfile
+as both a build-time `ARG` (overridable) and runtime `ENV` (visible to
+entrypoint.sh and Claude Code's own tooling). Each published agentbox
+image tag corresponds to exactly one Claude Code version. The version
+is also recorded in the image's `com.anthropic.claude-code.version`
+label so consumers can inspect without running the container.
+
+**Why exact pins (not floating / semver ranges):**
+- Reproducibility. A bug reported against `agentbox:v1.0.0` is about
+  the exact Claude Code version baked into that release — not whatever
+  happened to be latest on npm when you rebuilt.
+- Deterministic debugging. Upgrade is an explicit action with a visible
+  diff, not a silent change that broke someone's CI.
+- Supply-chain discipline. Pinning narrows the window between "Claude
+  Code published a bad version" and "agentbox users picked it up."
+
+**When to bump:**
+- Security advisories for Claude Code.
+- Bug fixes we rely on for correctness.
+- New features the agentbox contract or a consumer needs.
+- Otherwise, avoid churn. Pinning is the point — don't bump just
+  because a newer version exists.
+
+**How to bump:**
+1. Update `ARG CLAUDE_CODE_VERSION=X.Y.Z` in the Dockerfile.
+2. Build + test the image against a representative scenario.
+3. Release a new agentbox image tag (per SemVer rules below).
+4. Update the CHANGELOG with the old → new Claude Code version.
+
+**agentbox SemVer in relation to Claude Code version:**
+- A Claude Code version bump alone is a patch release of agentbox
+  (e.g., `v1.0.0` → `v1.0.1`) unless the new Claude Code version
+  introduces behavior that breaks the agentbox contract.
+- Contract-visible changes (new required env var, result.json schema
+  bump, exit code change) are minor or major releases per SemVer.
+
+**Build-time override:**
+
+```sh
+docker build \
+  --build-arg CLAUDE_CODE_VERSION=2.1.114 \
+  -t agentbox:custom .
+```
+
+Useful for testing a different version without editing the Dockerfile.
+Not recommended for production — prefer pulling the matching published
+tag.
+
+**Runtime override (advanced, not recommended):**
+
+Consumers *can* override `CLAUDE_CODE_VERSION` at `docker run` time,
+which causes entrypoint.sh to install a different version at startup.
+This produces an image whose label lies (says vX but runs vY) and
+defeats the pinning rationale — use it only for one-off debugging of
+version-regression scenarios, and don't publish images that depend on
+runtime overrides.
 
 ### Future: bundled image (pending Anthropic approval)
 

@@ -10,9 +10,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Claude Code is NOT baked into this image. It is installed at container
 # startup by entrypoint.sh, pulling from Anthropic's official npm
 # registry. See docs/ARCHITECTURE.md → "Claude Code Distribution Model"
-# for the licensing rationale. Pinning happens here so the image tag
-# maps 1:1 to a specific Claude Code version.
-ENV CLAUDE_CODE_VERSION=latest
+# for the licensing rationale.
+#
+# The version is pinned as a build-time ARG (overridable via
+# `docker build --build-arg CLAUDE_CODE_VERSION=...`) and propagated to
+# the runtime ENV so entrypoint.sh and Claude Code's tooling can see it.
+# The image tag and this version should move in lockstep — see
+# docs/ARCHITECTURE.md → "Version Pinning Policy".
+ARG CLAUDE_CODE_VERSION=2.1.117
+ENV CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION}
 
 LABEL org.opencontainers.image.title="agentbox"
 LABEL org.opencontainers.image.description="Open-source agent orchestrator for Claude Code"
