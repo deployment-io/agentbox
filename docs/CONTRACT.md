@@ -1,7 +1,5 @@
 # agentbox Contract
 
-**Status:** v0 draft. Stable for v1.0.0 release.
-
 agentbox runs an AI coding agent inside a Docker container against a
 bind-mounted working directory and writes a structured result on exit.
 Consumers spawn the container, inject env vars, read stdout/stderr as
@@ -48,22 +46,19 @@ fails fast otherwise.
 | `MAX_TURNS` | Hard cap on agent turns. Default: uncapped (trust wall-clock / no-activity detector). |
 | `MODEL` | Override default model (e.g. `opus`, `haiku`, or a pinned version). Default: Claude Code's internal default. |
 | `AGENT_TYPE` | v1 accepts only `claude-code` (default). v2+ will dispatch to Codex, Aider, etc. |
+| `NO_ACTIVITY_TIMEOUT` | Go duration string (e.g. `20m`, `90s`). If no agent output arrives within this window, agentbox kills the subprocess and exits with status `timeout` (exit code 4). Default: `20m`. Set to `0` to disable. |
 | `RESULT_PATH` | Override where `/result.json` is written. Default: `/tmp/result.json`. |
 
-### Deliberately NOT in the contract
+### Not in the contract
 
-- Task / Step / run identifiers. agentbox doesn't use them functionally.
-  Consumers correlate runs externally based on which container they
-  spawned — no identifier threading through the env.
+- Task / Step / run identifiers.
 
 ## Working Directory
 
 Bind-mounted read-write at `$WORK_DIR` (default `/work`). The agent
 reads and modifies files here. agentbox does not chown, scrub, or
-pre-process it.
-
-agentbox **never writes outside `$WORK_DIR`** except for the result
-file (default `/tmp/result.json`).
+pre-process it, and writes nothing outside `$WORK_DIR` except the
+result file.
 
 ## Outputs
 
@@ -94,14 +89,11 @@ Written on exit. Schema:
 }
 ```
 
-The `error` field is omitted on success. All other fields are always
+The `error` field is omitted on success; all other fields are always
 populated.
 
-Consumers read the result file after the container exits. Recommended
-approaches:
-- Bind-mount a host path and set `RESULT_PATH` to it
-- `docker cp <container>:/tmp/result.json ./` after exit (works even
-  after the container has stopped, before it's removed)
+To read the result file from the host, bind-mount a path and point
+`RESULT_PATH` at it, or `docker cp` the default path after exit.
 
 ### Exit codes
 
@@ -115,8 +107,7 @@ approaches:
 
 ## Signal Handling
 
-- **SIGTERM / SIGINT:** agentbox forwards the signal to the Claude Code
-  subprocess, waits 10 seconds for clean exit, then SIGKILLs. Writes
-  `/tmp/result.json` with `status: "cancelled"` before exiting.
-- **SIGKILL (against agentbox itself):** can't be handled; `/result.json`
-  will be missing. Consumers treat "missing result" as a distinct failure.
+- **SIGTERM / SIGINT:** forwarded to the subprocess with a grace period
+  before SIGKILL. Exits with `status: "cancelled"`, code 3.
+- **SIGKILL against agentbox:** can't be handled; `/result.json` will be
+  missing. Consumers treat that as a distinct failure.

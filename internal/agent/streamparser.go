@@ -12,13 +12,8 @@ import (
 )
 
 // streamParser consumes Claude Code's --output-format=stream-json events
-// line-by-line and accumulates structured state that becomes part of
-// the Outcome.
-//
-// The parser is forgiving by design: a malformed line (invalid JSON,
-// unexpected field type, unknown event type) is silently ignored. A
-// broken line in the middle of a stream doesn't prevent us from
-// capturing whatever valid state came before or after it.
+// line-by-line. Malformed or unknown events are silently skipped so one
+// bad line doesn't drop the rest of the stream.
 type streamParser struct {
 	changesSummary string
 	filesChanged   map[string]struct{}
@@ -38,17 +33,13 @@ func newStreamParser() *streamParser {
 // Returns when r is exhausted. Safe to call from a goroutine.
 func (p *streamParser) Consume(r io.Reader) {
 	scanner := bufio.NewScanner(r)
-	// Claude Code can emit large events (big tool_use inputs or result
-	// messages with full changes_summary). Raise the default 64 KiB limit
-	// to 10 MiB so we don't silently truncate.
+	// Raise the 64 KiB default: tool_use inputs and result summaries can be large.
 	const maxTokenSize = 10 * 1024 * 1024
 	scanner.Buffer(make([]byte, 0, 64*1024), maxTokenSize)
 
 	for scanner.Scan() {
 		p.processLine(scanner.Bytes())
 	}
-	// Don't propagate scanner.Err(): parse errors are non-fatal, and
-	// the outcome carries whatever state we captured.
 }
 
 func (p *streamParser) processLine(line []byte) {
@@ -70,8 +61,6 @@ func (p *streamParser) processLine(line []byte) {
 	}
 }
 
-// streamEvent is a superset of the fields agentbox cares about across
-// all stream-json event types. Unused fields stay nil.
 type streamEvent struct {
 	Type     string          `json:"type"`
 	Message  json.RawMessage `json:"message"`
@@ -82,15 +71,12 @@ type streamEvent struct {
 	Subtype  string          `json:"subtype"`
 }
 
-// streamUsage is Claude Code's token-usage shape in the final result event.
 type streamUsage struct {
 	InputTokens          int `json:"input_tokens"`
 	OutputTokens         int `json:"output_tokens"`
 	CacheReadInputTokens int `json:"cache_read_input_tokens"`
 }
 
-// assistantMessage captures just the content-blocks structure — we dig
-// inside looking for tool_use blocks that modified files.
 type assistantMessage struct {
 	Content []contentBlock `json:"content"`
 }
@@ -141,7 +127,6 @@ func (p *streamParser) processResultEvent(event streamEvent) {
 	}
 }
 
-// isFileModifyingTool returns true for tools that modify files on disk.
 func isFileModifyingTool(name string) bool {
 	switch name {
 	case "Edit", "Write", "MultiEdit", "NotebookEdit":
@@ -150,7 +135,6 @@ func isFileModifyingTool(name string) bool {
 	return false
 }
 
-// filesChangedSorted returns the sorted slice of changed file paths.
 func (p *streamParser) filesChangedSorted() []string {
 	out := make([]string, 0, len(p.filesChanged))
 	for f := range p.filesChanged {
@@ -160,9 +144,8 @@ func (p *streamParser) filesChangedSorted() []string {
 	return out
 }
 
-// isAuthFailure reports whether the parsed state indicates an auth or
-// rate-limit error (distinguishing it from a generic execution failure).
-// Consumers use this to return exit code 2 instead of 1.
+// isAuthFailure reports whether the parsed state looks like an auth or
+// rate-limit error rather than a generic execution failure.
 func (p *streamParser) isAuthFailure() bool {
 	if !p.isError {
 		return false
@@ -174,10 +157,9 @@ func (p *streamParser) isAuthFailure() bool {
 	return hasAuthKeyword(strings.ToLower(p.changesSummary))
 }
 
-// hasAuthKeyword returns true if s contains any keyword that typically
-// indicates authentication or rate-limiting trouble. Heuristic — errors
-// on the side of false-positives (OK: we surface a more actionable
-// message; worst case the user updates a correct key).
+// hasAuthKeyword is a heuristic scan for auth / rate-limit / model-access
+// trouble. Errs toward false-positives — a misclassified auth message is
+// still actionable; missing one leaves the user without guidance.
 func hasAuthKeyword(s string) bool {
 	keywords := []string{
 		"api key",

@@ -3,6 +3,7 @@ package config
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 // setEnv clears the env vars we care about and sets them to the values
@@ -16,6 +17,7 @@ func setEnv(t *testing.T, want map[string]string) {
 		"MODEL",
 		"MAX_TURNS",
 		"AGENT_TYPE",
+		"NO_ACTIVITY_TIMEOUT",
 		"ANTHROPIC_API_KEY",
 		"CLAUDE_CODE_USE_BEDROCK",
 		"AWS_ACCESS_KEY_ID",
@@ -304,5 +306,94 @@ func TestLoad_UnsupportedAgentType(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "codex") {
 		t.Errorf("error should mention the unsupported type: %v", err)
+	}
+}
+
+func TestLoad_NoActivityTimeoutDefault(t *testing.T) {
+	workDir := t.TempDir()
+	setEnv(t, map[string]string{
+		"STEP_PROMPT":       "do the thing",
+		"WORK_DIR":          workDir,
+		"ANTHROPIC_API_KEY": "sk-ant-test",
+	})
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.NoActivityTimeout != 20*time.Minute {
+		t.Errorf("default NoActivityTimeout = %v, want 20m", cfg.NoActivityTimeout)
+	}
+}
+
+func TestLoad_NoActivityTimeoutCustom(t *testing.T) {
+	workDir := t.TempDir()
+	setEnv(t, map[string]string{
+		"STEP_PROMPT":         "do the thing",
+		"WORK_DIR":            workDir,
+		"ANTHROPIC_API_KEY":   "sk-ant-test",
+		"NO_ACTIVITY_TIMEOUT": "5m30s",
+	})
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.NoActivityTimeout != 5*time.Minute+30*time.Second {
+		t.Errorf("NoActivityTimeout = %v, want 5m30s", cfg.NoActivityTimeout)
+	}
+}
+
+func TestLoad_NoActivityTimeoutDisabled(t *testing.T) {
+	workDir := t.TempDir()
+	setEnv(t, map[string]string{
+		"STEP_PROMPT":         "do the thing",
+		"WORK_DIR":            workDir,
+		"ANTHROPIC_API_KEY":   "sk-ant-test",
+		"NO_ACTIVITY_TIMEOUT": "0",
+	})
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.NoActivityTimeout != 0 {
+		t.Errorf("NoActivityTimeout = %v, want 0 (disabled)", cfg.NoActivityTimeout)
+	}
+}
+
+func TestLoad_NoActivityTimeoutInvalid(t *testing.T) {
+	workDir := t.TempDir()
+	setEnv(t, map[string]string{
+		"STEP_PROMPT":         "do the thing",
+		"WORK_DIR":            workDir,
+		"ANTHROPIC_API_KEY":   "sk-ant-test",
+		"NO_ACTIVITY_TIMEOUT": "not-a-duration",
+	})
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error for invalid NO_ACTIVITY_TIMEOUT")
+	}
+	if !strings.Contains(err.Error(), "NO_ACTIVITY_TIMEOUT") {
+		t.Errorf("error should mention the var: %v", err)
+	}
+}
+
+func TestLoad_NoActivityTimeoutNegative(t *testing.T) {
+	workDir := t.TempDir()
+	setEnv(t, map[string]string{
+		"STEP_PROMPT":         "do the thing",
+		"WORK_DIR":            workDir,
+		"ANTHROPIC_API_KEY":   "sk-ant-test",
+		"NO_ACTIVITY_TIMEOUT": "-5m",
+	})
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error for negative NO_ACTIVITY_TIMEOUT")
+	}
+	if !strings.Contains(err.Error(), "non-negative") {
+		t.Errorf("error should mention the sign constraint: %v", err)
 	}
 }

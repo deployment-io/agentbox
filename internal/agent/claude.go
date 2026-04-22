@@ -17,22 +17,20 @@ import (
 	"github.com/deployment-io/agentbox/internal/result"
 )
 
-// shutdownGrace is how long we wait for the Claude Code subprocess to
-// exit cleanly after forwarding SIGTERM, before escalating to SIGKILL.
-// Matches docs/CONTRACT.md's signal handling spec.
+// shutdownGrace is the SIGTERM → SIGKILL wait.
 const shutdownGrace = 10 * time.Second
 
-// Run spawns Claude Code as a subprocess, streams its stdout/stderr to
-// the container's stdout/stderr, parses its --output-format=stream-json
-// events to populate the Outcome, and returns the result. The Outcome
-// is always valid — callers can write it to /result.json regardless of
-// success, failure, cancellation, or timeout.
-//
-// On ctx cancellation (SIGTERM/SIGINT received by agentbox), Run forwards
-// SIGTERM to the subprocess, waits up to shutdownGrace for a clean exit,
-// then escalates to SIGKILL. Any partial state accumulated by the parser
-// (turns so far, files changed so far) is preserved in the cancelled
-// Outcome.
+type cancelReason int
+
+const (
+	reasonSignal cancelReason = iota
+	reasonTimeout
+)
+
+// Run spawns Claude Code, streams its output, parses stream-json, and
+// returns an Outcome (success, failure, cancelled, or timeout). On
+// cancellation or no-activity timeout, forwards SIGTERM with grace
+// before SIGKILL.
 func Run(ctx context.Context, cfg *config.Config) result.Outcome {
 	agentVersion := DetectVersion()
 
@@ -42,10 +40,12 @@ func Run(ctx context.Context, cfg *config.Config) result.Outcome {
 
 	parser := newStreamParser()
 	pr, pw := io.Pipe()
-	cmd.Stdout = io.MultiWriter(os.Stdout, pw)
+	tracker := newActivityTracker()
+
+	cmd.Stdout = io.MultiWriter(os.Stdout, pw, tracker)
 
 	stderrBuf := &bytes.Buffer{}
-	cmd.Stderr = io.MultiWriter(os.Stderr, stderrBuf)
+	cmd.Stderr = io.MultiWriter(os.Stderr, stderrBuf, tracker)
 
 	parseDone := make(chan struct{})
 	go func() {
@@ -63,9 +63,11 @@ func Run(ctx context.Context, cfg *config.Config) result.Outcome {
 		})
 	}
 
-	// Wait for subprocess in a goroutine. On Wait return, close the
-	// pipe so the parser finishes; only then signal `done`. By the
-	// time callers read `done`, parser state is safe to observe.
+	watcherCtx, stopWatcher := context.WithCancel(ctx)
+	defer stopWatcher()
+	timeoutReached := make(chan struct{}, 1)
+	go watchActivity(watcherCtx, tracker, cfg.NoActivityTimeout, timeoutReached)
+
 	done := make(chan error, 1)
 	go func() {
 		err := cmd.Wait()
@@ -78,12 +80,13 @@ func Run(ctx context.Context, cfg *config.Config) result.Outcome {
 	case err := <-done:
 		return withVersion(agentVersion, buildOutcome(err, parser, stderrBuf.String()))
 	case <-ctx.Done():
-		return withVersion(agentVersion, gracefulShutdown(cmd, done, parser, stderrBuf))
+		return withVersion(agentVersion, gracefulShutdown(cmd, done, parser, reasonSignal, cfg.NoActivityTimeout))
+	case <-timeoutReached:
+		fmt.Fprintf(os.Stderr, "[agentbox] no agent output for %s; killing subprocess\n", cfg.NoActivityTimeout)
+		return withVersion(agentVersion, gracefulShutdown(cmd, done, parser, reasonTimeout, cfg.NoActivityTimeout))
 	}
 }
 
-// buildArgs constructs the command-line arguments for the Claude Code
-// invocation. Pure function of cfg — unit-testable without spawning.
 func buildArgs(cfg *config.Config) []string {
 	args := []string{
 		"-p", cfg.StepPrompt,
@@ -99,10 +102,8 @@ func buildArgs(cfg *config.Config) []string {
 	return args
 }
 
-// buildEnv constructs the environment for the Claude Code subprocess.
-// Both credential paths (Anthropic Direct and Bedrock) work via env-var
-// pass-through: Claude Code itself dispatches based on
-// CLAUDE_CODE_USE_BEDROCK. agentbox's role is validation + pass-through.
+// buildEnv forwards the parent env plus optional extras. Credential
+// path dispatch happens inside Claude Code via CLAUDE_CODE_USE_BEDROCK.
 func buildEnv(cfg *config.Config) []string {
 	env := os.Environ()
 	if cfg.PreviousStepsSummary != "" {
@@ -111,40 +112,43 @@ func buildEnv(cfg *config.Config) []string {
 	return env
 }
 
-// gracefulShutdown forwards SIGTERM to the subprocess, waits up to
-// shutdownGrace for it to exit, then escalates to SIGKILL. Returns a
-// cancelled Outcome populated with whatever parser state was captured
-// before cancellation.
-func gracefulShutdown(cmd *exec.Cmd, done <-chan error, parser *streamParser, stderrBuf *bytes.Buffer) result.Outcome {
+func gracefulShutdown(cmd *exec.Cmd, done <-chan error, parser *streamParser, reason cancelReason, timeout time.Duration) result.Outcome {
 	if cmd.Process != nil {
 		_ = cmd.Process.Signal(syscall.SIGTERM)
 	}
 
 	select {
 	case <-done:
-		// Subprocess exited within the grace period.
 	case <-time.After(shutdownGrace):
 		if cmd.Process != nil {
 			_ = cmd.Process.Kill()
 		}
-		<-done // reap the zombie
+		<-done
 	}
 
-	return result.Outcome{
-		Status:         result.StatusCancelled,
-		ExitCode:       result.ExitCancelled,
-		Error:          "cancelled by signal",
+	base := result.Outcome{
 		ChangesSummary: parser.changesSummary,
 		FilesChanged:   parser.filesChangedSorted(),
 		TokenUsage:     parser.usage,
 		Turns:          parser.turns,
 	}
+
+	switch reason {
+	case reasonTimeout:
+		base.Status = result.StatusTimeout
+		base.ExitCode = result.ExitTimeout
+		base.Error = fmt.Sprintf("no agent output for %s; subprocess killed", timeout)
+	default:
+		base.Status = result.StatusCancelled
+		base.ExitCode = result.ExitCancelled
+		base.Error = "cancelled by signal"
+	}
+	return base
 }
 
-// buildOutcome maps a natural subprocess exit into a result.Outcome.
-// Called on the non-cancellation path. Success is narrower than "exit
-// code 0": Claude Code can exit 0 with is_error: true in stream-json
-// (e.g., error_max_turns). Both cases route through classifyFailure.
+// buildOutcome maps a subprocess exit to an Outcome. Claude Code can
+// exit 0 while reporting is_error in stream-json (e.g., max turns);
+// both route through classifyFailure.
 func buildOutcome(err error, parser *streamParser, stderrText string) result.Outcome {
 	if err == nil && !parser.isError {
 		return result.Outcome{
@@ -159,9 +163,7 @@ func buildOutcome(err error, parser *streamParser, stderrText string) result.Out
 	return classifyFailure(err, parser, stderrText)
 }
 
-// classifyFailure constructs a failure Outcome with the right exit code.
-// Auth / rate-limit failures get ExitAuthFailure (2) so consumers can
-// surface an actionable message; everything else gets ExitExecutionFailure (1).
+// classifyFailure picks exit code 2 for auth / rate-limit failures, 1 otherwise.
 func classifyFailure(err error, parser *streamParser, stderrText string) result.Outcome {
 	authFailure := parser.isAuthFailure() || hasAuthKeyword(strings.ToLower(stderrText))
 
@@ -181,8 +183,6 @@ func classifyFailure(err error, parser *streamParser, stderrText string) result.
 	}
 }
 
-// failureMessage produces a descriptive error string from either the
-// subprocess exit error or the parser's recorded error state.
 func failureMessage(err error, parser *streamParser) string {
 	switch {
 	case err != nil && isExitError(err):
@@ -200,16 +200,11 @@ func failureMessage(err error, parser *streamParser) string {
 	}
 }
 
-// isExitError reports whether err is an *exec.ExitError (i.e., the
-// subprocess ran but exited non-zero).
 func isExitError(err error) bool {
 	var exitErr *exec.ExitError
 	return errors.As(err, &exitErr)
 }
 
-// withVersion returns o with AgentVersion populated. Keeps main.go
-// and Run clean — the version is detected once per invocation and
-// attached to every Outcome Run produces.
 func withVersion(version string, o result.Outcome) result.Outcome {
 	o.AgentVersion = version
 	return o

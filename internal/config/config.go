@@ -7,7 +7,10 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 )
+
+const defaultNoActivityTimeout = 20 * time.Minute
 
 // Config captures the validated inputs for one agentbox run.
 type Config struct {
@@ -18,17 +21,18 @@ type Config struct {
 	MaxTurns             string
 	AgentType            string
 
+	// NoActivityTimeout is zero when the detector is disabled.
+	NoActivityTimeout time.Duration
+
 	// Exactly one of AnthropicDirect or Bedrock is populated.
 	AnthropicDirect *AnthropicDirectCreds
 	Bedrock         *BedrockCreds
 }
 
-// AnthropicDirectCreds holds the credentials for the Anthropic Direct path.
 type AnthropicDirectCreds struct {
 	APIKey string
 }
 
-// BedrockCreds holds the credentials for the AWS Bedrock path.
 type BedrockCreds struct {
 	AccessKeyID     string
 	SecretAccessKey string
@@ -61,11 +65,33 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("AGENT_TYPE %q is not supported in v1 (only claude-code)", c.AgentType)
 	}
 
+	timeout, err := parseNoActivityTimeout(os.Getenv("NO_ACTIVITY_TIMEOUT"))
+	if err != nil {
+		return nil, err
+	}
+	c.NoActivityTimeout = timeout
+
 	if err := c.loadCredentials(); err != nil {
 		return nil, err
 	}
 
 	return c, nil
+}
+
+// parseNoActivityTimeout returns the default for "", zero for "0", or
+// a parsed Go duration. Negatives and non-durations are errors.
+func parseNoActivityTimeout(v string) (time.Duration, error) {
+	if v == "" {
+		return defaultNoActivityTimeout, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return 0, fmt.Errorf("invalid NO_ACTIVITY_TIMEOUT %q: %w", v, err)
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("NO_ACTIVITY_TIMEOUT must be non-negative, got %s", d)
+	}
+	return d, nil
 }
 
 func (c *Config) loadCredentials() error {

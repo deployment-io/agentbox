@@ -1,6 +1,4 @@
-// Package signals installs OS signal handlers that cancel a context on
-// SIGTERM / SIGINT. The caller's subprocess should watch the returned
-// context and shut down cleanly.
+// Package signals turns SIGTERM/SIGINT into context cancellation.
 package signals
 
 import (
@@ -10,9 +8,8 @@ import (
 	"syscall"
 )
 
-// NewContext returns a context that is cancelled when SIGTERM or SIGINT
-// is received. The returned cancel function should be called on clean
-// shutdown to release the signal handler goroutine.
+// NewContext returns a context cancelled on SIGTERM or SIGINT. Call the
+// returned CancelFunc on clean shutdown to release the handler goroutine.
 func NewContext(parent context.Context) (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithCancel(parent)
 
