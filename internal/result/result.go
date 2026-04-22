@@ -11,9 +11,10 @@ import (
 // schemaVersion is bumped on breaking changes to the result.json shape.
 const schemaVersion = 1
 
-const (
-	agentType = "claude-code"
-)
+// agentType identifies the agent baked into this agentbox image. v1
+// supports only claude-code; v2+ will dispatch on the AGENT_TYPE env
+// var and set this accordingly.
+const agentType = "claude-code"
 
 // Exit codes per docs/CONTRACT.md.
 const (
@@ -71,6 +72,9 @@ func Path() string {
 }
 
 // Write serializes the Outcome to the configured result path as JSON.
+// Overrides SchemaVersion and AgentType (binary-level invariants) but
+// respects the caller-provided AgentVersion so detection logic can live
+// with the caller (see agent.DetectVersion).
 func Write(o Outcome) error {
 	o.SchemaVersion = schemaVersion
 	o.AgentType = agentType

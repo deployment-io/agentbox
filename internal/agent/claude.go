@@ -2,11 +2,14 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"strings"
 	"syscall"
 	"time"
 
@@ -20,41 +23,62 @@ import (
 const shutdownGrace = 10 * time.Second
 
 // Run spawns Claude Code as a subprocess, streams its stdout/stderr to
-// the container's stdout/stderr, and returns an Outcome describing what
-// happened. The returned Outcome is always valid — callers can write it
-// to /result.json regardless of success or failure.
+// the container's stdout/stderr, parses its --output-format=stream-json
+// events to populate the Outcome, and returns the result. The Outcome
+// is always valid — callers can write it to /result.json regardless of
+// success, failure, cancellation, or timeout.
 //
-// On ctx cancellation (SIGTERM/SIGINT received by agentbox), the handler
-// forwards SIGTERM to the subprocess, waits up to shutdownGrace for a
-// clean exit, then escalates to SIGKILL.
-//
-// v0 scope: happy-path success + cancelled + generic execution failure.
-// TODO(phase-A): parse Claude Code's stream-json for changes_summary,
-// files_changed, token_usage, turns; distinguish auth failures (exit 2);
-// implement no-activity detector.
+// On ctx cancellation (SIGTERM/SIGINT received by agentbox), Run forwards
+// SIGTERM to the subprocess, waits up to shutdownGrace for a clean exit,
+// then escalates to SIGKILL. Any partial state accumulated by the parser
+// (turns so far, files changed so far) is preserved in the cancelled
+// Outcome.
 func Run(ctx context.Context, cfg *config.Config) result.Outcome {
+	agentVersion := DetectVersion()
+
 	cmd := exec.Command("claude", buildArgs(cfg)...)
 	cmd.Dir = cfg.WorkDir
 	cmd.Env = buildEnv(cfg)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+
+	parser := newStreamParser()
+	pr, pw := io.Pipe()
+	cmd.Stdout = io.MultiWriter(os.Stdout, pw)
+
+	stderrBuf := &bytes.Buffer{}
+	cmd.Stderr = io.MultiWriter(os.Stderr, stderrBuf)
+
+	parseDone := make(chan struct{})
+	go func() {
+		defer close(parseDone)
+		parser.Consume(pr)
+	}()
 
 	if err := cmd.Start(); err != nil {
-		return result.Outcome{
+		_ = pw.Close()
+		<-parseDone
+		return withVersion(agentVersion, result.Outcome{
 			Status:   result.StatusFailure,
 			ExitCode: result.ExitExecutionFailure,
 			Error:    fmt.Sprintf("failed to start claude: %v", err),
-		}
+		})
 	}
 
+	// Wait for subprocess in a goroutine. On Wait return, close the
+	// pipe so the parser finishes; only then signal `done`. By the
+	// time callers read `done`, parser state is safe to observe.
 	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
+	go func() {
+		err := cmd.Wait()
+		_ = pw.Close()
+		<-parseDone
+		done <- err
+	}()
 
 	select {
 	case err := <-done:
-		return classifyOutcome(err)
+		return withVersion(agentVersion, buildOutcome(err, parser, stderrBuf.String()))
 	case <-ctx.Done():
-		return gracefulShutdown(cmd, done)
+		return withVersion(agentVersion, gracefulShutdown(cmd, done, parser, stderrBuf))
 	}
 }
 
@@ -89,15 +113,16 @@ func buildEnv(cfg *config.Config) []string {
 
 // gracefulShutdown forwards SIGTERM to the subprocess, waits up to
 // shutdownGrace for it to exit, then escalates to SIGKILL. Returns a
-// cancelled Outcome regardless of how the subprocess exited.
-func gracefulShutdown(cmd *exec.Cmd, done <-chan error) result.Outcome {
+// cancelled Outcome populated with whatever parser state was captured
+// before cancellation.
+func gracefulShutdown(cmd *exec.Cmd, done <-chan error, parser *streamParser, stderrBuf *bytes.Buffer) result.Outcome {
 	if cmd.Process != nil {
 		_ = cmd.Process.Signal(syscall.SIGTERM)
 	}
 
 	select {
 	case <-done:
-		// Subprocess exited within the grace period — clean shutdown.
+		// Subprocess exited within the grace period.
 	case <-time.After(shutdownGrace):
 		if cmd.Process != nil {
 			_ = cmd.Process.Kill()
@@ -106,37 +131,86 @@ func gracefulShutdown(cmd *exec.Cmd, done <-chan error) result.Outcome {
 	}
 
 	return result.Outcome{
-		Status:   result.StatusCancelled,
-		ExitCode: result.ExitCancelled,
-		Error:    "cancelled by signal",
+		Status:         result.StatusCancelled,
+		ExitCode:       result.ExitCancelled,
+		Error:          "cancelled by signal",
+		ChangesSummary: parser.changesSummary,
+		FilesChanged:   parser.filesChangedSorted(),
+		TokenUsage:     parser.usage,
+		Turns:          parser.turns,
 	}
 }
 
-// classifyOutcome maps a subprocess exit error to a result.Outcome.
-// Called on the natural-exit path (no cancellation).
-func classifyOutcome(err error) result.Outcome {
-	if err == nil {
+// buildOutcome maps a natural subprocess exit into a result.Outcome.
+// Called on the non-cancellation path. Success is narrower than "exit
+// code 0": Claude Code can exit 0 with is_error: true in stream-json
+// (e.g., error_max_turns). Both cases route through classifyFailure.
+func buildOutcome(err error, parser *streamParser, stderrText string) result.Outcome {
+	if err == nil && !parser.isError {
 		return result.Outcome{
-			Status:   result.StatusSuccess,
-			ExitCode: result.ExitSuccess,
+			Status:         result.StatusSuccess,
+			ExitCode:       result.ExitSuccess,
+			ChangesSummary: parser.changesSummary,
+			FilesChanged:   parser.filesChangedSorted(),
+			TokenUsage:     parser.usage,
+			Turns:          parser.turns,
 		}
 	}
+	return classifyFailure(err, parser, stderrText)
+}
 
-	// TODO(phase-A): parse stream-json / exit code for auth-failure
-	// detection (returning ExitAuthFailure). For now, any non-zero exit
-	// is an execution failure.
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
-		return result.Outcome{
-			Status:   result.StatusFailure,
-			ExitCode: result.ExitExecutionFailure,
-			Error:    fmt.Sprintf("claude exited with error: %v", err),
-		}
+// classifyFailure constructs a failure Outcome with the right exit code.
+// Auth / rate-limit failures get ExitAuthFailure (2) so consumers can
+// surface an actionable message; everything else gets ExitExecutionFailure (1).
+func classifyFailure(err error, parser *streamParser, stderrText string) result.Outcome {
+	authFailure := parser.isAuthFailure() || hasAuthKeyword(strings.ToLower(stderrText))
+
+	exitCode := result.ExitExecutionFailure
+	if authFailure {
+		exitCode = result.ExitAuthFailure
 	}
 
 	return result.Outcome{
-		Status:   result.StatusFailure,
-		ExitCode: result.ExitExecutionFailure,
-		Error:    fmt.Sprintf("failed to run claude: %v", err),
+		Status:         result.StatusFailure,
+		ExitCode:       exitCode,
+		Error:          failureMessage(err, parser),
+		ChangesSummary: parser.changesSummary,
+		FilesChanged:   parser.filesChangedSorted(),
+		TokenUsage:     parser.usage,
+		Turns:          parser.turns,
 	}
+}
+
+// failureMessage produces a descriptive error string from either the
+// subprocess exit error or the parser's recorded error state.
+func failureMessage(err error, parser *streamParser) string {
+	switch {
+	case err != nil && isExitError(err):
+		return fmt.Sprintf("claude exited with error: %v", err)
+	case err != nil:
+		return fmt.Sprintf("failed to run claude: %v", err)
+	case parser.isError && parser.errorSubtype != "" && parser.changesSummary != "":
+		return fmt.Sprintf("claude reported error (%s): %s", parser.errorSubtype, parser.changesSummary)
+	case parser.isError && parser.errorSubtype != "":
+		return fmt.Sprintf("claude reported error: %s", parser.errorSubtype)
+	case parser.isError:
+		return "claude reported error"
+	default:
+		return "claude reported error with no detail"
+	}
+}
+
+// isExitError reports whether err is an *exec.ExitError (i.e., the
+// subprocess ran but exited non-zero).
+func isExitError(err error) bool {
+	var exitErr *exec.ExitError
+	return errors.As(err, &exitErr)
+}
+
+// withVersion returns o with AgentVersion populated. Keeps main.go
+// and Run clean — the version is detected once per invocation and
+// attached to every Outcome Run produces.
+func withVersion(version string, o result.Outcome) result.Outcome {
+	o.AgentVersion = version
+	return o
 }
