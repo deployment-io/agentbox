@@ -1,0 +1,45 @@
+# Go binaries
+bin/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test binary output
+*.test
+
+# Coverage output
+*.out
+coverage.txt
+
+# Dependency / vendor
+vendor/
+
+# Go workspace
+go.work
+go.work.sum
+
+# Editor / IDE artifacts
+.idea/
+.vscode/
+*.iml
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+
+# Environment / secrets (should never be committed)
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+
+# Build artifacts
+dist/
+build/
+*.tar.gz
+
+# Local scratch
+tmp/
+scratch/
