@@ -1,0 +1,32 @@
+FROM node:20-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      git \
+      build-essential \
+      python3 \
+      ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Claude Code is NOT baked into this image. It is installed at container
+# startup by entrypoint.sh, pulling from Anthropic's official npm
+# registry. See docs/ARCHITECTURE.md → "Claude Code Distribution Model"
+# for the licensing rationale. Pinning happens here so the image tag
+# maps 1:1 to a specific Claude Code version.
+ENV CLAUDE_CODE_VERSION=latest
+
+LABEL org.opencontainers.image.title="agentbox"
+LABEL org.opencontainers.image.description="Open-source agent orchestrator for Claude Code"
+LABEL org.opencontainers.image.source="https://github.com/deployment-io/agentbox"
+LABEL org.opencontainers.image.licenses="Apache-2.0"
+LABEL com.anthropic.claude-code.version="${CLAUDE_CODE_VERSION}"
+LABEL com.anthropic.claude-code.install="runtime"
+
+COPY bin/agentbox /usr/local/bin/agentbox
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh /usr/local/bin/agentbox
+
+RUN useradd -m -u 1000 agent
+USER agent
+WORKDIR /work
+
+ENTRYPOINT ["/entrypoint.sh"]
