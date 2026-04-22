@@ -5,7 +5,7 @@ on:
     tags: ['v*.*.*']
 
 env:
-  REGISTRY_DOCKERHUB: docker.io/deploymentio/agentbox
+  REGISTRY_DOCKERHUB: docker.io/deploymenthq/agentbox
   REGISTRY_GHCR: ghcr.io/deployment-io/agentbox
 
 jobs:

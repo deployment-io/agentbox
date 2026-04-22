@@ -28,7 +28,7 @@ You'll need:
 
 ```bash
 # Pull the image
-docker pull deploymentio/agentbox:latest
+docker pull deploymenthq/agentbox:latest
 
 # Create a scratch output dir (agentbox writes result.json there)
 mkdir -p /tmp/agentbox-out
@@ -41,7 +41,7 @@ docker run --rm \
   -e RESULT_PATH="/scratch/result.json" \
   -v "$(pwd):/work" \
   -v /tmp/agentbox-out:/scratch \
-  deploymentio/agentbox:latest
+  deploymenthq/agentbox:latest
 
 # Inspect the outcome
 cat /tmp/agentbox-out/result.json
