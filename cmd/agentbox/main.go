@@ -15,6 +15,10 @@ import (
 	"github.com/deployment-io/agentbox/internal/config"
 	"github.com/deployment-io/agentbox/internal/result"
 	"github.com/deployment-io/agentbox/internal/signals"
+
+	// Side-effect import: registers "claude-code" as a Driver with the
+	// agent package. To ship additional agents, add their package below.
+	_ "github.com/deployment-io/agentbox/internal/claude"
 )
 
 func main() {
@@ -26,16 +30,16 @@ func main() {
 	ctx, cancel := signals.NewContext(context.Background())
 	defer cancel()
 
-	installer, err := agent.InstallerFor(cfg.AgentType, cfg.AgentVersion)
+	driver, err := agent.DriverFor(cfg.AgentType, cfg.AgentVersion)
 	if err != nil {
-		exitWithFailure("installer error", err)
+		exitWithFailure("driver error", err)
 	}
 
-	if err := installer.Ensure(ctx); err != nil {
+	if err := driver.Ensure(ctx); err != nil {
 		exitWithFailure("agent install failed", err)
 	}
 
-	outcome := agent.Run(ctx, cfg, installer)
+	outcome := agent.Run(ctx, cfg, driver)
 
 	if writeErr := result.Write(outcome); writeErr != nil {
 		fmt.Fprintf(os.Stderr, "[agentbox] failed to write result: %v\n", writeErr)

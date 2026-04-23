@@ -1,36 +1,26 @@
-package agent
+package claude
 
 import (
 	"slices"
-	"strings"
 	"testing"
 
+	"github.com/deployment-io/agentbox/internal/agent"
 	"github.com/deployment-io/agentbox/internal/config"
 )
 
-func TestInstallerFor_Unknown(t *testing.T) {
-	_, err := InstallerFor("codex", "")
-	if err == nil {
-		t.Fatal("expected error for unsupported AGENT_TYPE")
-	}
-	if !strings.Contains(err.Error(), "codex") {
-		t.Errorf("error should name the unsupported type: %v", err)
-	}
-}
-
-func TestInstallerFor_ClaudeCode(t *testing.T) {
-	inst, err := InstallerFor("claude-code", "2.1.117")
+func TestRegistered_ClaudeCode(t *testing.T) {
+	d, err := agent.DriverFor("claude-code", "2.1.117")
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("claude-code should be registered: %v", err)
 	}
-	if inst.Binary() != "claude" {
-		t.Errorf("Binary() = %q, want claude", inst.Binary())
+	if d.Binary() != "claude" {
+		t.Errorf("Binary() = %q, want claude", d.Binary())
 	}
 }
 
-func TestClaudeCodeInstaller_BuildArgs_Minimal(t *testing.T) {
-	inst := &claudeCodeInstaller{}
-	args := inst.BuildArgs(&config.Config{StepPrompt: "hello"})
+func TestBuildArgs_Minimal(t *testing.T) {
+	d := &Driver{}
+	args := d.BuildArgs(&config.Config{StepPrompt: "hello"})
 
 	wantPrefix := []string{"-p", "hello", "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions"}
 	for i, w := range wantPrefix {
@@ -46,9 +36,9 @@ func TestClaudeCodeInstaller_BuildArgs_Minimal(t *testing.T) {
 	}
 }
 
-func TestClaudeCodeInstaller_BuildArgs_WithOverrides(t *testing.T) {
-	inst := &claudeCodeInstaller{}
-	args := inst.BuildArgs(&config.Config{
+func TestBuildArgs_WithOverrides(t *testing.T) {
+	d := &Driver{}
+	args := d.BuildArgs(&config.Config{
 		StepPrompt: "hello",
 		Model:      "opus",
 		MaxTurns:   "50",
@@ -58,10 +48,10 @@ func TestClaudeCodeInstaller_BuildArgs_WithOverrides(t *testing.T) {
 	assertFollowedBy(t, args, "--max-turns", "50")
 }
 
-func TestClaudeCodeInstaller_BuildArgs_PromptIsLiteral(t *testing.T) {
+func TestBuildArgs_PromptIsLiteral(t *testing.T) {
 	tricky := "--not-a-flag"
-	inst := &claudeCodeInstaller{}
-	args := inst.BuildArgs(&config.Config{StepPrompt: tricky})
+	d := &Driver{}
+	args := d.BuildArgs(&config.Config{StepPrompt: tricky})
 
 	for i, a := range args {
 		if a == "-p" {

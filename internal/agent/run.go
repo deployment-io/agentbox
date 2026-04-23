@@ -1,4 +1,3 @@
-// Package agent runs the agent subprocess and captures its outcome.
 package agent
 
 import (
@@ -27,18 +26,18 @@ const (
 	reasonTimeout
 )
 
-// Run spawns the agent subprocess via the Installer, streams its output,
-// parses stream-json, and returns an Outcome (success, failure, cancelled,
-// or timeout). On cancellation or no-activity timeout, forwards SIGTERM
-// with grace before SIGKILL.
-func Run(ctx context.Context, cfg *config.Config, installer Installer) result.Outcome {
-	agentVersion := installer.DetectVersion()
+// Run spawns the agent subprocess via the Driver, streams its output
+// through the Driver's OutputParser, and returns an Outcome (success,
+// failure, cancelled, or timeout). On cancellation or no-activity
+// timeout, forwards SIGTERM with grace before SIGKILL.
+func Run(ctx context.Context, cfg *config.Config, driver Driver) result.Outcome {
+	agentVersion := driver.DetectVersion()
 
-	cmd := exec.Command(installer.Binary(), installer.BuildArgs(cfg)...)
+	cmd := exec.Command(driver.Binary(), driver.BuildArgs(cfg)...)
 	cmd.Dir = cfg.WorkDir
 	cmd.Env = buildEnv(cfg)
 
-	parser := newStreamParser()
+	parser := driver.NewOutputParser()
 	pr, pw := io.Pipe()
 	tracker := newActivityTracker()
 
@@ -59,7 +58,7 @@ func Run(ctx context.Context, cfg *config.Config, installer Installer) result.Ou
 		return withVersion(agentVersion, result.Outcome{
 			Status:   result.StatusFailure,
 			ExitCode: result.ExitExecutionFailure,
-			Error:    fmt.Sprintf("failed to start %s: %v", installer.Binary(), err),
+			Error:    fmt.Sprintf("failed to start %s: %v", driver.Binary(), err),
 		})
 	}
 
@@ -78,7 +77,7 @@ func Run(ctx context.Context, cfg *config.Config, installer Installer) result.Ou
 
 	select {
 	case err := <-done:
-		return withVersion(agentVersion, buildOutcome(err, parser, stderrBuf.String(), installer.Binary()))
+		return withVersion(agentVersion, buildOutcome(err, parser.State(), stderrBuf.String(), driver.Binary()))
 	case <-ctx.Done():
 		return withVersion(agentVersion, gracefulShutdown(cmd, done, parser, reasonSignal, cfg.NoActivityTimeout))
 	case <-timeoutReached:
@@ -87,8 +86,8 @@ func Run(ctx context.Context, cfg *config.Config, installer Installer) result.Ou
 	}
 }
 
-// buildEnv forwards the parent env plus optional extras. Credential
-// path dispatch happens inside the agent via CLAUDE_CODE_USE_BEDROCK.
+// buildEnv forwards the parent env plus optional extras. Credential-path
+// dispatch is the agent's responsibility; agentbox just forwards.
 func buildEnv(cfg *config.Config) []string {
 	env := os.Environ()
 	if cfg.PreviousStepsSummary != "" {
@@ -97,7 +96,7 @@ func buildEnv(cfg *config.Config) []string {
 	return env
 }
 
-func gracefulShutdown(cmd *exec.Cmd, done <-chan error, parser *streamParser, reason cancelReason, timeout time.Duration) result.Outcome {
+func gracefulShutdown(cmd *exec.Cmd, done <-chan error, parser OutputParser, reason cancelReason, timeout time.Duration) result.Outcome {
 	if cmd.Process != nil {
 		_ = cmd.Process.Signal(syscall.SIGTERM)
 	}
@@ -111,11 +110,12 @@ func gracefulShutdown(cmd *exec.Cmd, done <-chan error, parser *streamParser, re
 		<-done
 	}
 
+	state := parser.State()
 	base := result.Outcome{
-		ChangesSummary: parser.changesSummary,
-		FilesChanged:   parser.filesChangedSorted(),
-		TokenUsage:     parser.usage,
-		Turns:          parser.turns,
+		ChangesSummary: state.ChangesSummary,
+		FilesChanged:   state.FilesChanged,
+		TokenUsage:     state.TokenUsage,
+		Turns:          state.Turns,
 	}
 
 	switch reason {
@@ -131,26 +131,26 @@ func gracefulShutdown(cmd *exec.Cmd, done <-chan error, parser *streamParser, re
 	return base
 }
 
-// buildOutcome maps a subprocess exit to an Outcome. The agent can exit
-// 0 while reporting is_error in stream-json (e.g., max turns); both
-// route through classifyFailure.
-func buildOutcome(err error, parser *streamParser, stderrText, binary string) result.Outcome {
-	if err == nil && !parser.isError {
+// buildOutcome maps a subprocess exit to an Outcome. Some agents can
+// exit 0 while reporting is_error in their output (e.g., max turns);
+// both cases route through classifyFailure.
+func buildOutcome(err error, state ParsedState, stderrText, binary string) result.Outcome {
+	if err == nil && !state.IsError {
 		return result.Outcome{
 			Status:         result.StatusSuccess,
 			ExitCode:       result.ExitSuccess,
-			ChangesSummary: parser.changesSummary,
-			FilesChanged:   parser.filesChangedSorted(),
-			TokenUsage:     parser.usage,
-			Turns:          parser.turns,
+			ChangesSummary: state.ChangesSummary,
+			FilesChanged:   state.FilesChanged,
+			TokenUsage:     state.TokenUsage,
+			Turns:          state.Turns,
 		}
 	}
-	return classifyFailure(err, parser, stderrText, binary)
+	return classifyFailure(err, state, stderrText, binary)
 }
 
 // classifyFailure picks exit code 2 for auth / rate-limit failures, 1 otherwise.
-func classifyFailure(err error, parser *streamParser, stderrText, binary string) result.Outcome {
-	authFailure := parser.isAuthFailure() || hasAuthKeyword(strings.ToLower(stderrText))
+func classifyFailure(err error, state ParsedState, stderrText, binary string) result.Outcome {
+	authFailure := state.IsAuthFailure || HasAuthKeyword(strings.ToLower(stderrText))
 
 	exitCode := result.ExitExecutionFailure
 	if authFailure {
@@ -160,25 +160,23 @@ func classifyFailure(err error, parser *streamParser, stderrText, binary string)
 	return result.Outcome{
 		Status:         result.StatusFailure,
 		ExitCode:       exitCode,
-		Error:          failureMessage(err, parser, binary),
-		ChangesSummary: parser.changesSummary,
-		FilesChanged:   parser.filesChangedSorted(),
-		TokenUsage:     parser.usage,
-		Turns:          parser.turns,
+		Error:          failureMessage(err, state, binary),
+		ChangesSummary: state.ChangesSummary,
+		FilesChanged:   state.FilesChanged,
+		TokenUsage:     state.TokenUsage,
+		Turns:          state.Turns,
 	}
 }
 
-func failureMessage(err error, parser *streamParser, binary string) string {
+func failureMessage(err error, state ParsedState, binary string) string {
 	switch {
 	case err != nil && isExitError(err):
 		return fmt.Sprintf("%s exited with error: %v", binary, err)
 	case err != nil:
 		return fmt.Sprintf("failed to run %s: %v", binary, err)
-	case parser.isError && parser.errorSubtype != "" && parser.changesSummary != "":
-		return fmt.Sprintf("%s reported error (%s): %s", binary, parser.errorSubtype, parser.changesSummary)
-	case parser.isError && parser.errorSubtype != "":
-		return fmt.Sprintf("%s reported error: %s", binary, parser.errorSubtype)
-	case parser.isError:
+	case state.IsError && state.ChangesSummary != "":
+		return fmt.Sprintf("%s reported error: %s", binary, state.ChangesSummary)
+	case state.IsError:
 		return binary + " reported error"
 	default:
 		return binary + " reported error with no detail"

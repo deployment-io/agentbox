@@ -1,4 +1,4 @@
-package agent
+package claude
 
 import (
 	"bufio"
@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/deployment-io/agentbox/internal/agent"
 	"github.com/deployment-io/agentbox/internal/result"
 )
 
@@ -24,13 +25,11 @@ type streamParser struct {
 }
 
 func newStreamParser() *streamParser {
-	return &streamParser{
-		filesChanged: make(map[string]struct{}),
-	}
+	return &streamParser{filesChanged: make(map[string]struct{})}
 }
 
 // Consume reads stream-json lines from r and updates internal state.
-// Returns when r is exhausted. Safe to call from a goroutine.
+// Returns when r is exhausted.
 func (p *streamParser) Consume(r io.Reader) {
 	scanner := bufio.NewScanner(r)
 	// Raise the 64 KiB default: tool_use inputs and result summaries can be large.
@@ -39,6 +38,19 @@ func (p *streamParser) Consume(r io.Reader) {
 
 	for scanner.Scan() {
 		p.processLine(scanner.Bytes())
+	}
+}
+
+// State returns the accumulated parse result as an agent.ParsedState.
+// Safe to call after Consume returns.
+func (p *streamParser) State() agent.ParsedState {
+	return agent.ParsedState{
+		ChangesSummary: p.changesSummary,
+		FilesChanged:   p.filesChangedSorted(),
+		TokenUsage:     p.usage,
+		Turns:          p.turns,
+		IsError:        p.isError,
+		IsAuthFailure:  p.isAuthFailure(),
 	}
 }
 
@@ -154,37 +166,5 @@ func (p *streamParser) isAuthFailure() bool {
 	if strings.Contains(subtype, "auth") || strings.Contains(subtype, "api_key") {
 		return true
 	}
-	return hasAuthKeyword(strings.ToLower(p.changesSummary))
-}
-
-// hasAuthKeyword is a heuristic scan for auth / rate-limit / model-access
-// trouble. Errs toward false-positives — a misclassified auth message is
-// still actionable; missing one leaves the user without guidance.
-func hasAuthKeyword(s string) bool {
-	keywords := []string{
-		"api key",
-		"api_key",
-		"apikey",
-		"unauthorized",
-		"authentication",
-		"auth failed",
-		"invalid key",
-		"rate limit",
-		"rate_limit",
-		"ratelimit",
-		"quota",
-		"throttl",
-		"401",
-		"429",
-		"access denied",
-		"accessdenied",
-		"not enabled in region",
-		"model access",
-	}
-	for _, k := range keywords {
-		if strings.Contains(s, k) {
-			return true
-		}
-	}
-	return false
+	return agent.HasAuthKeyword(strings.ToLower(p.changesSummary))
 }
