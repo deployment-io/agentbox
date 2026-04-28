@@ -325,8 +325,8 @@ func TestLoad_NoActivityTimeoutDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfg.NoActivityTimeout != 20*time.Minute {
-		t.Errorf("default NoActivityTimeout = %v, want 20m", cfg.NoActivityTimeout)
+	if cfg.NoActivityTimeout != 10*time.Minute {
+		t.Errorf("default NoActivityTimeout = %v, want 10m", cfg.NoActivityTimeout)
 	}
 }
 

@@ -74,7 +74,7 @@ Full spec: [docs/CONTRACT.md](docs/CONTRACT.md). Summary:
 | `CLAUDE_CODE_VERSION` | Pinned in image | Overridable Claude Code version. |
 | `MODEL` | Agent default | e.g., `opus`, `haiku`, or a pinned version. |
 | `MAX_TURNS` | Uncapped | Hard cap on agent turns. |
-| `NO_ACTIVITY_TIMEOUT` | `20m` | Kill the subprocess if stdout is silent this long. `0` disables. |
+| `NO_ACTIVITY_TIMEOUT` | `10m` | Kill the subprocess if stdout is silent this long. `0` disables. |
 | `PREVIOUS_STEPS_SUMMARY` | — | Free-form context of prior steps for multi-step workflows. |
 
 ### Exit codes

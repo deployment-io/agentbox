@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-const defaultNoActivityTimeout = 20 * time.Minute
+const defaultNoActivityTimeout = 10 * time.Minute
 
 // Config captures the validated inputs for one agentbox run.
 type Config struct {
