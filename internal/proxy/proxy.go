@@ -29,11 +29,14 @@ import (
 	"sync"
 )
 
-// AllowList is a thread-safe set of allowed hostnames. Hostnames are
-// matched exact (case-insensitive); no wildcard / subdomain matching
-// in v1.
+// AllowList is a set of allowed hostnames. Hostnames are matched exact
+// (case-insensitive); no wildcard / subdomain matching in v1.
+//
+// Immutable after construction — built once by NewAllowList, then read
+// concurrently by per-request goroutines. The goroutine-spawn
+// happens-before edge makes the lock-free reads safe. If a runtime
+// reload feature is ever added, add synchronization at that point.
 type AllowList struct {
-	mu    sync.RWMutex
 	hosts map[string]struct{}
 }
 
@@ -53,8 +56,6 @@ func NewAllowList(hosts []string) *AllowList {
 
 // Allows reports whether the given host is in the allowlist.
 func (a *AllowList) Allows(host string) bool {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
 	_, ok := a.hosts[strings.ToLower(host)]
 	return ok
 }
