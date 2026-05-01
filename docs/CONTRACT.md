@@ -49,6 +49,7 @@ fails fast otherwise.
 | `CLAUDE_CODE_VERSION` | Pinned Claude Code version installed on first container run. Baked into the image as an ENV default; overridable at runtime for debugging. Ignored when `AGENT_TYPE` is not `claude-code`. |
 | `NO_ACTIVITY_TIMEOUT` | Go duration string (e.g. `10m`, `90s`). If no agent output arrives within this window, agentbox kills the subprocess and exits with status `timeout` (exit code 4). Default: `10m`. Set to `0` to disable. |
 | `RESULT_PATH` | Override where `/result.json` is written. Default: `/tmp/result.json`. |
+| `ADDITIONAL_ALLOWED_HOSTS` | Comma-separated list of additional hostnames the agent can reach (e.g. `nexus.corp.local,api.linear.app`). Unioned with the active Driver's built-in allowlist (`api.anthropic.com,registry.npmjs.org` for `claude-code`). Empty / unset = only Driver-declared hosts are reachable. See [Network Restrictions](#network-restrictions). |
 
 ### Not in the contract
 
@@ -112,3 +113,29 @@ To read the result file from the host, bind-mount a path and point
   before SIGKILL. Exits with `status: "cancelled"`, code 3.
 - **SIGKILL against agentbox:** can't be handled; `/result.json` will be
   missing. Consumers treat that as a distinct failure.
+
+## Network Restrictions
+
+agentbox starts an HTTP CONNECT proxy on `127.0.0.1:<random-port>`
+before installing the agent and exports `HTTP_PROXY`, `HTTPS_PROXY`,
+`NO_PROXY` env vars to its own process so all child processes (the
+install command, the agent itself) inherit and route through it.
+
+The proxy enforces a hostname allowlist on outbound HTTPS (port 443)
+CONNECT requests:
+
+- **Driver-declared hosts** — each agent ships with its required
+  hostnames (Claude Code: `api.anthropic.com`, `registry.npmjs.org`).
+- **`ADDITIONAL_ALLOWED_HOSTS`** — comma-separated user additions
+  (org-level or per-deploy), unioned with Driver-declared.
+
+Anything outside the union is rejected with HTTP 403 + a log line on
+stderr. Plain HTTP (non-CONNECT) and non-port-443 CONNECTs are also
+rejected — modern HTTPS adoption makes this a reasonable simplification.
+
+**Limits of the protection:** the proxy only catches HTTP/HTTPS traffic
+that respects standard `HTTP_PROXY` env vars (most modern SDKs do —
+Anthropic SDK, npm, pip, requests, fetch, curl). An agent that opens
+raw sockets directly (rare in practice) would bypass. Defense in depth
+at the Docker network layer (cloud-metadata block via `ExtraHosts`,
+future iptables enforcement) covers the bypass case.
