@@ -39,6 +39,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -164,6 +165,19 @@ type Server struct {
 	dialTimeout     time.Duration
 	resolver        ipResolver
 	sem             chan struct{} // semaphore for in-flight tunnels
+
+	// deniedHosts is the dedup set of hostnames the proxy refused
+	// because they weren't on the allowlist. Tracked so the agent run
+	// can write an actionable list into /result.json — the user then
+	// knows which hosts to add to ADDITIONAL_ALLOWED_HOSTS without
+	// digging through stderr. Other deny categories (IP literal,
+	// non-443 port, non-CONNECT method, private IP) are deliberately
+	// NOT tracked here: those represent agent bugs / security-gate
+	// violations rather than allowlist gaps, so surfacing them as
+	// "add to allowlist" suggestions would be misleading. They still
+	// appear in the proxy log for debugging.
+	deniedMu    sync.Mutex
+	deniedHosts map[string]struct{}
 }
 
 // Start binds a listener on 127.0.0.1:<random-port> and serves the
@@ -203,6 +217,7 @@ func Start(allow *AllowList, cfg Config) (*Server, error) {
 		dialTimeout:     dialTimeout,
 		resolver:        resolver,
 		sem:             make(chan struct{}, maxConc),
+		deniedHosts:     make(map[string]struct{}),
 	}
 	go s.serve()
 	return s, nil
@@ -278,6 +293,7 @@ func (s *Server) handle(client net.Conn) {
 		return
 	}
 	if !s.allow.Allows(host) {
+		s.recordAllowlistDeny(host)
 		s.deny(client, http.StatusForbidden, fmt.Sprintf("agentbox proxy: host %q not in allowlist", host), fmt.Sprintf("denied:%s", host))
 		return
 	}
@@ -366,6 +382,35 @@ func isPrivateOrSpecialIP(ip net.IP) bool {
 		}
 	}
 	return false
+}
+
+// recordAllowlistDeny adds host to the dedup set of allowlist-denied
+// hostnames. Hostnames are normalized (lowercased, trimmed, trailing
+// dot stripped) so the same host requested via different casing /
+// fully-qualified-form variants collapses to one entry.
+func (s *Server) recordAllowlistDeny(host string) {
+	host = normalizeHost(host)
+	if host == "" {
+		return
+	}
+	s.deniedMu.Lock()
+	defer s.deniedMu.Unlock()
+	s.deniedHosts[host] = struct{}{}
+}
+
+// DeniedHosts returns a sorted snapshot of hostnames the proxy has
+// refused due to allowlist mismatches over the lifetime of the
+// Server. Sorted output is for deterministic logging / JSON
+// serialization across runs.
+func (s *Server) DeniedHosts() []string {
+	s.deniedMu.Lock()
+	defer s.deniedMu.Unlock()
+	out := make([]string, 0, len(s.deniedHosts))
+	for h := range s.deniedHosts {
+		out = append(out, h)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func (s *Server) deny(client net.Conn, status int, msg, logTag string) {

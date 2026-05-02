@@ -54,6 +54,13 @@ func main() {
 
 	outcome := agent.Run(ctx, cfg, driver)
 
+	// Snapshot allowlist-deny hostnames AFTER agent.Run returns so we
+	// capture every deny across the run lifetime. Tracked by the proxy
+	// itself; we just promote the snapshot into the outcome JSON so
+	// downstream consumers (runner → dashboard) can surface "add this
+	// to your allowlist" suggestions without parsing stderr.
+	outcome.DeniedHosts = proxySrv.DeniedHosts()
+
 	if writeErr := result.Write(outcome); writeErr != nil {
 		fmt.Fprintf(os.Stderr, "[agentbox] failed to write result: %v\n", writeErr)
 	}

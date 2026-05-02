@@ -45,6 +45,17 @@ type Outcome struct {
 	Turns          int        `json:"turns"`
 	Error          string     `json:"error,omitempty"`
 
+	// DeniedHosts is the dedup-sorted list of hostnames the in-process
+	// CONNECT proxy refused because they weren't on the agent's
+	// allowlist. Surfaced so the consumer (the runner / dashboard) can
+	// tell the user "your task tried to reach X but it was blocked —
+	// add it to your allowlist if expected." Empty / omitted when no
+	// denies happened. Other proxy deny categories (IP literal,
+	// non-443 port, non-CONNECT method, private-IP block) are
+	// deliberately not included; those represent agent bugs or
+	// security-gate violations rather than allowlist gaps.
+	DeniedHosts []string `json:"denied_hosts,omitempty"`
+
 	// ExitCode is returned by the process; not part of the JSON shape.
 	ExitCode int `json:"-"`
 }

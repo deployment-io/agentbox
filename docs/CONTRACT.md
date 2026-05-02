@@ -88,12 +88,23 @@ Written on exit. Schema:
     "cache_read_tokens": 0
   },
   "turns": 0,
-  "error": "error description"
+  "error": "error description",
+  "denied_hosts": ["pypi.org", "files.pythonhosted.org"]
 }
 ```
 
 The `error` field is omitted on success; all other fields are always
-populated.
+populated. `denied_hosts` is omitted when no allowlist denies happened
+during the run.
+
+`denied_hosts` lists hostnames the in-process CONNECT proxy refused
+because they weren't on the active allowlist (Driver-declared ∪
+`ADDITIONAL_ALLOWED_HOSTS`). Surfaced so consumers can suggest
+allowlist additions without parsing stderr — see [Network
+Restrictions](#network-restrictions). Other proxy deny categories
+(IP-literal, non-443 port, non-CONNECT method, private-IP block) are
+intentionally NOT included; those represent agent bugs or
+security-gate violations rather than allowlist gaps.
 
 To read the result file from the host, bind-mount a path and point
 `RESULT_PATH` at it, or `docker cp` the default path after exit.

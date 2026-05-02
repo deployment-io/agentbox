@@ -407,6 +407,47 @@ func TestTunnelsAllowedHost(t *testing.T) {
 	_ = port
 }
 
+// TestDeniedHostsTracking pins the contract surfaced to the runner /
+// dashboard for the user-feedback loop: only allowlist denies appear
+// in DeniedHosts(); the result is deduped, normalized (lowercased,
+// trailing-dot stripped), and sorted; other deny categories
+// (IP-literal, non-443 port, non-CONNECT) are NOT recorded since
+// they're agent bugs rather than allowlist gaps.
+func TestDeniedHostsTracking(t *testing.T) {
+	srv := startProxyForTest(t, NewAllowList([]string{"api.anthropic.com"}), Config{})
+	// Allowlist denies — these must show up. Send dup with different
+	// casing and a trailing dot to confirm dedup + normalization.
+	for _, host := range []string{"evil.example.com", "EVIL.EXAMPLE.COM", "evil.example.com.", "second.example.com"} {
+		_ = sendCONNECT(t, srv.Addr(), host, "443")
+	}
+	// Non-443 port — must NOT show up (agent bug, not allowlist gap).
+	_ = sendCONNECT(t, srv.Addr(), "api.anthropic.com", "8080")
+	// IP literal — must NOT show up (security gate, not allowlist).
+	_ = sendCONNECT(t, srv.Addr(), "169.254.169.254", "443")
+
+	got := srv.DeniedHosts()
+	want := []string{"evil.example.com", "second.example.com"}
+	if len(got) != len(want) {
+		t.Fatalf("got %d hosts, want %d. got=%v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("hosts[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// TestDeniedHostsEmptyByDefault pins that a fresh server with no
+// denies returns an empty (not nil) slice ready for JSON
+// "denied_hosts" omission via omitempty.
+func TestDeniedHostsEmptyByDefault(t *testing.T) {
+	srv := startProxyForTest(t, NewAllowList([]string{"example.com"}), Config{})
+	got := srv.DeniedHosts()
+	if len(got) != 0 {
+		t.Errorf("expected empty deny set, got %v", got)
+	}
+}
+
 // TestConcurrentRequests verifies the proxy handles multiple parallel
 // CONNECT attempts without interleaving response writes or deadlocking.
 // All requests target a guaranteed-denied host so the test exercises
