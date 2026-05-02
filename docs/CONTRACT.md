@@ -50,6 +50,7 @@ fails fast otherwise.
 | `NO_ACTIVITY_TIMEOUT` | Go duration string (e.g. `10m`, `90s`). If no agent output arrives within this window, agentbox kills the subprocess and exits with status `timeout` (exit code 4). Default: `10m`. Set to `0` to disable. |
 | `RESULT_PATH` | Override where `/result.json` is written. Default: `/tmp/result.json`. |
 | `ADDITIONAL_ALLOWED_HOSTS` | Comma-separated list of additional hostnames the agent can reach (e.g. `nexus.corp.local,api.linear.app`). Unioned with the active Driver's built-in allowlist (`api.anthropic.com,registry.npmjs.org` for `claude-code`). Empty / unset = only Driver-declared hosts are reachable. See [Network Restrictions](#network-restrictions). |
+| `AGENTBOX_BLOCK_PRIVATE_IPS` | When `1` / `true` / unset (default): the proxy resolves each CONNECT target and rejects the request if any resolved IP is in a private/special range (RFC 1918, 169.254/16 cloud metadata, ULA, loopback, multicast, CGN, …). Closes the SSRF / metadata-IP-via-DNS attack class. Set to `0` / `false` / `no` for runners that legitimately need to reach internal-IP destinations (self-hosted GitLab on `10.0.x.x`, internal Nexus, etc.). See [Network Restrictions](#network-restrictions). |
 
 ### Not in the contract
 
@@ -132,6 +133,26 @@ CONNECT requests:
 Anything outside the union is rejected with HTTP 403 + a log line on
 stderr. Plain HTTP (non-CONNECT) and non-port-443 CONNECTs are also
 rejected — modern HTTPS adoption makes this a reasonable simplification.
+
+Beyond the hostname allowlist, the proxy applies these checks:
+
+- **IP-literal CONNECTs are rejected** (e.g., `CONNECT 169.254.169.254:443`).
+  Forces every request through DNS, where the resolved address can be
+  validated.
+- **Resolved IPs are validated against a private-IP deny-list** (RFC 1918,
+  169.254/16, ULA, loopback, multicast, CGN, class-E reserved). An
+  allowlisted hostname that resolves to one of these is rejected with
+  HTTP 403. Disable per-runner with `AGENTBOX_BLOCK_PRIVATE_IPS=0`.
+- **Dial uses the validated IP literal**, not the hostname. Defeats DNS
+  rebinding between the validation lookup and the upstream dial.
+- **Hostnames are normalized** (case-folded, whitespace-trimmed, trailing
+  dot stripped) before allowlist lookup so `api.anthropic.com.` doesn't
+  bypass an `api.anthropic.com` entry.
+- **Loopback and wildcard hostnames are hard-denied** (`localhost`,
+  `127.0.0.1`, `0.0.0.0`, `::1`) regardless of allowlist contents —
+  defends against fat-fingered allowlist entries.
+- **Concurrency cap and CONNECT-handshake timeout** bound resource
+  exposure; a slow/silent client is dropped and its slot reclaimed.
 
 **Limits of the protection:** the proxy only catches HTTP/HTTPS traffic
 that respects standard `HTTP_PROXY` env vars (most modern SDKs do —

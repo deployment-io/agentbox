@@ -77,6 +77,11 @@ func exitWithFailure(label string, err error) {
 // built-in allowlist applies. Empty Driver.AllowedHosts() AND empty
 // env var means the agent can't reach anything — surfaces immediately
 // as a denied CONNECT in the agent's own error output.
+//
+// Private-IP blocking defaults on (defense vs SSRF / cloud-metadata
+// resolution). Ops who legitimately need to reach internal RFC 1918
+// destinations (Nexus on 10.0.x.x, internal GitLab, etc.) can opt out
+// per-runner via AGENTBOX_BLOCK_PRIVATE_IPS=0.
 func startProxy(driver agent.Driver) (*proxy.Server, error) {
 	allowed := append([]string{}, driver.AllowedHosts()...)
 	if extra := strings.TrimSpace(os.Getenv("ADDITIONAL_ALLOWED_HOSTS")); extra != "" {
@@ -86,7 +91,11 @@ func startProxy(driver agent.Driver) (*proxy.Server, error) {
 			}
 		}
 	}
-	srv, err := proxy.Start(proxy.NewAllowList(allowed), os.Stderr)
+	cfg := proxy.Config{
+		Logger:          os.Stderr,
+		BlockPrivateIPs: blockPrivateIPsFromEnv(),
+	}
+	srv, err := proxy.Start(proxy.NewAllowList(allowed), cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -98,6 +107,19 @@ func startProxy(driver agent.Driver) (*proxy.Server, error) {
 	// NO_PROXY guards localhost so e.g. agent-internal RPC can bypass.
 	_ = os.Setenv("NO_PROXY", "127.0.0.1,localhost")
 	_ = os.Setenv("no_proxy", "127.0.0.1,localhost")
-	fmt.Fprintf(os.Stderr, "[agentbox] proxy started on %s; allowlist: %s\n", srv.Addr(), strings.Join(allowed, ","))
+	fmt.Fprintf(os.Stderr, "[agentbox] proxy started on %s; allowlist: %s; block_private_ips: %t\n",
+		srv.Addr(), strings.Join(allowed, ","), cfg.BlockPrivateIPs)
 	return srv, nil
+}
+
+// blockPrivateIPsFromEnv reads AGENTBOX_BLOCK_PRIVATE_IPS. Default
+// true (block). "0", "false", or "no" (case-insensitive) opts out for
+// runners that legitimately need to reach internal private-IP
+// destinations.
+func blockPrivateIPsFromEnv() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("AGENTBOX_BLOCK_PRIVATE_IPS"))) {
+	case "0", "false", "no":
+		return false
+	}
+	return true
 }
