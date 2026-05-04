@@ -139,6 +139,79 @@ func TestStopIsIdempotent(t *testing.T) {
 	w.Stop() // must not panic / deadlock
 }
 
+// TestSkipsWriteWhenContentUnchanged pins the dedup contract: a
+// write() with the same source content as the prior write must NOT
+// touch the file. Without this, the runner's downstream dedup
+// (which keys off UpdatedAtUnix) misfires every tick and the
+// heartbeat forwards redundant payloads.
+//
+// Detection: each real write stamps a fresh UpdatedAtUnix. After
+// two back-to-back write()s with identical source content, the
+// persisted UpdatedAtUnix must equal the value from the first write
+// — proof that the second write was skipped. Then we change the
+// source and confirm the next write fires (UpdatedAtUnix advances,
+// content reflects the change).
+//
+// Calls write() directly rather than going through Start/loop —
+// keeps the test fast and deterministic regardless of WriteInterval.
+func TestSkipsWriteWhenContentUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	src := &fakeSource{}
+	src.set(Snapshot{Turns: 5, InputTokens: 100, OutputTokens: 50, CacheReadTokens: 200})
+
+	w := NewWriter(dir, src)
+
+	// First write — no prior baseline, must fire.
+	if err := w.write(); err != nil {
+		t.Fatalf("first write: %v", err)
+	}
+	first := readPersistedSnapshot(t, dir)
+	if first.UpdatedAtUnix == 0 {
+		t.Fatal("first write didn't stamp UpdatedAtUnix")
+	}
+
+	// Sleep past 1s so the next write would observe a different
+	// UpdatedAtUnix value if it actually fired (UpdatedAtUnix is
+	// unix-second resolution).
+	time.Sleep(1100 * time.Millisecond)
+
+	// Second write with identical source → must be skipped.
+	if err := w.write(); err != nil {
+		t.Fatalf("second write: %v", err)
+	}
+	second := readPersistedSnapshot(t, dir)
+	if second.UpdatedAtUnix != first.UpdatedAtUnix {
+		t.Errorf("write was not skipped: UpdatedAtUnix advanced from %d to %d despite identical source content",
+			first.UpdatedAtUnix, second.UpdatedAtUnix)
+	}
+
+	// Third write after content change → must fire and reflect new content.
+	src.set(Snapshot{Turns: 6, InputTokens: 200, OutputTokens: 80, CacheReadTokens: 300})
+	if err := w.write(); err != nil {
+		t.Fatalf("third write: %v", err)
+	}
+	third := readPersistedSnapshot(t, dir)
+	if third.UpdatedAtUnix == first.UpdatedAtUnix {
+		t.Error("write did not fire after content change: UpdatedAtUnix unchanged")
+	}
+	if third.Turns != 6 || third.InputTokens != 200 {
+		t.Errorf("third write didn't reflect new source content: %+v", third)
+	}
+}
+
+func readPersistedSnapshot(t *testing.T, dir string) Snapshot {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(dir, Filename))
+	if err != nil {
+		t.Fatalf("read persisted snapshot: %v", err)
+	}
+	var s Snapshot
+	if err := json.Unmarshal(data, &s); err != nil {
+		t.Fatalf("unmarshal persisted snapshot: %v", err)
+	}
+	return s
+}
+
 // TestStopWithoutStartIsNoOp pins that Stop is safe to call when
 // Start was never invoked — defends against deferred-cleanup paths
 // where Stop fires before construction is complete (e.g., a panic

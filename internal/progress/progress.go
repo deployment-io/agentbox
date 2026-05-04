@@ -43,9 +43,12 @@ const Filename = "progress.json"
 const schemaVersion = 1
 
 // WriteInterval is the cadence at which the writer snapshots the
-// source. Sized below the runner's 5s heartbeat so each heartbeat
-// reads a fresh snapshot.
-const WriteInterval = 3 * time.Second
+// source. Matched to the runner's 5s heartbeat — there's no benefit
+// to writing faster than the slowest downstream reader. With the
+// content-change dedup below, no-change ticks are also a no-op
+// (skip the disk write entirely), so the cadence's only real cost
+// is for ticks that actually have new data to publish.
+const WriteInterval = 5 * time.Second
 
 // Snapshot is the on-disk shape of `progress.json`. Mirrors the runner-
 // kit `LiveProgressV1` struct field-for-field so the runner can
@@ -86,6 +89,16 @@ type Writer struct {
 	started   atomic.Bool
 	startOnce sync.Once
 	stopOnce  sync.Once
+
+	// lastWritten holds the most-recently-persisted Snapshot's content
+	// fields (Turns + token counts) so write() can skip when the
+	// source's current state is bit-for-bit identical. Without this,
+	// every tick stamps a fresh UpdatedAtUnix and the runner forwards
+	// a "new" payload even when nothing changed — wasting heartbeat
+	// RPCs and a server-side write per tick when the agent is between
+	// turns. Only accessed from the loop goroutine, so no sync needed.
+	lastWritten    Snapshot
+	hasLastWritten bool
 }
 
 // NewWriter constructs a Writer that will drop `progress.json` into
@@ -144,8 +157,19 @@ func (w *Writer) loop() {
 // atomically renames into place. Errors are returned for the caller
 // to log; the loop ignores them (a transient disk error shouldn't
 // kill the goroutine — the next tick retries).
+//
+// Skips the write entirely (returns nil) when the source's content
+// is bit-for-bit identical to the last persisted snapshot. This
+// keeps `UpdatedAtUnix` honest about its semantic ("when did the
+// underlying state last change") and lets the runner's downstream
+// dedup actually fire — without it, every tick stamps a fresh
+// timestamp and the runner forwards a redundant payload via
+// heartbeat. The first write always happens (no prior baseline).
 func (w *Writer) write() error {
 	snap := w.src.Snapshot()
+	if w.hasLastWritten && sameContent(snap, w.lastWritten) {
+		return nil
+	}
 	snap.SchemaVersion = schemaVersion
 	snap.UpdatedAtUnix = time.Now().Unix()
 
@@ -159,5 +183,20 @@ func (w *Writer) write() error {
 	if err := os.WriteFile(tmp, data, 0o644); err != nil {
 		return err
 	}
-	return os.Rename(tmp, final)
+	if err := os.Rename(tmp, final); err != nil {
+		return err
+	}
+	w.lastWritten = snap
+	w.hasLastWritten = true
+	return nil
+}
+
+// sameContent reports whether two Snapshots have identical "content"
+// fields — the data the agent actually emits, excluding the
+// stamped-by-Writer SchemaVersion and UpdatedAtUnix.
+func sameContent(a, b Snapshot) bool {
+	return a.Turns == b.Turns &&
+		a.InputTokens == b.InputTokens &&
+		a.OutputTokens == b.OutputTokens &&
+		a.CacheReadTokens == b.CacheReadTokens
 }
