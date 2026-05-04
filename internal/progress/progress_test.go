@@ -139,6 +139,29 @@ func TestStopIsIdempotent(t *testing.T) {
 	w.Stop() // must not panic / deadlock
 }
 
+// TestStopWithoutStartIsNoOp pins that Stop is safe to call when
+// Start was never invoked — defends against deferred-cleanup paths
+// where Stop fires before construction is complete (e.g., a panic
+// in NewWriter's caller before Start could be reached). Without the
+// `started` guard in Stop, the bare `<-w.doneCh` would block
+// forever waiting for a goroutine that was never spawned. Test
+// guards against regression by running Stop in a goroutine and
+// asserting it returns within a tight deadline.
+func TestStopWithoutStartIsNoOp(t *testing.T) {
+	w := NewWriter(t.TempDir(), &fakeSource{})
+	done := make(chan struct{})
+	go func() {
+		w.Stop()
+		close(done)
+	}()
+	select {
+	case <-done:
+		// Stop returned cleanly — contract upheld.
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop without Start blocked indefinitely")
+	}
+}
+
 // TestStartIsIdempotent pins symmetrically that Start can be called
 // multiple times without spawning multiple goroutines (which would
 // cause double-writes to the same file).

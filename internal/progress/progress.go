@@ -30,6 +30,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -77,6 +78,12 @@ type Writer struct {
 	stopCh chan struct{}
 	doneCh chan struct{}
 
+	// started flips once via Start. Stop reads this to decide whether
+	// to wait on doneCh — without the guard, calling Stop without
+	// Start (e.g., from a panic-recovery deferred cleanup that runs
+	// before Start was reached) would block forever waiting for a
+	// goroutine that was never spawned.
+	started   atomic.Bool
 	startOnce sync.Once
 	stopOnce  sync.Once
 }
@@ -95,13 +102,22 @@ func NewWriter(dir string, src Source) *Writer {
 // Start spawns the periodic-write goroutine. Idempotent — safe to
 // call multiple times; only the first invocation actually starts.
 func (w *Writer) Start() {
-	w.startOnce.Do(func() { go w.loop() })
+	w.startOnce.Do(func() {
+		w.started.Store(true)
+		go w.loop()
+	})
 }
 
 // Stop signals the loop to exit and waits for it. The loop performs
 // a final write before returning so the runner sees the latest state
-// even if Stop fires immediately after Start. Idempotent.
+// even if Stop fires immediately after Start. Idempotent. Stop without
+// a prior Start is a no-op (returns immediately) — defends against
+// deferred-cleanup paths where Stop fires before construction is
+// complete.
 func (w *Writer) Stop() {
+	if !w.started.Load() {
+		return
+	}
 	w.stopOnce.Do(func() { close(w.stopCh) })
 	<-w.doneCh
 }
