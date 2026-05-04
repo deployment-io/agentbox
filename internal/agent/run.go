@@ -8,13 +8,31 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/deployment-io/agentbox/internal/config"
+	"github.com/deployment-io/agentbox/internal/progress"
 	"github.com/deployment-io/agentbox/internal/result"
 )
+
+// parserProgressSource adapts an OutputParser into a progress.Source.
+// Returns the parser's current State as a flat Snapshot. Called by the
+// progress writer's loop on its own cadence (independent of agent
+// output rate).
+type parserProgressSource struct{ p OutputParser }
+
+func (s parserProgressSource) Snapshot() progress.Snapshot {
+	st := s.p.State()
+	return progress.Snapshot{
+		Turns:           st.Turns,
+		InputTokens:     st.TokenUsage.InputTokens,
+		OutputTokens:    st.TokenUsage.OutputTokens,
+		CacheReadTokens: st.TokenUsage.CacheReadTokens,
+	}
+}
 
 // shutdownGrace is the SIGTERM → SIGKILL wait.
 const shutdownGrace = 10 * time.Second
@@ -40,6 +58,17 @@ func Run(ctx context.Context, cfg *config.Config, driver Driver) result.Outcome 
 	parser := driver.NewOutputParser()
 	pr, pw := io.Pipe()
 	tracker := newActivityTracker()
+
+	// Phase 5.5b: live progress snapshots into <result-dir>/progress.json.
+	// The runner polls the file on its existing 5s heartbeat cadence and
+	// forwards the snapshot to the server, where the dashboard surfaces
+	// it as live turn / token counters. Stop is deferred so the final
+	// flush happens before Run returns — without it, the heartbeat
+	// following Run completion would see a snapshot up to WriteInterval
+	// stale (or worse, the file might not exist yet for a fast run).
+	progressWriter := progress.NewWriter(filepath.Dir(result.Path()), parserProgressSource{p: parser})
+	progressWriter.Start()
+	defer progressWriter.Stop()
 
 	cmd.Stdout = io.MultiWriter(os.Stdout, pw, tracker)
 

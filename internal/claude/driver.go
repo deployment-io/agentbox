@@ -31,6 +31,21 @@ type Driver struct {
 	version string
 }
 
+// AllowedHosts is the network allowlist Claude Code legitimately needs:
+//   - api.anthropic.com — the Anthropic API endpoint Claude Code calls
+//   - registry.npmjs.org — the npm registry, hit by Driver.Ensure on
+//     first container startup (`npm install -g @anthropic-ai/claude-code`)
+//
+// Phase 8 (Bedrock support) will conditionally add Bedrock runtime
+// endpoints (bedrock-runtime.<region>.amazonaws.com) when the env-var
+// dispatch picks Bedrock instead of Anthropic Direct.
+func (d *Driver) AllowedHosts() []string {
+	return []string{
+		"api.anthropic.com",
+		"registry.npmjs.org",
+	}
+}
+
 func (d *Driver) Ensure(ctx context.Context) error {
 	if _, err := exec.LookPath(d.Binary()); err == nil {
 		return nil

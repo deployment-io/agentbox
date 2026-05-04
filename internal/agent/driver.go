@@ -12,14 +12,21 @@ import (
 	"github.com/deployment-io/agentbox/internal/result"
 )
 
-// Driver encapsulates per-agent concerns: install, exec, version, output.
-// Implementations live in agent-specific packages (claude, aider, ...).
+// Driver encapsulates per-agent concerns: install, exec, version, output,
+// and the network-allowlist for the built-in proxy. Implementations live
+// in agent-specific packages (claude, aider, ...).
 type Driver interface {
 	Ensure(ctx context.Context) error
 	Binary() string
 	BuildArgs(cfg *config.Config) []string
 	DetectVersion() string
 	NewOutputParser() OutputParser
+	// AllowedHosts returns the hostnames this agent legitimately needs
+	// outbound HTTPS access to (e.g., its API endpoint, package registry
+	// for install). The agentbox proxy unions this with the user-supplied
+	// ADDITIONAL_ALLOWED_HOSTS env var to form the final allowlist.
+	// Empty slice == agent doesn't need any outbound access.
+	AllowedHosts() []string
 }
 
 // OutputParser consumes an agent's output stream and accumulates
