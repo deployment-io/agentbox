@@ -70,6 +70,32 @@ result file.
 Claude Code's output, forwarded verbatim. Consumers capture via Docker
 `ContainerLogs`.
 
+### `<result-dir>/progress.json` (live snapshot)
+
+Written periodically (~every 3s) into the same directory as
+`/result.json` while the agent is running. Atomic: each update goes
+through `progress.json.tmp` + rename, so consumers never observe a
+partially-written file. Schema:
+
+```json
+{
+  "schema_version": 1,
+  "updated_at_unix": 1714859123,
+  "turns": 12,
+  "input_tokens": 30000,
+  "output_tokens": 5000,
+  "cache_read_tokens": 100000
+}
+```
+
+The file is meant for *in-flight* polling — typically by an
+orchestrator that wants to surface a live progress UI. Final values
+are also present in `/result.json`'s `turns` and `token_usage` fields,
+so consumers that don't need live counters can ignore `progress.json`
+entirely. Removed at container exit (cleaned up alongside the rest of
+the work directory by the orchestrator); not part of the persistent
+output.
+
 ### `/tmp/result.json` (or `$RESULT_PATH`)
 
 Written on exit. Schema:
