@@ -30,7 +30,29 @@ type Driver interface {
 }
 
 // OutputParser consumes an agent's output stream and accumulates
-// structured state the orchestrator reads after the subprocess exits.
+// structured state the orchestrator reads.
+//
+// Concurrency contract:
+//
+//   - Consume(r) is called from one goroutine — the Run loop's reader.
+//     Implementations don't need to guard against concurrent Consume
+//     calls.
+//
+//   - State() MUST be safe to call concurrently with Consume(). The
+//     progress writer (internal/progress) snapshots State() on its own
+//     ticker while the agent's output is still streaming through
+//     Consume(); without synchronization the snapshot could observe a
+//     torn read (e.g., turns counter updated but token usage not yet
+//     reflecting the same event) or a data race on a map/slice mid-
+//     mutation. The progress writer was added in Phase 5.5b; the
+//     pre-Phase-5.5b assumption that State() was only called after
+//     Consume returned no longer holds.
+//
+//     Typical implementation: a sync.Mutex guarding every mutation
+//     inside Consume's event-handling path, plus State() taking the
+//     lock and returning a copy of the accumulated state. See
+//     internal/claude/parser.go's streamParser for the reference
+//     pattern.
 type OutputParser interface {
 	Consume(r io.Reader)
 	State() ParsedState
