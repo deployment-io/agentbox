@@ -50,12 +50,19 @@ import (
 // loopback or wildcard addresses — these never represent legitimate
 // outbound destinations for the agent, so blocking them unconditionally
 // is safer than trusting the allowlist contents.
+//
+// Note: IPv6 loopback is "::1" without brackets. The bracket form
+// "[::1]" never reaches Allows because net.SplitHostPort strips
+// brackets during host:port parsing (CONNECT [::1]:443 produces
+// host="::1"), so a bracketed entry here would be unreachable.
+// TestBracketedIPv6IsStrippedBeforeAllowlistLookup pins this
+// invariant — if a future Go change ever stops stripping brackets,
+// that test fails and points us back here.
 var hardDenyHosts = map[string]struct{}{
 	"localhost": {},
 	"127.0.0.1": {},
 	"0.0.0.0":   {},
 	"::1":       {},
-	"[::1]":     {},
 }
 
 // AllowList is a set of allowed hostnames. Hostnames are matched exact

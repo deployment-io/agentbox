@@ -67,6 +67,52 @@ func TestAllowListHardDeny(t *testing.T) {
 	}
 }
 
+// TestBracketedIPv6IsStrippedBeforeAllowlistLookup pins the upstream
+// normalization that justifies removing "[::1]" from hardDenyHosts.
+//
+// Background: an earlier revision listed both "::1" and "[::1]" in
+// hardDenyHosts as defense-in-depth for IPv6 loopback. The bracket
+// form was removed because net.SplitHostPort strips brackets during
+// host:port parsing in the proxy's request-handling path — by the
+// time Allows() is called, the host is always already unbracketed.
+//
+// This test pins the two halves of that argument:
+//
+//  1. net.SplitHostPort("[::1]:443") returns host="::1" (no brackets).
+//     The proxy's handle() relies on this — Allows() never observes
+//     a bracketed host in production.
+//
+//  2. The unbracketed form "::1" remains hard-denied, so removing
+//     "[::1]" from hardDenyHosts loses no coverage. CONNECT
+//     [::1]:443 is still rejected — by the IP-literal check upstream
+//     of the allowlist (covered by TestRejectsIPLiteralCONNECT) and,
+//     if that check were ever bypassed, by the "::1" hard-deny entry.
+//
+// If a future Go release ever stops stripping brackets in
+// SplitHostPort, this test fails and points back at hardDenyHosts —
+// "[::1]" would need to come back to preserve the invariant.
+func TestBracketedIPv6IsStrippedBeforeAllowlistLookup(t *testing.T) {
+	host, port, err := net.SplitHostPort("[::1]:443")
+	if err != nil {
+		t.Fatalf("SplitHostPort(\"[::1]:443\"): unexpected error %v", err)
+	}
+	if host != "::1" {
+		t.Errorf("net.SplitHostPort stripped-brackets invariant broken: host = %q, want %q",
+			host, "::1")
+	}
+	if port != "443" {
+		t.Errorf("port = %q, want 443", port)
+	}
+
+	// The unbracketed form (what Allows actually sees in production)
+	// remains hard-denied. Adding "::1" to an allowlist does NOT
+	// override the hard-deny.
+	a := NewAllowList([]string{"::1"})
+	if a.Allows("::1") {
+		t.Error(`"::1" must remain hard-denied; removing "[::1]" from hardDenyHosts must not have removed the unbracketed entry too`)
+	}
+}
+
 // startTestServer spins an HTTPS test server and returns its host:port.
 // Caller must Close it. Backed by an httptest.Server with TLS so the
 // test exercises the real CONNECT-then-tunnel-TLS code path.
