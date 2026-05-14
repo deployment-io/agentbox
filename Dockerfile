@@ -41,14 +41,17 @@ ENV NPM_CONFIG_PREFIX=/home/agent/.npm-global
 ENV NPM_CONFIG_UPDATE_NOTIFIER=false
 ENV PATH=/home/agent/.npm-global/bin:/home/agent/.local/bin:$PATH
 
-# Disable Claude Code telemetry / auto-updater / feedback surveys.
-# agentbox runs in a sandboxed environment with a strict outbound
-# proxy allowlist; non-essential phone-home traffic (Datadog logs,
-# auto-update checks, in-session surveys) generates proxy-deny noise
-# and serves no purpose here. Per Anthropic's settings docs.
-ENV CLAUDE_CODE_ENABLE_TELEMETRY=0
+# Disable Claude Code non-essential outbound traffic. The master
+# CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC variable kills telemetry
+# (Datadog metrics — the traffic that was generating proxy-deny
+# noise), Sentry error reporting, the /feedback command, and session
+# quality surveys in one knob. DO_NOT_TRACK is the industry-standard
+# equivalent — set both for belt-and-suspenders. DISABLE_AUTOUPDATER
+# stays since auto-update checks aren't covered by the master switch.
+# Per https://code.claude.com/docs/en/data-usage
+ENV CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+ENV DO_NOT_TRACK=1
 ENV DISABLE_AUTOUPDATER=1
-ENV CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1
 
 # Agent version pins. Overridable at build time via --build-arg or at
 # runtime via docker run -e. The Go binary reads these on startup and
