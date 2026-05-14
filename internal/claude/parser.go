@@ -7,6 +7,7 @@ import (
 	"io"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/deployment-io/agentbox/internal/agent"
 	"github.com/deployment-io/agentbox/internal/result"
@@ -15,7 +16,13 @@ import (
 // streamParser consumes Claude Code's --output-format=stream-json events
 // line-by-line. Malformed or unknown events are silently skipped so one
 // bad line doesn't drop the rest of the stream.
+//
+// State() is safe to call concurrently with Consume() — needed by the
+// progress writer (Phase 5.5b) which snapshots the parser every few
+// seconds while Consume is still running. mu guards every field
+// mutated by processLine and read by State.
 type streamParser struct {
+	mu             sync.Mutex
 	changesSummary string
 	filesChanged   map[string]struct{}
 	turns          int
@@ -42,15 +49,18 @@ func (p *streamParser) Consume(r io.Reader) {
 }
 
 // State returns the accumulated parse result as an agent.ParsedState.
-// Safe to call after Consume returns.
+// Safe to call concurrently with Consume — locks while copying out
+// the snapshot so the caller never observes a torn read.
 func (p *streamParser) State() agent.ParsedState {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	return agent.ParsedState{
 		ChangesSummary: p.changesSummary,
-		FilesChanged:   p.filesChangedSorted(),
+		FilesChanged:   p.filesChangedSortedLocked(),
 		TokenUsage:     p.usage,
 		Turns:          p.turns,
 		IsError:        p.isError,
-		IsAuthFailure:  p.isAuthFailure(),
+		IsAuthFailure:  p.isAuthFailureLocked(),
 	}
 }
 
@@ -111,6 +121,10 @@ func (p *streamParser) processAssistantMessage(raw json.RawMessage) {
 	if err := json.Unmarshal(raw, &msg); err != nil {
 		return
 	}
+	// Lock only around the actual field mutation; JSON parse above is
+	// read-only on its inputs and shouldn't hold the lock.
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	for _, b := range msg.Content {
 		if b.Type != "tool_use" || !isFileModifyingTool(b.Name) {
 			continue
@@ -126,6 +140,8 @@ func (p *streamParser) processAssistantMessage(raw json.RawMessage) {
 }
 
 func (p *streamParser) processResultEvent(event streamEvent) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.changesSummary = event.Result
 	p.turns = event.NumTurns
 	p.isError = event.IsError
@@ -147,7 +163,9 @@ func isFileModifyingTool(name string) bool {
 	return false
 }
 
-func (p *streamParser) filesChangedSorted() []string {
+// filesChangedSortedLocked returns a sorted snapshot of the changed-file
+// set. Caller must hold p.mu.
+func (p *streamParser) filesChangedSortedLocked() []string {
 	out := make([]string, 0, len(p.filesChanged))
 	for f := range p.filesChanged {
 		out = append(out, f)
@@ -156,9 +174,10 @@ func (p *streamParser) filesChangedSorted() []string {
 	return out
 }
 
-// isAuthFailure reports whether the parsed state looks like an auth or
-// rate-limit error rather than a generic execution failure.
-func (p *streamParser) isAuthFailure() bool {
+// isAuthFailureLocked reports whether the parsed state looks like an
+// auth or rate-limit error rather than a generic execution failure.
+// Caller must hold p.mu.
+func (p *streamParser) isAuthFailureLocked() bool {
 	if !p.isError {
 		return false
 	}

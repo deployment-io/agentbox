@@ -12,11 +12,12 @@ import (
 // fakeDriver implements Driver with trivial behavior for registry tests.
 type fakeDriver struct{ version string }
 
-func (f *fakeDriver) Ensure(context.Context) error           { return nil }
-func (f *fakeDriver) Binary() string                         { return "fake-agent" }
-func (f *fakeDriver) BuildArgs(*config.Config) []string      { return nil }
-func (f *fakeDriver) DetectVersion() string                  { return f.version }
-func (f *fakeDriver) NewOutputParser() OutputParser          { return &fakeParser{} }
+func (f *fakeDriver) Ensure(context.Context) error      { return nil }
+func (f *fakeDriver) Binary() string                    { return "fake-agent" }
+func (f *fakeDriver) BuildArgs(*config.Config) []string { return nil }
+func (f *fakeDriver) DetectVersion() string             { return f.version }
+func (f *fakeDriver) NewOutputParser() OutputParser     { return &fakeParser{} }
+func (f *fakeDriver) AllowedHosts() []string            { return nil }
 
 type fakeParser struct{}
 

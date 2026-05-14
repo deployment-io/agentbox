@@ -12,18 +12,47 @@ import (
 	"github.com/deployment-io/agentbox/internal/result"
 )
 
-// Driver encapsulates per-agent concerns: install, exec, version, output.
-// Implementations live in agent-specific packages (claude, aider, ...).
+// Driver encapsulates per-agent concerns: install, exec, version, output,
+// and the network-allowlist for the built-in proxy. Implementations live
+// in agent-specific packages (claude, aider, ...).
 type Driver interface {
 	Ensure(ctx context.Context) error
 	Binary() string
 	BuildArgs(cfg *config.Config) []string
 	DetectVersion() string
 	NewOutputParser() OutputParser
+	// AllowedHosts returns the hostnames this agent legitimately needs
+	// outbound HTTPS access to (e.g., its API endpoint, package registry
+	// for install). The agentbox proxy unions this with the user-supplied
+	// ADDITIONAL_ALLOWED_HOSTS env var to form the final allowlist.
+	// Empty slice == agent doesn't need any outbound access.
+	AllowedHosts() []string
 }
 
 // OutputParser consumes an agent's output stream and accumulates
-// structured state the orchestrator reads after the subprocess exits.
+// structured state the orchestrator reads.
+//
+// Concurrency contract:
+//
+//   - Consume(r) is called from one goroutine — the Run loop's reader.
+//     Implementations don't need to guard against concurrent Consume
+//     calls.
+//
+//   - State() MUST be safe to call concurrently with Consume(). The
+//     progress writer (internal/progress) snapshots State() on its own
+//     ticker while the agent's output is still streaming through
+//     Consume(); without synchronization the snapshot could observe a
+//     torn read (e.g., turns counter updated but token usage not yet
+//     reflecting the same event) or a data race on a map/slice mid-
+//     mutation. The progress writer was added in Phase 5.5b; the
+//     pre-Phase-5.5b assumption that State() was only called after
+//     Consume returned no longer holds.
+//
+//     Typical implementation: a sync.Mutex guarding every mutation
+//     inside Consume's event-handling path, plus State() taking the
+//     lock and returning a copy of the accumulated state. See
+//     internal/claude/parser.go's streamParser for the reference
+//     pattern.
 type OutputParser interface {
 	Consume(r io.Reader)
 	State() ParsedState
