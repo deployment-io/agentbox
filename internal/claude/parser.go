@@ -29,6 +29,11 @@ type streamParser struct {
 	usage          result.TokenUsage
 	isError        bool
 	errorSubtype   string
+	// model is the most recently observed Claude model identifier
+	// (e.g., "claude-opus-4-7"). Claude Code emits it on the
+	// system.init event and also on each assistant message; last seen
+	// wins, so a mid-run reroute (rare but possible) is reflected.
+	model string
 }
 
 func newStreamParser() *streamParser {
@@ -61,6 +66,7 @@ func (p *streamParser) State() agent.ParsedState {
 		Turns:          p.turns,
 		IsError:        p.isError,
 		IsAuthFailure:  p.isAuthFailureLocked(),
+		Model:          p.model,
 	}
 }
 
@@ -76,6 +82,16 @@ func (p *streamParser) processLine(line []byte) {
 	}
 
 	switch event.Type {
+	case "system":
+		// Claude Code emits {"type":"system","subtype":"init","model":"..."}
+		// as the first line of every run. Captured here so the model
+		// is available even on runs that fail before any assistant
+		// message arrives.
+		if event.Subtype == "init" && event.Model != "" {
+			p.mu.Lock()
+			p.model = event.Model
+			p.mu.Unlock()
+		}
 	case "assistant":
 		p.processAssistantMessage(event.Message)
 	case "result":
@@ -91,6 +107,7 @@ type streamEvent struct {
 	NumTurns int             `json:"num_turns"`
 	IsError  bool            `json:"is_error"`
 	Subtype  string          `json:"subtype"`
+	Model    string          `json:"model"`
 }
 
 type streamUsage struct {
@@ -101,6 +118,10 @@ type streamUsage struct {
 
 type assistantMessage struct {
 	Content []contentBlock `json:"content"`
+	// Model is the model handling this specific message. Tracked as a
+	// fallback for runs where system.init didn't fire (e.g., truncated
+	// stream) — last seen wins, mirroring Claude Code's own rerouting.
+	Model string `json:"model"`
 }
 
 type contentBlock struct {
@@ -125,6 +146,9 @@ func (p *streamParser) processAssistantMessage(raw json.RawMessage) {
 	// read-only on its inputs and shouldn't hold the lock.
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if msg.Model != "" {
+		p.model = msg.Model
+	}
 	for _, b := range msg.Content {
 		if b.Type != "tool_use" || !isFileModifyingTool(b.Name) {
 			continue

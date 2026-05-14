@@ -66,6 +66,13 @@ type ParsedState struct {
 	Turns          int
 	IsError        bool
 	IsAuthFailure  bool
+
+	// Model is the actual model identifier the agent reported using
+	// (when the agent exposes one). Generic across agents — each parser
+	// populates from whatever its protocol surfaces, or leaves empty.
+	// For Claude Code, captured from the stream-json system.init event
+	// (with assistant-message.model as a fallback).
+	Model string
 }
 
 // DriverFactory builds a Driver for the given pinned version.

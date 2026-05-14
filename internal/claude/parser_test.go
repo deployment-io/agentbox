@@ -100,6 +100,59 @@ func TestStreamParser_EmptyStream(t *testing.T) {
 	}
 }
 
+func TestStreamParser_CapturesModelFromSystemInit(t *testing.T) {
+	p := newStreamParser()
+	p.Consume(strings.NewReader(`
+{"type":"system","subtype":"init","model":"claude-opus-4-7","session_id":"abc"}
+{"type":"result","result":"done","num_turns":1,"is_error":false}
+`))
+
+	if got := p.State().Model; got != "claude-opus-4-7" {
+		t.Errorf("Model = %q, want claude-opus-4-7 (from system.init)", got)
+	}
+}
+
+func TestStreamParser_ModelFallsBackToAssistantMessage(t *testing.T) {
+	// No system.init event — verifies the assistant-message fallback
+	// path still captures the model. In practice Claude Code always
+	// emits init first, but the fallback guards against truncated
+	// streams where init was dropped.
+	p := newStreamParser()
+	p.Consume(strings.NewReader(`
+{"type":"assistant","message":{"model":"claude-sonnet-4-6","content":[{"type":"text","text":"hi"}]}}
+{"type":"result","result":"done","num_turns":1,"is_error":false}
+`))
+
+	if got := p.State().Model; got != "claude-sonnet-4-6" {
+		t.Errorf("Model = %q, want claude-sonnet-4-6 (from assistant message)", got)
+	}
+}
+
+func TestStreamParser_LastSeenModelWins(t *testing.T) {
+	// Mid-run rerouting is rare but possible; assert the parser
+	// reflects the most recent model rather than the first.
+	p := newStreamParser()
+	p.Consume(strings.NewReader(`
+{"type":"system","subtype":"init","model":"claude-opus-4-7"}
+{"type":"assistant","message":{"model":"claude-sonnet-4-6","content":[{"type":"text","text":"x"}]}}
+`))
+
+	if got := p.State().Model; got != "claude-sonnet-4-6" {
+		t.Errorf("Model = %q, want last-seen claude-sonnet-4-6", got)
+	}
+}
+
+func TestStreamParser_ModelEmptyWhenNeverReported(t *testing.T) {
+	p := newStreamParser()
+	p.Consume(strings.NewReader(`
+{"type":"result","result":"done","num_turns":1,"is_error":false}
+`))
+
+	if got := p.State().Model; got != "" {
+		t.Errorf("Model = %q, want empty when never reported", got)
+	}
+}
+
 func TestStreamParser_IsAuthFailure(t *testing.T) {
 	tests := []struct {
 		name   string
