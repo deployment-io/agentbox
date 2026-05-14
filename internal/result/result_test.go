@@ -38,6 +38,86 @@ func TestWrite_AlwaysSetsSchemaAndAgentType(t *testing.T) {
 	}
 }
 
+// Once the orchestrator started forwarding the configured AGENT_TYPE
+// through cfg, Write must pass it through unchanged rather than
+// overwriting with a built-in constant — otherwise a future "codex"
+// agent's result.json would still report "claude-code".
+func TestWrite_AgentTypePassedThroughWhenSet(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "result.json")
+	t.Setenv("RESULT_PATH", path)
+
+	if err := Write(Outcome{
+		Status:    StatusSuccess,
+		AgentType: "codex",
+	}); err != nil {
+		t.Fatalf("Write returned error: %v", err)
+	}
+
+	raw, _ := os.ReadFile(path)
+	var parsed map[string]any
+	_ = json.Unmarshal(raw, &parsed)
+
+	if got, _ := parsed["agent_type"].(string); got != "codex" {
+		t.Errorf("agent_type = %v, want codex", parsed["agent_type"])
+	}
+}
+
+// New "what actually ran" metadata fields must round-trip — they're
+// emitted via omitempty so we also assert presence when set and absence
+// when not. The dashboard's defensive untyped access depends on these
+// being either valid JSON values or absent, never JSON null.
+func TestWrite_RunMetadataRoundTrips(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "result.json")
+	t.Setenv("RESULT_PATH", path)
+
+	if err := Write(Outcome{
+		Status:       StatusSuccess,
+		AgentType:    "claude-code",
+		AgentVersion: "2.1.117",
+		Model:        "claude-opus-4-7",
+		StartedAt:    1731600000,
+		EndedAt:      1731600135,
+	}); err != nil {
+		t.Fatalf("Write returned error: %v", err)
+	}
+
+	raw, _ := os.ReadFile(path)
+	var parsed map[string]any
+	_ = json.Unmarshal(raw, &parsed)
+
+	if got, _ := parsed["model"].(string); got != "claude-opus-4-7" {
+		t.Errorf("model = %v, want claude-opus-4-7", parsed["model"])
+	}
+	if got, _ := parsed["agent_version"].(string); got != "2.1.117" {
+		t.Errorf("agent_version = %v, want 2.1.117", parsed["agent_version"])
+	}
+	if got, _ := parsed["started_at"].(float64); int64(got) != 1731600000 {
+		t.Errorf("started_at = %v, want 1731600000", parsed["started_at"])
+	}
+	if got, _ := parsed["ended_at"].(float64); int64(got) != 1731600135 {
+		t.Errorf("ended_at = %v, want 1731600135", parsed["ended_at"])
+	}
+}
+
+func TestWrite_OmitsRunMetadataWhenUnset(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "result.json")
+	t.Setenv("RESULT_PATH", path)
+
+	if err := Write(Outcome{Status: StatusSuccess}); err != nil {
+		t.Fatalf("Write returned error: %v", err)
+	}
+
+	raw, _ := os.ReadFile(path)
+	var parsed map[string]any
+	_ = json.Unmarshal(raw, &parsed)
+
+	for _, key := range []string{"model", "started_at", "ended_at"} {
+		if _, present := parsed[key]; present {
+			t.Errorf("%s should be omitted when unset, got: %v", key, parsed[key])
+		}
+	}
+}
+
 func TestWrite_FilesChangedDefaultsToEmptyArray(t *testing.T) {
 	// An empty array in JSON is more friendly to consumers than null.
 	path := filepath.Join(t.TempDir(), "result.json")

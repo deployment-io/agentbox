@@ -11,8 +11,12 @@ import (
 // schemaVersion is bumped on breaking changes to the result.json shape.
 const schemaVersion = 1
 
-// agentType is "claude-code" for v1. v2+ will dispatch on AGENT_TYPE.
-const agentType = "claude-code"
+// defaultAgentType is the fallback used when the caller hasn't populated
+// Outcome.AgentType — namely the pre-config WriteFailure paths in main,
+// which fire before AGENT_TYPE has been read from the environment. The
+// orchestrator (agent.Run) always sets AgentType from cfg.AgentType
+// explicitly, so on the happy path this constant is unused.
+const defaultAgentType = "claude-code"
 
 // Exit codes per docs/CONTRACT.md.
 const (
@@ -45,6 +49,26 @@ type Outcome struct {
 	Turns          int        `json:"turns"`
 	Error          string     `json:"error,omitempty"`
 
+	// Model is the actual model identifier the agent reported using
+	// (e.g., "claude-opus-4-7"). Captured from the agent's output
+	// stream — for Claude Code, the system.init event of its
+	// stream-json. Distinct from cfg.Model (the user-requested value),
+	// which may be empty when the user picked the server-side default
+	// or which Claude Code may have routed differently. Empty when the
+	// agent never reported one (e.g., crashed before init).
+	Model string `json:"model,omitempty"`
+
+	// StartedAt is the unix-second timestamp captured just before the
+	// agent subprocess was started. Pairs with EndedAt to make
+	// wall-clock duration self-describing on the result file rather
+	// than implicit in surrounding Job timestamps.
+	StartedAt int64 `json:"started_at,omitempty"`
+
+	// EndedAt is the unix-second timestamp captured when the agent
+	// subprocess exited (any path: success, failure, cancelled,
+	// timeout).
+	EndedAt int64 `json:"ended_at,omitempty"`
+
 	// DeniedHosts is the dedup-sorted list of hostnames the in-process
 	// CONNECT proxy refused because they weren't on the agent's
 	// allowlist. Surfaced so the consumer (the runner / dashboard) can
@@ -75,11 +99,15 @@ func Path() string {
 	return "/tmp/result.json"
 }
 
-// Write serializes the Outcome as JSON. SchemaVersion and AgentType are
-// overwritten; AgentVersion is passed through (caller sets it).
+// Write serializes the Outcome as JSON. SchemaVersion is overwritten;
+// AgentType falls back to "claude-code" only when the caller didn't
+// populate it (so pre-config WriteFailure paths still emit a value);
+// the rest of the fields pass through.
 func Write(o Outcome) error {
 	o.SchemaVersion = schemaVersion
-	o.AgentType = agentType
+	if o.AgentType == "" {
+		o.AgentType = defaultAgentType
+	}
 	if o.FilesChanged == nil {
 		o.FilesChanged = []string{}
 	}

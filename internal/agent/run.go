@@ -48,7 +48,15 @@ const (
 // through the Driver's OutputParser, and returns an Outcome (success,
 // failure, cancelled, or timeout). On cancellation or no-activity
 // timeout, forwards SIGTERM with grace before SIGKILL.
-func Run(ctx context.Context, cfg *config.Config, driver Driver) result.Outcome {
+//
+// The returned Outcome carries metadata about what actually ran —
+// AgentType (from cfg), AgentVersion (from Driver.DetectVersion),
+// Model (last value the parser observed in the agent's output stream,
+// when exposed), and StartedAt/EndedAt unix-second timestamps around
+// the subprocess. These are populated via a single deferred snapshot
+// regardless of which return path fires so the result file is
+// self-describing for any exit type.
+func Run(ctx context.Context, cfg *config.Config, driver Driver) (outcome result.Outcome) {
 	agentVersion := driver.DetectVersion()
 
 	cmd := exec.Command(driver.Binary(), driver.BuildArgs(cfg)...)
@@ -81,14 +89,32 @@ func Run(ctx context.Context, cfg *config.Config, driver Driver) result.Outcome 
 		parser.Consume(pr)
 	}()
 
+	// startedAt is captured immediately before cmd.Start so the value
+	// reflects when agentbox actually launched the subprocess; endedAt
+	// is captured the moment cmd.Wait returns (or, on a Start failure,
+	// right after the failed Start). All return paths through this
+	// function ensure parseDone has closed before the deferred snapshot
+	// reads parser.State(), so the model lookup races neither Consume
+	// nor a torn read.
+	var startedAt, endedAt int64
+	defer func() {
+		outcome.AgentType = cfg.AgentType
+		outcome.AgentVersion = agentVersion
+		outcome.StartedAt = startedAt
+		outcome.EndedAt = endedAt
+		outcome.Model = parser.State().Model
+	}()
+
+	startedAt = time.Now().Unix()
 	if err := cmd.Start(); err != nil {
 		_ = pw.Close()
 		<-parseDone
-		return withVersion(agentVersion, result.Outcome{
+		endedAt = time.Now().Unix()
+		return result.Outcome{
 			Status:   result.StatusFailure,
 			ExitCode: result.ExitExecutionFailure,
 			Error:    fmt.Sprintf("failed to start %s: %v", driver.Binary(), err),
-		})
+		}
 	}
 
 	watcherCtx, stopWatcher := context.WithCancel(ctx)
@@ -99,6 +125,10 @@ func Run(ctx context.Context, cfg *config.Config, driver Driver) result.Outcome 
 	done := make(chan error, 1)
 	go func() {
 		err := cmd.Wait()
+		// endedAt is written before the channel send; any later read
+		// after <-done observes the write (channel-send happens-before
+		// channel-receive).
+		endedAt = time.Now().Unix()
 		_ = pw.Close()
 		<-parseDone
 		done <- err
@@ -106,12 +136,12 @@ func Run(ctx context.Context, cfg *config.Config, driver Driver) result.Outcome 
 
 	select {
 	case err := <-done:
-		return withVersion(agentVersion, buildOutcome(err, parser.State(), stderrBuf.String(), driver.Binary()))
+		return buildOutcome(err, parser.State(), stderrBuf.String(), driver.Binary())
 	case <-ctx.Done():
-		return withVersion(agentVersion, gracefulShutdown(cmd, done, parser, reasonSignal, cfg.NoActivityTimeout))
+		return gracefulShutdown(cmd, done, parser, reasonSignal, cfg.NoActivityTimeout)
 	case <-timeoutReached:
 		fmt.Fprintf(os.Stderr, "[agentbox] no agent output for %s; killing subprocess\n", cfg.NoActivityTimeout)
-		return withVersion(agentVersion, gracefulShutdown(cmd, done, parser, reasonTimeout, cfg.NoActivityTimeout))
+		return gracefulShutdown(cmd, done, parser, reasonTimeout, cfg.NoActivityTimeout)
 	}
 }
 
@@ -215,9 +245,4 @@ func failureMessage(err error, state ParsedState, binary string) string {
 func isExitError(err error) bool {
 	var exitErr *exec.ExitError
 	return errors.As(err, &exitErr)
-}
-
-func withVersion(version string, o result.Outcome) result.Outcome {
-	o.AgentVersion = version
-	return o
 }
