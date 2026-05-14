@@ -56,7 +56,7 @@ ENV DISABLE_AUTOUPDATER=1
 # Agent version pins. Overridable at build time via --build-arg or at
 # runtime via docker run -e. The Go binary reads these on startup and
 # installs the selected agent.
-ARG CLAUDE_CODE_VERSION=2.1.117
+ARG CLAUDE_CODE_VERSION=2.1.141
 ENV CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION}
 
 LABEL org.opencontainers.image.title="agentbox"
