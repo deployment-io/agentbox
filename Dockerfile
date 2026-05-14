@@ -34,12 +34,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Non-root user with pre-configured per-user install prefixes, so
 # runtime `npm install -g` and `pip install --user` work without root.
 RUN useradd -m -u 1000 agent \
-    && mkdir -p /work /home/agent/.npm-global \
-    && chown -R agent:agent /work /home/agent/.npm-global
+    && mkdir -p /work /scratch /home/agent/.npm-global \
+    && chown -R agent:agent /work /scratch /home/agent/.npm-global
 
 ENV NPM_CONFIG_PREFIX=/home/agent/.npm-global
 ENV NPM_CONFIG_UPDATE_NOTIFIER=false
 ENV PATH=/home/agent/.npm-global/bin:/home/agent/.local/bin:$PATH
+
+# Disable Claude Code telemetry / auto-updater / feedback surveys.
+# agentbox runs in a sandboxed environment with a strict outbound
+# proxy allowlist; non-essential phone-home traffic (Datadog logs,
+# auto-update checks, in-session surveys) generates proxy-deny noise
+# and serves no purpose here. Per Anthropic's settings docs.
+ENV CLAUDE_CODE_ENABLE_TELEMETRY=0
+ENV DISABLE_AUTOUPDATER=1
+ENV CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1
 
 # Agent version pins. Overridable at build time via --build-arg or at
 # runtime via docker run -e. The Go binary reads these on startup and
