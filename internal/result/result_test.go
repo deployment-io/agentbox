@@ -181,6 +181,46 @@ func TestWriteFailure(t *testing.T) {
 	}
 }
 
+// TestWrite_ExitCodeRoundTrips pins the v1.1.4 fix: ExitCode is now
+// emitted in result.json (was `json:"-"` pre-v1.1.4). The
+// deployment-runner ignores the container's wait exit code and reads
+// status/exit_code from result.json, so without this field the runner
+// couldn't tell apart "agent crashed" (1) from "auth/rate-limit" (2)
+// from "timeout" (4) — every failure looked the same on the dashboard.
+func TestWrite_ExitCodeRoundTrips(t *testing.T) {
+	cases := []struct {
+		name string
+		code int
+	}{
+		{"success", ExitSuccess},
+		{"execution_failure", ExitExecutionFailure},
+		{"auth_failure", ExitAuthFailure},
+		{"cancelled", ExitCancelled},
+		{"timeout", ExitTimeout},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "result.json")
+			t.Setenv("RESULT_PATH", path)
+			if err := Write(Outcome{Status: StatusSuccess, ExitCode: tc.code}); err != nil {
+				t.Fatalf("Write returned error: %v", err)
+			}
+			raw, _ := os.ReadFile(path)
+			var parsed map[string]any
+			if err := json.Unmarshal(raw, &parsed); err != nil {
+				t.Fatalf("result.json is not valid JSON: %v", err)
+			}
+			got, present := parsed["exit_code"].(float64)
+			if !present {
+				t.Fatalf("exit_code field missing from result.json: %s", string(raw))
+			}
+			if int(got) != tc.code {
+				t.Errorf("exit_code = %d, want %d", int(got), tc.code)
+			}
+		})
+	}
+}
+
 func TestPath_Default(t *testing.T) {
 	t.Setenv("RESULT_PATH", "")
 	if Path() != "/tmp/result.json" {
