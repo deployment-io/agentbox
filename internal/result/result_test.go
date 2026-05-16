@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestWrite_AlwaysSetsSchemaAndAgentType(t *testing.T) {
@@ -116,6 +117,78 @@ func TestWrite_OmitsRunMetadataWhenUnset(t *testing.T) {
 		if _, present := parsed[key]; present {
 			t.Errorf("%s should be omitted when unset, got: %v", key, parsed[key])
 		}
+	}
+}
+
+// TestCapPRTitle_BoundaryAndOverflow pins the hard cap behavior of
+// capPRTitle: titles up to prTitleMaxRunes are passed through verbatim,
+// longer titles are truncated to (prTitleMaxRunes-1) runes plus a
+// single ellipsis rune.
+func TestCapPRTitle_BoundaryAndOverflow(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"empty stays empty", "", ""},
+		{"short stays short", "Fix race in worker pool", "Fix race in worker pool"},
+		{"exactly at cap", strings.Repeat("x", prTitleMaxRunes), strings.Repeat("x", prTitleMaxRunes)},
+		{"one over cap", strings.Repeat("x", prTitleMaxRunes+1), strings.Repeat("x", prTitleMaxRunes-1) + "…"},
+		{"way over cap", strings.Repeat("x", 500), strings.Repeat("x", prTitleMaxRunes-1) + "…"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := capPRTitle(tc.in); got != tc.want {
+				t.Errorf("capPRTitle(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestCapPRTitle_MultiByteRuneSafe confirms the cap counts runes, not
+// bytes — a long title made of CJK or emoji characters would otherwise
+// be truncated mid-codepoint by a byte-length cap and produce invalid
+// UTF-8 in result.json.
+func TestCapPRTitle_MultiByteRuneSafe(t *testing.T) {
+	title := strings.Repeat("漢", 100) // 100 runes, 300 bytes
+	got := capPRTitle(title)
+	if utf8.RuneCountInString(got) != prTitleMaxRunes {
+		t.Errorf("capped title rune count = %d, want %d", utf8.RuneCountInString(got), prTitleMaxRunes)
+	}
+	if !utf8.ValidString(got) {
+		t.Errorf("capped title is not valid UTF-8: %q", got)
+	}
+	if !strings.HasSuffix(got, "…") {
+		t.Errorf("capped title should end with ellipsis: %q", got)
+	}
+}
+
+// TestWrite_PRTitleHardCappedOnWrite is the end-to-end pin: when the
+// agent ignores the soft cap and emits a long title, Write truncates
+// before serialization so consumers reading result.json never see a
+// runaway PR title slot.
+func TestWrite_PRTitleHardCappedOnWrite(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "result.json")
+	t.Setenv("RESULT_PATH", path)
+
+	longTitle := strings.Repeat("very long title that ignores the soft cap ", 10)
+	if err := Write(Outcome{
+		Status:  StatusSuccess,
+		PRTitle: longTitle,
+	}); err != nil {
+		t.Fatalf("Write returned error: %v", err)
+	}
+
+	raw, _ := os.ReadFile(path)
+	var parsed map[string]any
+	_ = json.Unmarshal(raw, &parsed)
+
+	got, _ := parsed["pr_title"].(string)
+	if utf8.RuneCountInString(got) > prTitleMaxRunes {
+		t.Errorf("pr_title in result.json exceeded cap: %d runes, want ≤ %d", utf8.RuneCountInString(got), prTitleMaxRunes)
+	}
+	if !strings.HasSuffix(got, "…") {
+		t.Errorf("over-cap title should be ellipsis-suffixed: %q", got)
 	}
 }
 

@@ -32,22 +32,23 @@ const agentType = "claude-code"
 // tags at the end (used as the PR title). Parser strips the tag block
 // out of the result event and surfaces it as a separate field.
 //
-// The 72-char cap matches Conventional Commits and GitHub's PR title
-// soft limit. We instruct rather than truncate; downstream consumers
-// re-cap defensively for cases where the agent ignores the instruction.
-const finalMessageInstruction = `Final-message format:
+// The 72-char target matches Conventional Commits and GitHub's PR
+// title soft limit. result.Write hard-caps to that on emit (with an
+// ellipsis suffix) so consumers never see a runaway-length title even
+// when the agent ignores the instruction.
+//
+// Kept deliberately terse: this prefix runs on every Claude Code call,
+// so trimming directly reduces the per-Step token bill. One worked
+// example is enough; the structure carries the rest.
+const finalMessageInstruction = `Final-message format. Your final assistant message must contain:
 
-When you have finished your work, your final assistant message must contain TWO parts:
+1. A multi-line changes summary describing what you changed and why. This becomes the PR body's lead-in.
 
-1. A multi-line changes summary describing what you changed and why. This forms the body text of your final message and will be used as the pull request body's lead-in for human reviewers.
-
-2. A short pull-request title (max 72 characters, imperative mood, one line). Append it at the very end of your final message, on its own line, wrapped in <pr_title>...</pr_title> XML-style tags. Examples:
+2. A short PR title (≤72 chars, imperative mood, one line) on its own line at the very end, wrapped in <pr_title>...</pr_title>. Example:
 
    <pr_title>Add OAuth login to auth-service</pr_title>
-   <pr_title>Fix race in worker pool</pr_title>
-   <pr_title>Refactor logging package imports</pr_title>
 
-Do not emit the <pr_title> tag anywhere except at the end of your final message.`
+Do not emit <pr_title> anywhere except at the end of your final message.`
 
 func init() {
 	agent.Register(agentType, NewDriver)
