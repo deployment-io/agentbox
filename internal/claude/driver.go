@@ -7,6 +7,7 @@ package claude
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -15,7 +16,39 @@ import (
 	"github.com/deployment-io/agentbox/internal/config"
 )
 
+// rawStreamLogPath is the in-container path that captures Claude Code's
+// unfiltered stream-json for deep debugging. Created and chowned to the
+// agent user by the Dockerfile; opening it outside the container (e.g.,
+// during tests or local invocation) is expected to fail silently, in
+// which case raw teeing is skipped.
+const rawStreamLogPath = "/scratch/agent.log"
+
 const agentType = "claude-code"
+
+// finalMessageInstruction is appended to Claude Code's default system
+// prompt so the agent's final assistant message carries TWO structured
+// outputs: a longer changes summary (the message body, used as the PR
+// body lead-in) and a short PR title wrapped in <pr_title>...</pr_title>
+// tags at the end (used as the PR title). Parser strips the tag block
+// out of the result event and surfaces it as a separate field.
+//
+// The 72-char target matches Conventional Commits and GitHub's PR
+// title soft limit. result.Write hard-caps to that on emit (with an
+// ellipsis suffix) so consumers never see a runaway-length title even
+// when the agent ignores the instruction.
+//
+// Kept deliberately terse: this prefix runs on every Claude Code call,
+// so trimming directly reduces the per-Step token bill. One worked
+// example is enough; the structure carries the rest.
+const finalMessageInstruction = `Final-message format. Your final assistant message must contain:
+
+1. A multi-line changes summary describing what you changed and why. This becomes the PR body's lead-in.
+
+2. A short PR title (≤72 chars, imperative mood, one line) on its own line at the very end, wrapped in <pr_title>...</pr_title>. Example:
+
+   <pr_title>Add OAuth login to auth-service</pr_title>
+
+Do not emit <pr_title> anywhere except at the end of your final message.`
 
 func init() {
 	agent.Register(agentType, NewDriver)
@@ -72,6 +105,7 @@ func (d *Driver) BuildArgs(cfg *config.Config) []string {
 	// Claude Code rejects --output-format=stream-json + -p without --verbose.
 	args := []string{
 		"-p", cfg.StepPrompt,
+		"--append-system-prompt", finalMessageInstruction,
 		"--output-format", "stream-json",
 		"--verbose",
 		"--dangerously-skip-permissions",
@@ -99,4 +133,22 @@ func (d *Driver) DetectVersion() string {
 
 func (d *Driver) NewOutputParser() agent.OutputParser {
 	return newStreamParser()
+}
+
+// NewLogFormatter returns a writer that translates Claude Code's
+// stream-json into one-line summaries (model/init, thinking, tool
+// calls, tool results, final outcome) before forwarding to sink, which
+// is typically os.Stdout. If /scratch/agent.log is writable, the raw
+// stream-json is also teed there so engineers can inspect the
+// unfiltered output when an agent run misbehaves.
+func (d *Driver) NewLogFormatter(sink io.Writer) io.WriteCloser {
+	return newHumanLogFormatter(sink, openRawStreamLog())
+}
+
+func openRawStreamLog() io.WriteCloser {
+	f, err := os.OpenFile(rawStreamLogPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return nil
+	}
+	return f
 }

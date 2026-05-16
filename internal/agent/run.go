@@ -78,7 +78,16 @@ func Run(ctx context.Context, cfg *config.Config, driver Driver) (outcome result
 	progressWriter.Start()
 	defer progressWriter.Stop()
 
-	cmd.Stdout = io.MultiWriter(os.Stdout, pw, tracker)
+	// Replace os.Stdout in the MultiWriter with a Driver-supplied
+	// formatter that turns the agent's native output (e.g., Claude
+	// Code's stream-json) into compact one-line summaries before the
+	// bytes reach the container's stdout. The parser pipe (pw) still
+	// sees the raw stream for structured capture; nothing about
+	// result.json or progress.json changes.
+	humanOut := driver.NewLogFormatter(os.Stdout)
+	defer humanOut.Close()
+
+	cmd.Stdout = io.MultiWriter(humanOut, pw, tracker)
 
 	stderrBuf := &bytes.Buffer{}
 	cmd.Stderr = io.MultiWriter(os.Stderr, stderrBuf, tracker)
@@ -175,6 +184,7 @@ func gracefulShutdown(cmd *exec.Cmd, done <-chan error, parser OutputParser, rea
 		FilesChanged:   state.FilesChanged,
 		TokenUsage:     state.TokenUsage,
 		Turns:          state.Turns,
+		PRTitle:        state.PRTitle,
 	}
 
 	switch reason {
@@ -202,6 +212,7 @@ func buildOutcome(err error, state ParsedState, stderrText, binary string) resul
 			FilesChanged:   state.FilesChanged,
 			TokenUsage:     state.TokenUsage,
 			Turns:          state.Turns,
+			PRTitle:        state.PRTitle,
 		}
 	}
 	return classifyFailure(err, state, stderrText, binary)
@@ -224,6 +235,7 @@ func classifyFailure(err error, state ParsedState, stderrText, binary string) re
 		FilesChanged:   state.FilesChanged,
 		TokenUsage:     state.TokenUsage,
 		Turns:          state.Turns,
+		PRTitle:        state.PRTitle,
 	}
 }
 

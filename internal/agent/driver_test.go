@@ -18,6 +18,13 @@ func (f *fakeDriver) BuildArgs(*config.Config) []string { return nil }
 func (f *fakeDriver) DetectVersion() string             { return f.version }
 func (f *fakeDriver) NewOutputParser() OutputParser     { return &fakeParser{} }
 func (f *fakeDriver) AllowedHosts() []string            { return nil }
+func (f *fakeDriver) NewLogFormatter(sink io.Writer) io.WriteCloser {
+	return passthroughWriteCloser{sink}
+}
+
+type passthroughWriteCloser struct{ io.Writer }
+
+func (passthroughWriteCloser) Close() error { return nil }
 
 type fakeParser struct{}
 

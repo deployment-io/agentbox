@@ -67,8 +67,32 @@ result file.
 
 ### stdout / stderr
 
-Claude Code's output, forwarded verbatim. Consumers capture via Docker
+Compact, one-line-per-event human-readable summaries derived from the
+agent's native output. For Claude Code this means stream-json events
+are translated to lines like:
+
+```
+[init] model=claude-opus-4-7 tools=15 mcp_servers=0 cwd=/work
+[thinking] Let me start by reading the file.
+[tool] Bash: ls -la /work
+[result] (success, 104 bytes) total 16 …
+[tool] Edit: /work/main.go
+[done] status=ok turns=4 tokens=1.2k/350 duration=23.1s summary=…
+```
+
+Per-message usage counters, session IDs, UUIDs, parent-tool-use IDs,
+and thinking signatures are dropped — they're encryption material or
+debugging hooks, never useful to a human reader. Lines that don't
+parse as the agent's native event format (npm install output, proxy
+deny logs, Node stack traces) pass through verbatim.
+
+Stderr is forwarded verbatim. Consumers capture both via Docker
 `ContainerLogs`.
+
+The unfiltered raw stream from the agent is also written to
+`/scratch/agent.log` inside the container for deep debugging when the
+summarized view isn't enough. Bind-mount `/scratch` to expose it to
+the host.
 
 ### `<result-dir>/progress.json` (live snapshot)
 

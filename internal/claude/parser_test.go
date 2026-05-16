@@ -153,6 +153,79 @@ func TestStreamParser_ModelEmptyWhenNeverReported(t *testing.T) {
 	}
 }
 
+// TestStreamParser_PRTitleTrailerExtracted pins the Bug 2 fix: the
+// agent's system prompt instructs it to end the final message with a
+// <pr_title>...</pr_title> block; the parser extracts the inner text
+// as a distinct field and strips the tag from changes_summary so the
+// PR body lead-in doesn't carry the title marker.
+func TestStreamParser_PRTitleTrailerExtracted(t *testing.T) {
+	p := newStreamParser()
+	p.Consume(strings.NewReader(`
+{"type":"result","result":"Reduced the Node heap cap so the dashboard build fits in a 2 GB CI worker.\n\n<pr_title>Tighten Node heap cap in dashboard build script</pr_title>","num_turns":3,"is_error":false}
+`))
+
+	state := p.State()
+	if state.PRTitle != "Tighten Node heap cap in dashboard build script" {
+		t.Errorf("PRTitle = %q, want %q", state.PRTitle, "Tighten Node heap cap in dashboard build script")
+	}
+	if strings.Contains(state.ChangesSummary, "<pr_title>") {
+		t.Errorf("ChangesSummary should have the trailer stripped: %q", state.ChangesSummary)
+	}
+	if !strings.Contains(state.ChangesSummary, "Reduced the Node heap cap") {
+		t.Errorf("ChangesSummary lost the body text: %q", state.ChangesSummary)
+	}
+	if strings.HasSuffix(state.ChangesSummary, "\n") || strings.HasSuffix(state.ChangesSummary, " ") {
+		t.Errorf("ChangesSummary should be right-trimmed after trailer strip: %q", state.ChangesSummary)
+	}
+}
+
+func TestStreamParser_PRTitleAbsentLeavesEmpty(t *testing.T) {
+	// Defensive: if the agent ignored the system-prompt instruction
+	// and emitted no <pr_title> tag, PRTitle stays empty and the full
+	// result text becomes ChangesSummary.
+	p := newStreamParser()
+	p.Consume(strings.NewReader(`
+{"type":"result","result":"Added AuthToken type to kit/auth.","num_turns":1,"is_error":false}
+`))
+
+	state := p.State()
+	if state.PRTitle != "" {
+		t.Errorf("PRTitle = %q, want empty when agent didn't emit trailer", state.PRTitle)
+	}
+	if state.ChangesSummary != "Added AuthToken type to kit/auth." {
+		t.Errorf("ChangesSummary = %q, want full result text", state.ChangesSummary)
+	}
+}
+
+func TestStreamParser_PRTitleTrimsInnerWhitespace(t *testing.T) {
+	p := newStreamParser()
+	p.Consume(strings.NewReader(`
+{"type":"result","result":"body\n\n<pr_title>   Padded title   </pr_title>","num_turns":1,"is_error":false}
+`))
+
+	if got := p.State().PRTitle; got != "Padded title" {
+		t.Errorf("PRTitle = %q, want %q", got, "Padded title")
+	}
+}
+
+func TestStreamParser_PRTitleUnclosedTagFallsBack(t *testing.T) {
+	// Malformed trailer (missing closing tag) — don't crash, don't
+	// extract, leave the full text as changes_summary so the runner's
+	// fallback path can still produce a sensible commit/PR.
+	p := newStreamParser()
+	p.Consume(strings.NewReader(`
+{"type":"result","result":"body text <pr_title>oops never closed","num_turns":1,"is_error":false}
+`))
+
+	state := p.State()
+	if state.PRTitle != "" {
+		t.Errorf("PRTitle = %q, want empty for malformed trailer", state.PRTitle)
+	}
+	if !strings.Contains(state.ChangesSummary, "<pr_title>oops never closed") {
+		t.Errorf("ChangesSummary should retain the malformed text: %q", state.ChangesSummary)
+	}
+}
+
 func TestStreamParser_IsAuthFailure(t *testing.T) {
 	tests := []struct {
 		name   string

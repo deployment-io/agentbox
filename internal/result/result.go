@@ -6,6 +6,7 @@ package result
 import (
 	"encoding/json"
 	"os"
+	"unicode/utf8"
 )
 
 // schemaVersion is bumped on breaking changes to the result.json shape.
@@ -80,6 +81,17 @@ type Outcome struct {
 	// security-gate violations rather than allowlist gaps.
 	DeniedHosts []string `json:"denied_hosts,omitempty"`
 
+	// PRTitle is the agent-produced short title intended for use as the
+	// pull request's title. The agent's system prompt asks for ≤72
+	// chars (Conventional Commits + GitHub's PR title soft limit);
+	// Write enforces a hard cap of prTitleMaxRunes runes with an
+	// ellipsis suffix so consumers never see a runaway-length title
+	// even when the agent ignores the instruction.
+	//
+	// Distinct from ChangesSummary, which is longer and describes
+	// what + why. PRTitle is title-shaped (imperative mood, one line).
+	PRTitle string `json:"pr_title,omitempty"`
+
 	// ExitCode is the classified exit code (see Exit* constants:
 	// 0 success, 1 generic execution failure, 2 auth/rate-limit,
 	// 3 cancelled, 4 timeout). agentbox's own process exits with this
@@ -109,10 +121,19 @@ func Path() string {
 	return "/tmp/result.json"
 }
 
+// prTitleMaxRunes is the hard cap enforced on Outcome.PRTitle at Write
+// time. Matches the soft cap requested in the agent's system prompt
+// (Conventional Commits + GitHub's PR title soft limit). When the
+// agent ignores the soft cap and emits a longer title, Write truncates
+// and appends a single ellipsis rune so consumers never see a runaway
+// title.
+const prTitleMaxRunes = 72
+
 // Write serializes the Outcome as JSON. SchemaVersion is overwritten;
 // AgentType falls back to "claude-code" only when the caller didn't
 // populate it (so pre-config WriteFailure paths still emit a value);
-// the rest of the fields pass through.
+// PRTitle is hard-capped to prTitleMaxRunes runes; the rest of the
+// fields pass through.
 func Write(o Outcome) error {
 	o.SchemaVersion = schemaVersion
 	if o.AgentType == "" {
@@ -121,12 +142,27 @@ func Write(o Outcome) error {
 	if o.FilesChanged == nil {
 		o.FilesChanged = []string{}
 	}
+	o.PRTitle = capPRTitle(o.PRTitle)
 
 	data, err := json.MarshalIndent(o, "", "  ")
 	if err != nil {
 		return err
 	}
 	return os.WriteFile(Path(), append(data, '\n'), 0o644)
+}
+
+// capPRTitle enforces the prTitleMaxRunes cap with ellipsis. Operates
+// on runes so multi-byte titles aren't cut mid-codepoint. Returns the
+// input unchanged when already within budget or empty.
+func capPRTitle(s string) string {
+	if s == "" {
+		return s
+	}
+	if utf8.RuneCountInString(s) <= prTitleMaxRunes {
+		return s
+	}
+	runes := []rune(s)
+	return string(runes[:prTitleMaxRunes-1]) + "…"
 }
 
 // WriteFailure writes an Outcome for a pre-execution failure where the

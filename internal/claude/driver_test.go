@@ -2,6 +2,7 @@ package claude
 
 import (
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/deployment-io/agentbox/internal/agent"
@@ -22,7 +23,18 @@ func TestBuildArgs_Minimal(t *testing.T) {
 	d := &Driver{}
 	args := d.BuildArgs(&config.Config{StepPrompt: "hello"})
 
-	wantPrefix := []string{"-p", "hello", "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions"}
+	// -p must come first (Claude Code's prompt flag), then the
+	// rest of the static flags in a stable order. --append-system-prompt
+	// is included unconditionally (Bug 2 fix); see
+	// TestBuildArgs_AppendsSystemPromptInstruction for its specific
+	// assertion.
+	wantPrefix := []string{
+		"-p", "hello",
+		"--append-system-prompt", finalMessageInstruction,
+		"--output-format", "stream-json",
+		"--verbose",
+		"--dangerously-skip-permissions",
+	}
 	for i, w := range wantPrefix {
 		if i >= len(args) || args[i] != w {
 			t.Errorf("args[%d] = %q, want %q", i, argOrMissing(args, i), w)
@@ -62,6 +74,21 @@ func TestBuildArgs_PromptIsLiteral(t *testing.T) {
 		}
 	}
 	t.Error("-p flag missing")
+}
+
+// TestBuildArgs_AppendsSystemPromptInstruction pins the Bug 2 fix: the
+// agent's final-message format instruction (incl. the <pr_title> tag
+// convention) is appended to Claude Code's system prompt so the parser
+// has a stable trailer to extract. Without this, the agent emits prose
+// only and the runner has no clean PR title to use.
+func TestBuildArgs_AppendsSystemPromptInstruction(t *testing.T) {
+	d := &Driver{}
+	args := d.BuildArgs(&config.Config{StepPrompt: "hello"})
+
+	assertFollowedBy(t, args, "--append-system-prompt", finalMessageInstruction)
+	if !strings.Contains(finalMessageInstruction, "<pr_title>") {
+		t.Error("finalMessageInstruction must mention the <pr_title> tag the parser expects")
+	}
 }
 
 func assertFollowedBy(t *testing.T, args []string, flag, want string) {
