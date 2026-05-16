@@ -7,6 +7,7 @@ package claude
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -14,6 +15,13 @@ import (
 	"github.com/deployment-io/agentbox/internal/agent"
 	"github.com/deployment-io/agentbox/internal/config"
 )
+
+// rawStreamLogPath is the in-container path that captures Claude Code's
+// unfiltered stream-json for deep debugging. Created and chowned to the
+// agent user by the Dockerfile; opening it outside the container (e.g.,
+// during tests or local invocation) is expected to fail silently, in
+// which case raw teeing is skipped.
+const rawStreamLogPath = "/scratch/agent.log"
 
 const agentType = "claude-code"
 
@@ -99,4 +107,22 @@ func (d *Driver) DetectVersion() string {
 
 func (d *Driver) NewOutputParser() agent.OutputParser {
 	return newStreamParser()
+}
+
+// NewLogFormatter returns a writer that translates Claude Code's
+// stream-json into one-line summaries (model/init, thinking, tool
+// calls, tool results, final outcome) before forwarding to sink, which
+// is typically os.Stdout. If /scratch/agent.log is writable, the raw
+// stream-json is also teed there so engineers can inspect the
+// unfiltered output when an agent run misbehaves.
+func (d *Driver) NewLogFormatter(sink io.Writer) io.WriteCloser {
+	return newHumanLogFormatter(sink, openRawStreamLog())
+}
+
+func openRawStreamLog() io.WriteCloser {
+	f, err := os.OpenFile(rawStreamLogPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return nil
+	}
+	return f
 }

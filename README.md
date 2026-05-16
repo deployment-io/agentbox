@@ -156,8 +156,12 @@ Docker container
   (`npm install -g` / `pip install --user`) as a non-root user. This
   takes ~15-30s on a cold cache.
 - The agent runs against the bind-mounted working directory. Its
-  stdout is teed to the container's stdout (for log streaming) and to
-  an internal parser that builds the structured result.
+  output is teed two ways: a per-event human-readable summary line
+  goes to the container's stdout (for log streaming), and the raw
+  stream goes to an internal parser that builds the structured
+  result. The unfiltered raw stream is also written to
+  `/scratch/agent.log` for deep debugging when the summarized view
+  isn't enough.
 - On SIGTERM, agentbox forwards it to the agent with a 10s grace
   period before SIGKILL.
 - On exit, `/result.json` is written and the container exits with the

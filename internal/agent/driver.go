@@ -27,6 +27,18 @@ type Driver interface {
 	// ADDITIONAL_ALLOWED_HOSTS env var to form the final allowlist.
 	// Empty slice == agent doesn't need any outbound access.
 	AllowedHosts() []string
+	// NewLogFormatter wraps sink with a writer that translates the
+	// agent's raw stdout into a compact human-readable form (one short
+	// summary line per logical event). The returned WriteCloser is the
+	// stdout sink used by the Run loop; Close flushes any pending
+	// partial line and releases any driver-owned debug resources. A
+	// driver that doesn't want to transform should return a writer that
+	// passes through verbatim.
+	//
+	// Concern is per-agent because each agent prints in its own format
+	// (Claude Code: stream-json; Aider: diff+markdown). Output suitable
+	// for programmatic parsing is rarely suitable for human log viewing.
+	NewLogFormatter(sink io.Writer) io.WriteCloser
 }
 
 // OutputParser consumes an agent's output stream and accumulates
