@@ -83,13 +83,11 @@ type Outcome struct {
 	// PRTitle is the agent-produced short title intended for use as the
 	// pull request's title. Soft-capped to ~72 chars in the agent's
 	// system prompt (matches Conventional Commits + GitHub's PR title
-	// soft limit); runner re-caps defensively for cases where the
+	// soft limit); consumers re-cap defensively for cases where the
 	// agent ignores the instruction.
 	//
 	// Distinct from ChangesSummary, which is longer and describes
 	// what + why. PRTitle is title-shaped (imperative mood, one line).
-	// Empty for older agentbox versions; runner falls back to truncated
-	// first line of ChangesSummary in that case.
 	PRTitle string `json:"pr_title,omitempty"`
 
 	// ExitCode is returned by the process; not part of the JSON shape.

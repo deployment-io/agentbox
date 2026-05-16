@@ -44,9 +44,7 @@ type streamParser struct {
 	model string
 	// prTitle is the agent-produced short title parsed out of the
 	// final assistant message's <pr_title>...</pr_title> trailer (see
-	// finalMessageInstruction in driver.go). Empty when the agent
-	// didn't emit one — downstream consumers fall back to a truncated
-	// first line of changesSummary.
+	// finalMessageInstruction in driver.go).
 	prTitle string
 }
 
@@ -200,8 +198,8 @@ func (p *streamParser) processResultEvent(event streamEvent) {
 // the agent's final result text. Returns the (summary-without-the-tag,
 // pr_title) pair. The tag is removed from the summary regardless of
 // where it appeared, and the summary is trimmed of trailing whitespace
-// left behind by the removal. When no tag is present, returns
-// (input, "") so legacy agent behavior still produces a summary.
+// left behind by the removal. When no tag is present (agent ignored
+// the instruction), returns (input, "").
 func splitPRTitleTrailer(result string) (summary, prTitle string) {
 	match := prTitleRe.FindStringSubmatchIndex(result)
 	if match == nil {

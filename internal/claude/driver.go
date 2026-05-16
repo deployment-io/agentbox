@@ -32,16 +32,9 @@ const agentType = "claude-code"
 // tags at the end (used as the PR title). Parser strips the tag block
 // out of the result event and surfaces it as a separate field.
 //
-// Without this, the agent's final message is free-form prose and the
-// downstream runner has no clean way to pick a short title — earlier
-// implementations took "first line of changes_summary" and produced
-// PR titles like "Updated `scripts.build` in /work/foo/package.json:8
-// — single-line change, no other fields touched." once the agent
-// emitted the whole narrative on one line.
-//
 // The 72-char cap matches Conventional Commits and GitHub's PR title
-// soft limit. We instruct rather than truncate; the runner re-caps
-// defensively for cases where the agent ignores the instruction.
+// soft limit. We instruct rather than truncate; downstream consumers
+// re-cap defensively for cases where the agent ignores the instruction.
 const finalMessageInstruction = `Final-message format:
 
 When you have finished your work, your final assistant message must contain TWO parts:

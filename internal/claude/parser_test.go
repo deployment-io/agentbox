@@ -179,12 +179,10 @@ func TestStreamParser_PRTitleTrailerExtracted(t *testing.T) {
 	}
 }
 
-func TestStreamParser_PRTitleAbsentLegacyBehavior(t *testing.T) {
-	// Older agentbox runs (or runs where the agent ignored the
-	// instruction) produce no <pr_title> tag. PRTitle stays empty and
-	// the full result text becomes ChangesSummary, matching pre-fix
-	// behavior so the runner's fallback path still has data to work
-	// with.
+func TestStreamParser_PRTitleAbsentLeavesEmpty(t *testing.T) {
+	// Defensive: if the agent ignored the system-prompt instruction
+	// and emitted no <pr_title> tag, PRTitle stays empty and the full
+	// result text becomes ChangesSummary.
 	p := newStreamParser()
 	p.Consume(strings.NewReader(`
 {"type":"result","result":"Added AuthToken type to kit/auth.","num_turns":1,"is_error":false}
