@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -111,10 +112,37 @@ func TestWrite_OmitsRunMetadataWhenUnset(t *testing.T) {
 	var parsed map[string]any
 	_ = json.Unmarshal(raw, &parsed)
 
-	for _, key := range []string{"model", "started_at", "ended_at"} {
+	for _, key := range []string{"model", "started_at", "ended_at", "pr_title"} {
 		if _, present := parsed[key]; present {
 			t.Errorf("%s should be omitted when unset, got: %v", key, parsed[key])
 		}
+	}
+}
+
+// PRTitle is the agent-produced short title (Bug 2 fix). Distinct from
+// ChangesSummary so the runner can pick a clean PR title instead of
+// taking the first line of a possibly-long single-line narrative.
+func TestWrite_PRTitleRoundTrips(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "result.json")
+	t.Setenv("RESULT_PATH", path)
+
+	if err := Write(Outcome{
+		Status:         StatusSuccess,
+		ChangesSummary: "Reduced the Node heap cap so the dashboard build fits in a 2 GB CI worker.",
+		PRTitle:        "Tighten Node heap cap in dashboard build script",
+	}); err != nil {
+		t.Fatalf("Write returned error: %v", err)
+	}
+
+	raw, _ := os.ReadFile(path)
+	var parsed map[string]any
+	_ = json.Unmarshal(raw, &parsed)
+
+	if got, _ := parsed["pr_title"].(string); got != "Tighten Node heap cap in dashboard build script" {
+		t.Errorf("pr_title = %v, want %q", parsed["pr_title"], "Tighten Node heap cap in dashboard build script")
+	}
+	if got, _ := parsed["changes_summary"].(string); !strings.Contains(got, "Reduced the Node heap cap") {
+		t.Errorf("changes_summary should round-trip independently of pr_title; got %v", parsed["changes_summary"])
 	}
 }
 

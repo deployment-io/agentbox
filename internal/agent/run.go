@@ -184,6 +184,7 @@ func gracefulShutdown(cmd *exec.Cmd, done <-chan error, parser OutputParser, rea
 		FilesChanged:   state.FilesChanged,
 		TokenUsage:     state.TokenUsage,
 		Turns:          state.Turns,
+		PRTitle:        state.PRTitle,
 	}
 
 	switch reason {
@@ -211,6 +212,7 @@ func buildOutcome(err error, state ParsedState, stderrText, binary string) resul
 			FilesChanged:   state.FilesChanged,
 			TokenUsage:     state.TokenUsage,
 			Turns:          state.Turns,
+			PRTitle:        state.PRTitle,
 		}
 	}
 	return classifyFailure(err, state, stderrText, binary)
@@ -233,6 +235,7 @@ func classifyFailure(err error, state ParsedState, stderrText, binary string) re
 		FilesChanged:   state.FilesChanged,
 		TokenUsage:     state.TokenUsage,
 		Turns:          state.Turns,
+		PRTitle:        state.PRTitle,
 	}
 }
 

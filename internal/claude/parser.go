@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -12,6 +13,13 @@ import (
 	"github.com/deployment-io/agentbox/internal/agent"
 	"github.com/deployment-io/agentbox/internal/result"
 )
+
+// prTitleRe matches the <pr_title>...</pr_title> trailer the agent's
+// system prompt instructs it to emit at the end of its final message.
+// Dotall so a stray newline inside the tag is tolerated; non-greedy so
+// only the first balanced pair is captured if the agent somehow emits
+// more than one (shouldn't happen, but cheap insurance).
+var prTitleRe = regexp.MustCompile(`(?s)<pr_title>(.*?)</pr_title>`)
 
 // streamParser consumes Claude Code's --output-format=stream-json events
 // line-by-line. Malformed or unknown events are silently skipped so one
@@ -34,6 +42,12 @@ type streamParser struct {
 	// system.init event and also on each assistant message; last seen
 	// wins, so a mid-run reroute (rare but possible) is reflected.
 	model string
+	// prTitle is the agent-produced short title parsed out of the
+	// final assistant message's <pr_title>...</pr_title> trailer (see
+	// finalMessageInstruction in driver.go). Empty when the agent
+	// didn't emit one — downstream consumers fall back to a truncated
+	// first line of changesSummary.
+	prTitle string
 }
 
 func newStreamParser() *streamParser {
@@ -67,6 +81,7 @@ func (p *streamParser) State() agent.ParsedState {
 		IsError:        p.isError,
 		IsAuthFailure:  p.isAuthFailureLocked(),
 		Model:          p.model,
+		PRTitle:        p.prTitle,
 	}
 }
 
@@ -164,9 +179,11 @@ func (p *streamParser) processAssistantMessage(raw json.RawMessage) {
 }
 
 func (p *streamParser) processResultEvent(event streamEvent) {
+	summary, prTitle := splitPRTitleTrailer(event.Result)
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.changesSummary = event.Result
+	p.changesSummary = summary
+	p.prTitle = prTitle
 	p.turns = event.NumTurns
 	p.isError = event.IsError
 	p.errorSubtype = event.Subtype
@@ -177,6 +194,26 @@ func (p *streamParser) processResultEvent(event streamEvent) {
 			CacheReadTokens: event.Usage.CacheReadInputTokens,
 		}
 	}
+}
+
+// splitPRTitleTrailer extracts the <pr_title>...</pr_title> block from
+// the agent's final result text. Returns the (summary-without-the-tag,
+// pr_title) pair. The tag is removed from the summary regardless of
+// where it appeared, and the summary is trimmed of trailing whitespace
+// left behind by the removal. When no tag is present, returns
+// (input, "") so legacy agent behavior still produces a summary.
+func splitPRTitleTrailer(result string) (summary, prTitle string) {
+	match := prTitleRe.FindStringSubmatchIndex(result)
+	if match == nil {
+		return result, ""
+	}
+	prTitle = strings.TrimSpace(result[match[2]:match[3]])
+	summary = strings.TrimRightFunc(result[:match[0]]+result[match[1]:], isSpaceOrNewline)
+	return summary, prTitle
+}
+
+func isSpaceOrNewline(r rune) bool {
+	return r == ' ' || r == '\t' || r == '\n' || r == '\r'
 }
 
 func isFileModifyingTool(name string) bool {

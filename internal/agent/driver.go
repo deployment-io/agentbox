@@ -85,6 +85,17 @@ type ParsedState struct {
 	// For Claude Code, captured from the stream-json system.init event
 	// (with assistant-message.model as a fallback).
 	Model string
+
+	// PRTitle is the short, imperative title the agent produced for the
+	// resulting pull request, parsed out of the agent's final message.
+	// Distinct from ChangesSummary (which is longer + describes what +
+	// why). Generic across agents — each parser extracts it from
+	// whatever convention the agent's system-prompt instructed, or
+	// leaves empty. For Claude Code, parsed from a <pr_title>...</pr_title>
+	// trailer in the stream-json result event. Empty when the agent
+	// didn't emit one; downstream consumers fall back to a truncated
+	// first line of ChangesSummary.
+	PRTitle string
 }
 
 // DriverFactory builds a Driver for the given pinned version.

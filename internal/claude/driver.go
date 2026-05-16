@@ -25,6 +25,37 @@ const rawStreamLogPath = "/scratch/agent.log"
 
 const agentType = "claude-code"
 
+// finalMessageInstruction is appended to Claude Code's default system
+// prompt so the agent's final assistant message carries TWO structured
+// outputs: a longer changes summary (the message body, used as the PR
+// body lead-in) and a short PR title wrapped in <pr_title>...</pr_title>
+// tags at the end (used as the PR title). Parser strips the tag block
+// out of the result event and surfaces it as a separate field.
+//
+// Without this, the agent's final message is free-form prose and the
+// downstream runner has no clean way to pick a short title — earlier
+// implementations took "first line of changes_summary" and produced
+// PR titles like "Updated `scripts.build` in /work/foo/package.json:8
+// — single-line change, no other fields touched." once the agent
+// emitted the whole narrative on one line.
+//
+// The 72-char cap matches Conventional Commits and GitHub's PR title
+// soft limit. We instruct rather than truncate; the runner re-caps
+// defensively for cases where the agent ignores the instruction.
+const finalMessageInstruction = `Final-message format:
+
+When you have finished your work, your final assistant message must contain TWO parts:
+
+1. A multi-line changes summary describing what you changed and why. This forms the body text of your final message and will be used as the pull request body's lead-in for human reviewers.
+
+2. A short pull-request title (max 72 characters, imperative mood, one line). Append it at the very end of your final message, on its own line, wrapped in <pr_title>...</pr_title> XML-style tags. Examples:
+
+   <pr_title>Add OAuth login to auth-service</pr_title>
+   <pr_title>Fix race in worker pool</pr_title>
+   <pr_title>Refactor logging package imports</pr_title>
+
+Do not emit the <pr_title> tag anywhere except at the end of your final message.`
+
 func init() {
 	agent.Register(agentType, NewDriver)
 }
@@ -80,6 +111,7 @@ func (d *Driver) BuildArgs(cfg *config.Config) []string {
 	// Claude Code rejects --output-format=stream-json + -p without --verbose.
 	args := []string{
 		"-p", cfg.StepPrompt,
+		"--append-system-prompt", finalMessageInstruction,
 		"--output-format", "stream-json",
 		"--verbose",
 		"--dangerously-skip-permissions",
