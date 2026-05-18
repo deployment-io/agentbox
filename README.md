@@ -51,6 +51,31 @@ On exit:
   `changes_summary`, `files_changed`, `token_usage`, `turns`, etc.)
 - The container's exit code indicates what happened (see [Contract](#contract))
 
+## Permissions
+
+agentbox runs as UID 1000 (the `agent` user) inside the container, so
+any host directory you bind-mount must be writable by that UID. On
+most single-user Linux desktops your account is already UID 1000 and
+this just works — but if Docker auto-created the bind-mount source,
+or you're on a multi-user box, the agent will hit `permission denied`
+the first time it tries to write a file.
+
+Fix it before running, either with `chown` (preferred):
+
+```bash
+sudo chown 1000:1000 /path/to/your/dir
+```
+
+…or with `chmod` (works, but less hygienic):
+
+```bash
+chmod 777 /path/to/your/dir
+```
+
+This applies to both the working directory you bind-mount at `/work`
+and any scratch directory you bind-mount at `/scratch` for the result
+file.
+
 ## Contract
 
 Full spec: [docs/CONTRACT.md](docs/CONTRACT.md). Summary:
