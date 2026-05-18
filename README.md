@@ -24,7 +24,7 @@ infrastructure.
 You'll need:
 - Docker
 - A working directory (any git repo or folder for the agent to work on)
-- An Anthropic API key (or AWS Bedrock credentials — see [Credentials](#credentials))
+- An Anthropic API key (see [Credentials](#credentials))
 
 ```bash
 # Pull the image
@@ -62,7 +62,7 @@ Full spec: [docs/CONTRACT.md](docs/CONTRACT.md). Summary:
 | Variable | Description |
 |---|---|
 | `STEP_PROMPT` | The prompt for the agent. Free-form text. |
-| One of the [credential](#credentials) paths | Anthropic Direct or AWS Bedrock. |
+| `ANTHROPIC_API_KEY` | Anthropic API key. See [Credentials](#credentials). |
 
 ### Optional environment variables
 
@@ -108,30 +108,13 @@ Full spec: [docs/CONTRACT.md](docs/CONTRACT.md). Summary:
 
 ## Credentials
 
-agentbox accepts exactly one of two credential paths:
-
-### Anthropic Direct
+Pass your Anthropic API key as an environment variable:
 
 ```bash
 -e ANTHROPIC_API_KEY="sk-ant-..."
 ```
 
 Get a key at [console.anthropic.com](https://console.anthropic.com).
-
-### AWS Bedrock
-
-```bash
--e CLAUDE_CODE_USE_BEDROCK=1 \
--e AWS_ACCESS_KEY_ID="..." \
--e AWS_SECRET_ACCESS_KEY="..." \
--e AWS_SESSION_TOKEN="..." \
--e AWS_REGION="us-west-2"
-```
-
-Requires Anthropic Claude model access enabled in your AWS Bedrock
-console for the selected region. Temporary credentials (from EC2
-instance metadata or `aws sts assume-role`) work; `AWS_SESSION_TOKEN`
-is optional for long-lived credentials.
 
 ## Supported Agents
 
@@ -233,11 +216,6 @@ docker build --build-arg CLAUDE_CODE_VERSION=X.Y.Z -t agentbox:dev .
 
 v1 publishes `linux/amd64` images only. Multi-arch support is
 planned but not yet in scope.
-
-## Status
-
-**Pre-release.** Functionally complete for v1.0.0; image and contract
-are stable. First public release pending.
 
 ## License
 
