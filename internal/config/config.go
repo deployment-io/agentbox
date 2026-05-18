@@ -78,7 +78,7 @@ func Load() (*Config, error) {
 }
 
 // agentVersionForType reads the env var that holds the pinned version
-// for the given agent. Unknown types return "" (the installer dispatch
+// for the given agent. Unknown types return "" (the Driver lookup
 // will reject them later with a clearer error).
 func agentVersionForType(agentType string) string {
 	switch agentType {

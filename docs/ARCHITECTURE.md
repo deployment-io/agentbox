@@ -38,19 +38,22 @@ The published runtime image is ~500 MB. The builder stage doesn't ship.
 
 ## Agent Install at Startup
 
-Each supported agent has an `Installer` that knows:
+Each supported agent ships a `Driver` implementation that knows:
 
 - how to install the agent package (e.g., `npm install -g
   @anthropic-ai/claude-code@<version>` for Claude Code)
 - what binary to exec (`claude`, `aider`, etc.)
 - how to build its command-line arguments
 - how to detect the installed version
+- how to parse its native output into structured result state
+- which outbound hosts it legitimately needs (contributed to the
+  proxy allowlist)
 
 At container startup, agentbox reads `AGENT_TYPE` from the env,
-resolves the installer, and runs `installer.Ensure()` — a no-op if the
-agent is already present, otherwise an install from the official
-package registry (npm / pypi). Install output goes to stderr so it
-appears in container logs.
+resolves the registered `Driver` for that type, and calls
+`driver.Ensure(ctx)` — a no-op if the agent is already present,
+otherwise an install from the official package registry (npm / pypi).
+Install output goes to stderr so it appears in container logs.
 
 Language runtimes are pre-installed at image build time (not at
 startup), so `npm install` and `pip install --user` run as the

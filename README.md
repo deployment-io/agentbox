@@ -119,7 +119,7 @@ Get a key at [platform.claude.com](https://platform.claude.com).
 **v1:** Claude Code only.
 
 **Planned:** other agent runtimes (Codex, Aider, …) will register through
-the same `Installer` interface and dispatch on `AGENT_TYPE`. See
+the same `Driver` interface and dispatch on `AGENT_TYPE`. See
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## How It Works
