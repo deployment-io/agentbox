@@ -5,6 +5,8 @@
 
 **Run AI coding agents in a Docker container with a predictable contract.**
 
+![agentbox demo: the docker run command, agentbox's streaming event log, and the structured result.json written on exit](docs/images/agentbox-demo.png)
+
 Give agentbox a prompt and credentials via environment variables; it
 installs the agent, runs it against a bind-mounted working directory,
 streams output to stdout, and writes a structured result to
