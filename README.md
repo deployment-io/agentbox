@@ -15,9 +15,9 @@ works across CI, a managed platform, or a local terminal. Pluggable for
 multiple agent backends via a simple `Installer` contract; v1 ships with
 Claude Code.
 
-It's the execution runtime behind [deployment.io](https://deployment.io)
-Tasks but is designed to stand alone — useful to anyone running agents
-headlessly on their own infrastructure.
+Built by [deployment.io](https://deployment.io) but designed to stand
+alone — useful to anyone running agents headlessly on their own
+infrastructure.
 
 ## Quick Start
 
@@ -168,6 +168,48 @@ Docker container
   appropriate code.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for details.
+
+## Production Hardening
+
+The [Quick Start](#quick-start) command is the minimum to get a run
+going. agentbox ships with a non-root user, a hostname allowlist
+proxy, and a private-IP deny list baked into the image — those apply
+without any extra flags. Everything below is host-side hardening that
+agentbox itself can't enforce; it's how we launch the container in
+production.
+
+```bash
+docker run --rm \
+  --user 1000:1000 \
+  --cap-drop=ALL \
+  --read-only \
+  --tmpfs /tmp:exec,size=512m,uid=1000,gid=1000,mode=755 \
+  --tmpfs /home/agent:exec,size=1g,uid=1000,gid=1000,mode=755 \
+  --memory=2g \
+  --cpus=2 \
+  --add-host metadata.google.internal:127.0.0.1 \
+  --add-host metadata.goog:127.0.0.1 \
+  --add-host 169.254.169.254:127.0.0.1 \
+  -e AGENT_TYPE=claude-code \
+  -e ANTHROPIC_API_KEY="sk-ant-..." \
+  -e STEP_PROMPT="..." \
+  -e MAX_TURNS=30 \
+  -e ADDITIONAL_ALLOWED_HOSTS="github.com,api.github.com" \
+  -v "$(pwd):/work" \
+  deploymenthq/agentbox:latest
+```
+
+| Flag | Why |
+|---|---|
+| `--user 1000:1000` | Pin to the non-root `agent` user even if the orchestrator scheduling the container forgets. |
+| `--cap-drop=ALL` | Strip every Linux capability. The agent and its subprocesses don't need any of them. |
+| `--read-only` | Root filesystem becomes immutable. Anything that needs to write must go through the bind mount or a tmpfs. |
+| `--tmpfs /tmp:exec,...` | Scratch space for the agent. `exec` is required — npm and pip extract executables here. |
+| `--tmpfs /home/agent:exec,...` | Holds the agent's per-run install (e.g. `npm install -g`). Sized at 1G to fit Claude Code's footprint. |
+| `--memory=2g --cpus=2` | Cap blast radius from a runaway agent. Tune per workload. |
+| `--add-host ...metadata...:127.0.0.1` | Pin AWS/GCP cloud-metadata endpoints to localhost so a bypassed proxy still can't reach IMDS. |
+| `MAX_TURNS` | Hard cap on agent turns; second line of defense against an agent that won't stop. |
+| `ADDITIONAL_ALLOWED_HOSTS` | Extends the proxy allowlist for hosts your task legitimately needs (your git host, internal registries, etc.). |
 
 ## Building From Source
 
