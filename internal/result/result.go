@@ -94,15 +94,9 @@ type Outcome struct {
 
 	// ExitCode is the classified exit code (see Exit* constants:
 	// 0 success, 1 generic execution failure, 2 auth/rate-limit,
-	// 3 cancelled, 4 timeout). agentbox's own process exits with this
-	// value AND emits it in result.json — the latter so consumers
-	// (the deployment-runner) that ignore the container's wait exit
-	// code in favour of result.json don't lose the failure-class
-	// signal. Pre-v1.1.4 this field was `json:"-"` and the runner
-	// could only see status; that gap caused real debugging pain on
-	// the first Tasks dogfood deploy. ExitCode == 0 is meaningful in
-	// the success path (paired with status="success"); on the failure
-	// path it identifies which classifier hit.
+	// 3 cancelled, 4 timeout). agentbox's process exits with this
+	// value AND emits it in result.json, so consumers that ignore
+	// the container's wait exit code don't lose the failure class.
 	ExitCode int `json:"exit_code"`
 }
 
