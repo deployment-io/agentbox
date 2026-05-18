@@ -112,7 +112,7 @@ Pass your Anthropic API key as an environment variable:
 -e ANTHROPIC_API_KEY="sk-ant-..."
 ```
 
-Get a key at [console.anthropic.com](https://console.anthropic.com).
+Get a key at [platform.claude.com](https://platform.claude.com).
 
 ## Supported Agents
 
