@@ -242,6 +242,53 @@ func TestDurationHuman(t *testing.T) {
 	}
 }
 
+// TestHumanLogFormatter_StripsPRTitleTrailer pins that the
+// <pr_title>...</pr_title> parser-handle the agent emits in its final
+// assistant message is stripped from both the [text] excerpt and the
+// [done] summary, matching the strip the parser already applies for
+// result.json's changes_summary. The tag is internal to agentbox's
+// agent-protocol contract; surfacing it in human-readable log lines is
+// a leak.
+func TestHumanLogFormatter_StripsPRTitleTrailer(t *testing.T) {
+	var sink bytes.Buffer
+	f := newHumanLogFormatter(&sink, nil)
+	stream := `{"type":"assistant","message":{"content":[{"type":"text","text":"Created /work/hello.go with a PrintHelloWorld function. <pr_title>Add hello.go with PrintHelloWorld function</pr_title>"}]}}` + "\n" +
+		`{"type":"result","subtype":"success","is_error":false,"num_turns":2,"duration_ms":6600,"result":"Created /work/hello.go with a PrintHelloWorld function.\n\n<pr_title>Add hello.go with PrintHelloWorld function</pr_title>"}` + "\n"
+	_, _ = io.WriteString(f, stream)
+	_ = f.Close()
+
+	got := sink.String()
+	if strings.Contains(got, "<pr_title>") || strings.Contains(got, "</pr_title>") {
+		t.Errorf("pr_title trailer leaked into human-readable output:\n%s", got)
+	}
+	if !strings.Contains(got, "[text] Created /work/hello.go with a PrintHelloWorld function.") {
+		t.Errorf("[text] line should preserve the prose before the trailer:\n%s", got)
+	}
+	if !strings.Contains(got, "summary=Created /work/hello.go with a PrintHelloWorld function.") {
+		t.Errorf("[done] summary should preserve the prose before the trailer:\n%s", got)
+	}
+}
+
+// TestHumanLogFormatter_NoPRTitleLeavesTextUntouched pins that messages
+// without the trailer pass through unchanged — the strip is a no-op
+// when there's nothing to strip.
+func TestHumanLogFormatter_NoPRTitleLeavesTextUntouched(t *testing.T) {
+	var sink bytes.Buffer
+	f := newHumanLogFormatter(&sink, nil)
+	stream := `{"type":"assistant","message":{"content":[{"type":"text","text":"Plain message with no trailer."}]}}` + "\n" +
+		`{"type":"result","subtype":"success","is_error":false,"num_turns":1,"duration_ms":1000,"result":"Plain result with no trailer."}` + "\n"
+	_, _ = io.WriteString(f, stream)
+	_ = f.Close()
+
+	got := sink.String()
+	if !strings.Contains(got, "[text] Plain message with no trailer.") {
+		t.Errorf("plain text should pass through:\n%s", got)
+	}
+	if !strings.Contains(got, "summary=Plain result with no trailer.") {
+		t.Errorf("plain summary should pass through:\n%s", got)
+	}
+}
+
 // nopCloser turns an io.Writer into io.WriteCloser for raw-sink tests.
 type nopCloser struct{ io.Writer }
 

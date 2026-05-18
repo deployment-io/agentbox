@@ -263,7 +263,8 @@ func formatContentBlock(b humanContentBlock) string {
 		}
 		return "[thinking] " + ellipsisOneLine(text, thinkingExcerptLen)
 	case "text":
-		text := strings.TrimSpace(b.Text)
+		cleaned, _ := splitPRTitleTrailer(b.Text)
+		text := strings.TrimSpace(cleaned)
 		if text == "" {
 			return ""
 		}
@@ -416,7 +417,8 @@ func formatResult(e humanEvent) string {
 		parts = append(parts, "duration="+durationHuman(e.DurationMs))
 	}
 	line := strings.Join(parts, " ")
-	if summary := strings.TrimSpace(e.Result); summary != "" {
+	cleaned, _ := splitPRTitleTrailer(e.Result)
+	if summary := strings.TrimSpace(cleaned); summary != "" {
 		line += " summary=" + ellipsisOneLine(summary, resultExcerptLen)
 	}
 	return line
