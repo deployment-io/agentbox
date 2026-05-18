@@ -14,29 +14,11 @@ logs, and read `/tmp/result.json` (or `$RESULT_PATH`) after exit.
 | `STEP_PROMPT` | The prompt the agent executes. Free-form text. |
 | `WORK_DIR` | Path to the bind-mounted working directory. Conventionally `/work`. agentbox validates that the directory exists before spawning the agent. |
 
-### Credentials — exactly one of two paths
-
-agentbox validates that exactly one credential path is provided and
-fails fast otherwise.
-
-**Anthropic Direct:**
+### Credentials
 
 | Variable | Description |
 |---|---|
 | `ANTHROPIC_API_KEY` | `sk-ant-...` string against `api.anthropic.com`. |
-
-**AWS Bedrock:**
-
-| Variable | Description |
-|---|---|
-| `CLAUDE_CODE_USE_BEDROCK` | Must be `1` to opt into the Bedrock path. |
-| `AWS_ACCESS_KEY_ID` | Required. |
-| `AWS_SECRET_ACCESS_KEY` | Required. |
-| `AWS_SESSION_TOKEN` | Required for temporary credentials (typical from EC2 instance metadata). |
-| `AWS_REGION` | Required. |
-
-**Google Vertex AI** is not supported in v1. (`CLAUDE_CODE_USE_VERTEX`
-+ GCP service account credentials will be added in v2+.)
 
 ### Optional
 
