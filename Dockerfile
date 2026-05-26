@@ -15,7 +15,10 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
 FROM debian:bookworm-slim
 
 # Language runtimes and build tools needed by supported agents.
-# Node: Claude Code (npm-packaged).
+# Node + yarn + pnpm: Claude Code (npm-packaged), plus package-manager-
+# agnostic JS/TS dependency vendoring + verify (npm / yarn / pnpm). These
+# install to the system prefix (before NPM_CONFIG_PREFIX is set below), so
+# they survive the runtime tmpfs mounted over /home/agent.
 # Python: Aider and future pip-packaged agents (v2+).
 # build-essential, git, curl: used by agents at runtime.
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -28,6 +31,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates \
     && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
+    && npm install -g yarn pnpm \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 

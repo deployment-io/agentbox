@@ -23,6 +23,7 @@ import (
 	// To ship additional agents or languages, add their package here.
 	_ "github.com/deployment-io/agentbox/internal/claude"
 	_ "github.com/deployment-io/agentbox/internal/vendoring/golang"
+	_ "github.com/deployment-io/agentbox/internal/vendoring/node"
 )
 
 func main() {
