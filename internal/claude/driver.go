@@ -28,11 +28,12 @@ const agentType = "claude-code"
 // finalMessageInstruction is appended to Claude Code's default system
 // prompt. It first asks the agent to self-verify (run build/test when
 // feasible — Tasks self-verification, see PLAN_tasks_verification.md),
-// then specifies that the final assistant message carries TWO structured
-// outputs: a longer changes summary (the message body, used as the PR
-// body lead-in) and a short PR title wrapped in <pr_title>...</pr_title>
-// tags at the end (used as the PR title). Parser strips the tag block
-// out of the result event and surfaces it as a separate field.
+// then specifies that the final assistant message carries three structured
+// outputs at the end: a changes summary (the PR body lead-in), a
+// <verify>{json}</verify> block with the agent's self-reported build/test
+// outcome, and a short PR title wrapped in <pr_title>...</pr_title>. The
+// parser strips the <verify> and <pr_title> blocks out of the result event
+// and surfaces each as a separate field.
 //
 // The 72-char target matches Conventional Commits and GitHub's PR
 // title soft limit. result.Write hard-caps to that on emit (with an
@@ -44,15 +45,19 @@ const agentType = "claude-code"
 // example is enough; the structure carries the rest.
 const finalMessageInstruction = `Before finishing: when the repo has a feasible build/test command (e.g. go build ./... && go vet ./..., go test ./..., tsc, pytest), run it to verify your edits and fix failures within your turn budget.
 
-Final-message format. Your final assistant message must contain:
+Final-message format. Your final assistant message must contain, at the very end:
 
 1. A multi-line changes summary describing what you changed and why, noting the verify outcome. This becomes the PR body's lead-in.
 
-2. A short PR title (≤72 chars, imperative mood, one line) on its own line at the very end, wrapped in <pr_title>...</pr_title>. Example:
+2. The verification result as compact JSON wrapped in <verify>...</verify>. If you ran build/test: {"ran":true,"passed":true|false,"command":"<command>"}. If you did not (no buildable code, docs-only, etc.): {"ran":false,"skipped_reason":"<why>"}. Example:
+
+   <verify>{"ran":true,"passed":true,"command":"go build ./... && go vet ./..."}</verify>
+
+3. A short PR title (≤72 chars, imperative mood, one line) wrapped in <pr_title>...</pr_title>. Example:
 
    <pr_title>Add OAuth login to auth-service</pr_title>
 
-Do not emit <pr_title> anywhere except at the end of your final message.`
+Emit <verify> and <pr_title> only here, at the very end.`
 
 func init() {
 	agent.Register(agentType, NewDriver)

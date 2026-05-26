@@ -94,6 +94,13 @@ type ParsedState struct {
 	// Claude Code, parsed from a <pr_title>...</pr_title> trailer in
 	// the stream-json result event.
 	PRTitle string
+
+	// VerifyResult is the agent's self-reported build/test outcome, when it
+	// emitted one. Generic across agents — each parser extracts it from
+	// whatever convention its system prompt instructed (for Claude Code, a
+	// <verify>{json}</verify> trailer). Nil when none was reported; the
+	// runner gates the Step's commit on it.
+	VerifyResult *result.VerifyResult
 }
 
 // DriverFactory builds a Driver for the given pinned version.
