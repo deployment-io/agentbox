@@ -26,7 +26,9 @@ const rawStreamLogPath = "/scratch/agent.log"
 const agentType = "claude-code"
 
 // finalMessageInstruction is appended to Claude Code's default system
-// prompt so the agent's final assistant message carries TWO structured
+// prompt. It first asks the agent to self-verify (run build/test when
+// feasible — Tasks self-verification, see PLAN_tasks_verification.md),
+// then specifies that the final assistant message carries TWO structured
 // outputs: a longer changes summary (the message body, used as the PR
 // body lead-in) and a short PR title wrapped in <pr_title>...</pr_title>
 // tags at the end (used as the PR title). Parser strips the tag block
@@ -40,9 +42,11 @@ const agentType = "claude-code"
 // Kept deliberately terse: this prefix runs on every Claude Code call,
 // so trimming directly reduces the per-Step token bill. One worked
 // example is enough; the structure carries the rest.
-const finalMessageInstruction = `Final-message format. Your final assistant message must contain:
+const finalMessageInstruction = `Before finishing: when the repo has a feasible build/test command (e.g. go build ./... && go vet ./..., go test ./..., tsc, pytest), run it to verify your edits and fix failures within your turn budget.
 
-1. A multi-line changes summary describing what you changed and why. This becomes the PR body's lead-in.
+Final-message format. Your final assistant message must contain:
+
+1. A multi-line changes summary describing what you changed and why, noting the verify outcome. This becomes the PR body's lead-in.
 
 2. A short PR title (≤72 chars, imperative mood, one line) on its own line at the very end, wrapped in <pr_title>...</pr_title>. Example:
 

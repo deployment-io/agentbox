@@ -31,6 +31,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
+# Go toolchain — baseline language for Tasks self-verification. The agent
+# runs `go build`/`go vet`/`go test` to check its edits before commit, and
+# the `agentbox vendor` subcommand uses `go mod download` to pre-fetch
+# module deps. dpkg arch keeps the multi-arch release builds (amd64/arm64)
+# correct; GOTOOLCHAIN=local pins this version (no per-repo auto-download).
+ARG GO_VERSION=1.24.11
+RUN ARCH="$(dpkg --print-architecture)" \
+    && curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${ARCH}.tar.gz" -o /tmp/go.tgz \
+    && tar -C /usr/local -xzf /tmp/go.tgz \
+    && rm /tmp/go.tgz
+ENV PATH=/usr/local/go/bin:$PATH
+ENV GOTOOLCHAIN=local
+
 # Non-root user with pre-configured per-user install prefixes, so
 # runtime `npm install -g` and `pip install --user` work without root.
 RUN useradd -m -u 1000 agent \
