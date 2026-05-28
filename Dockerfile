@@ -50,9 +50,12 @@ ENV GOTOOLCHAIN=local
 
 # Non-root user with pre-configured per-user install prefixes, so
 # runtime `npm install -g` and `pip install --user` work without root.
+# /cache is pre-created + chowned so a fresh named volume the consumer
+# mounts there (the vendor/agent shared module cache) inherits uid-1000
+# ownership — otherwise the non-root container couldn't write to it.
 RUN useradd -m -u 1000 agent \
-    && mkdir -p /work /scratch /home/agent/.npm-global \
-    && chown -R agent:agent /work /scratch /home/agent/.npm-global
+    && mkdir -p /work /scratch /cache /home/agent/.npm-global \
+    && chown -R agent:agent /work /scratch /cache /home/agent/.npm-global
 
 ENV NPM_CONFIG_PREFIX=/home/agent/.npm-global
 ENV NPM_CONFIG_UPDATE_NOTIFIER=false
