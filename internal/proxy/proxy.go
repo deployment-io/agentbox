@@ -74,7 +74,8 @@ var hardDenyHosts = map[string]struct{}{
 // happens-before edge makes the lock-free reads safe. If a runtime
 // reload feature is ever added, add synchronization at that point.
 type AllowList struct {
-	hosts map[string]struct{}
+	hosts    map[string]struct{}
+	allowAll bool
 }
 
 // NewAllowList builds an AllowList from a slice. Duplicates are
@@ -93,12 +94,28 @@ func NewAllowList(hosts []string) *AllowList {
 	return a
 }
 
-// Allows reports whether the given host is in the allowlist. Hard-deny
-// hosts (loopback, etc.) are rejected regardless of allowlist contents.
+// NewAllowAllList builds an AllowList that admits any hostname EXCEPT the
+// hard-deny set (loopback, etc.). It does NOT relax the proxy's other
+// gates: IP-literal CONNECTs are still rejected and hostnames resolving to
+// private/special IPs (RFC 1918, link-local/cloud-metadata, …) are still
+// denied at dial time. Used for the trusted vendor phase, where pinning a
+// complete package-registry/CDN allowlist for arbitrary projects is
+// impractical.
+func NewAllowAllList() *AllowList {
+	return &AllowList{hosts: map[string]struct{}{}, allowAll: true}
+}
+
+// Allows reports whether the given host is permitted. Hard-deny hosts
+// (loopback, etc.) are rejected regardless of mode; in allow-all mode any
+// other host passes (the IP-literal and private-IP gates apply elsewhere in
+// the request path); otherwise allowlist membership is required.
 func (a *AllowList) Allows(host string) bool {
 	host = normalizeHost(host)
 	if _, denied := hardDenyHosts[host]; denied {
 		return false
+	}
+	if a.allowAll {
+		return true
 	}
 	_, ok := a.hosts[host]
 	return ok

@@ -68,7 +68,7 @@ func runAgent() {
 	// fetches) also routes through the allowlist. The HTTP_PROXY env
 	// vars get exported to agentbox's own process env so all subsequent
 	// child processes (npm, the agent itself) inherit and respect them.
-	proxySrv, err := startProxy(verifyHosts)
+	proxySrv, err := startProxy(verifyHosts, false)
 	if err != nil {
 		exitWithFailure("proxy start failed", err)
 	}
@@ -100,35 +100,38 @@ func exitWithFailure(label string, err error) {
 	os.Exit(result.ExitExecutionFailure)
 }
 
-// startProxy builds the allowlist (baseHosts ∪
-// ADDITIONAL_ALLOWED_HOSTS env var, comma-separated) and starts the
-// CONNECT proxy. Sets HTTP_PROXY, HTTPS_PROXY, NO_PROXY in agentbox's
-// own env so child processes inherit. Logs the resolved allowlist for
-// transparency.
+// startProxy starts the CONNECT proxy and exports HTTP(S)_PROXY/NO_PROXY into
+// agentbox's own env so child processes (npm, go, the agent) inherit it.
 //
-// Fallback when ADDITIONAL_ALLOWED_HOSTS is unset: just the Driver's
-// built-in allowlist applies. Empty Driver.AllowedHosts() AND empty
-// env var means the agent can't reach anything — surfaces immediately
-// as a denied CONNECT in the agent's own error output.
-//
-// Private-IP blocking defaults on (defense vs SSRF / cloud-metadata
-// resolution). Ops who legitimately need to reach internal RFC 1918
-// destinations (Nexus on 10.0.x.x, internal GitLab, etc.) can opt out
-// per-runner via AGENTBOX_BLOCK_PRIVATE_IPS=0.
-func startProxy(baseHosts []string) (*proxy.Server, error) {
-	allowed := append([]string{}, baseHosts...)
-	if extra := strings.TrimSpace(os.Getenv("ADDITIONAL_ALLOWED_HOSTS")); extra != "" {
-		for _, h := range strings.Split(extra, ",") {
-			if h := strings.TrimSpace(h); h != "" {
-				allowed = append(allowed, h)
-			}
-		}
-	}
+// allowAll=false (agent phase): the allowlist is baseHosts ∪
+// ADDITIONAL_ALLOWED_HOSTS; anything else is denied. allowAll=true (vendor
+// phase): any public host is permitted — pinning a complete package-registry
+// /CDN allowlist for arbitrary projects is impractical. Either way the
+// SSRF/metadata defenses are unchanged: IP-literal CONNECTs are rejected and
+// hostnames resolving to private/special IPs are denied (BlockPrivateIPs,
+// default on; opt out per-runner via AGENTBOX_BLOCK_PRIVATE_IPS=0).
+func startProxy(baseHosts []string, allowAll bool) (*proxy.Server, error) {
 	cfg := proxy.Config{
 		Logger:          os.Stderr,
 		BlockPrivateIPs: blockPrivateIPsFromEnv(),
 	}
-	srv, err := proxy.Start(proxy.NewAllowList(allowed), cfg)
+	var list *proxy.AllowList
+	summary := "all public hosts"
+	if allowAll {
+		list = proxy.NewAllowAllList()
+	} else {
+		allowed := append([]string{}, baseHosts...)
+		if extra := strings.TrimSpace(os.Getenv("ADDITIONAL_ALLOWED_HOSTS")); extra != "" {
+			for _, h := range strings.Split(extra, ",") {
+				if h := strings.TrimSpace(h); h != "" {
+					allowed = append(allowed, h)
+				}
+			}
+		}
+		list = proxy.NewAllowList(allowed)
+		summary = strings.Join(allowed, ",")
+	}
+	srv, err := proxy.Start(list, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -141,7 +144,7 @@ func startProxy(baseHosts []string) (*proxy.Server, error) {
 	_ = os.Setenv("NO_PROXY", "127.0.0.1,localhost")
 	_ = os.Setenv("no_proxy", "127.0.0.1,localhost")
 	fmt.Fprintf(os.Stderr, "[agentbox] proxy started on %s; allowlist: %s; block_private_ips: %t\n",
-		srv.Addr(), strings.Join(allowed, ","), cfg.BlockPrivateIPs)
+		srv.Addr(), summary, cfg.BlockPrivateIPs)
 	return srv, nil
 }
 
@@ -152,6 +155,19 @@ func startProxy(baseHosts []string) (*proxy.Server, error) {
 func blockPrivateIPsFromEnv() bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("AGENTBOX_BLOCK_PRIVATE_IPS"))) {
 	case "0", "false", "no":
+		return false
+	}
+	return true
+}
+
+// vendorAllowAllEgress reports whether the vendor phase permits all public
+// egress (the default — pinning a complete allowlist for arbitrary project
+// deps is impractical). Set AGENTBOX_VENDOR_STRICT_EGRESS=1 to fall back to
+// the per-ecosystem allowlist. Private/metadata IPs are blocked either way.
+// The agent phase is always strict, regardless of this setting.
+func vendorAllowAllEgress() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("AGENTBOX_VENDOR_STRICT_EGRESS"))) {
+	case "1", "true", "yes":
 		return false
 	}
 	return true
@@ -184,9 +200,11 @@ func runVendor() {
 	// vendor subprocesses download into the shared shelf.
 	applyEnv(plan.Env(cacheDir()))
 
-	// Detection is filesystem-only, so the proxy starts after planning —
-	// seeded with exactly the hosts the matched ecosystems need to fetch.
-	proxySrv, err := startProxy(plan.AllowedHosts())
+	// Trusted vendor phase: allow all public egress by default (a complete
+	// registry/CDN allowlist for arbitrary deps is impractical), still
+	// blocking private/metadata IPs. Opt back into the strict per-ecosystem
+	// allowlist with AGENTBOX_VENDOR_STRICT_EGRESS=1.
+	proxySrv, err := startProxy(plan.AllowedHosts(), vendorAllowAllEgress())
 	if err != nil {
 		vendorFail("proxy start failed", err)
 	}
