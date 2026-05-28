@@ -12,11 +12,14 @@ import (
 // plan logic without a real toolchain. marker, when set, makes Detect
 // match a repo dir containing a file of that name.
 type fakeDetector struct {
-	name    string
-	marker  string
-	hosts   []string
-	ensures *int
-	vendors *int
+	name        string
+	marker      string
+	hosts       []string
+	verifyHosts []string
+	env         []string
+	ensures     *int
+	vendors     *int
+	finalizes   *int
 }
 
 func (f fakeDetector) Name() string { return f.name }
@@ -51,6 +54,17 @@ func (f fakeDetector) Vendor(context.Context, string) error {
 
 func (f fakeDetector) AllowedHosts() []string { return f.hosts }
 
+func (f fakeDetector) VerifyHosts() []string { return f.verifyHosts }
+
+func (f fakeDetector) Env(string, []string) []string { return f.env }
+
+func (f fakeDetector) Finalize(string, []string) error {
+	if f.finalizes != nil {
+		*f.finalizes++
+	}
+	return nil
+}
+
 func TestRegisterDuplicatePanics(t *testing.T) {
 	defer func() {
 		if recover() == nil {
@@ -84,8 +98,8 @@ func TestPlanAllowedHostsDedupSorted(t *testing.T) {
 }
 
 func TestPlanExecuteEnsuresEachToolchainOnce(t *testing.T) {
-	var ensures, vendors int
-	d := fakeDetector{name: "go", ensures: &ensures, vendors: &vendors}
+	var ensures, vendors, finalizes int
+	d := fakeDetector{name: "go", ensures: &ensures, vendors: &vendors, finalizes: &finalizes}
 	p := &Plan{tasks: []task{
 		{detector: d, repoDir: "/a"},
 		{detector: d, repoDir: "/b"},
@@ -98,6 +112,22 @@ func TestPlanExecuteEnsuresEachToolchainOnce(t *testing.T) {
 	}
 	if vendors != 2 {
 		t.Errorf("Vendor called %d times, want 2 (once per repo)", vendors)
+	}
+	if finalizes != 1 {
+		t.Errorf("Finalize called %d times, want 1 (once per detector)", finalizes)
+	}
+}
+
+func TestPlanVerifyHostsAndEnv(t *testing.T) {
+	p := &Plan{tasks: []task{
+		{detector: fakeDetector{name: "go", verifyHosts: []string{"proxy.golang.org"}, env: []string{"GOFLAG=1"}}, repoDir: "/a"},
+		{detector: fakeDetector{name: "node", verifyHosts: []string{"registry.npmjs.org"}}, repoDir: "/b"},
+	}}
+	if got, want := p.VerifyHosts(), []string{"proxy.golang.org", "registry.npmjs.org"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("VerifyHosts() = %v, want %v", got, want)
+	}
+	if got, want := p.Env(""), []string{"GOFLAG=1"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("Env() = %v, want %v", got, want)
 	}
 }
 

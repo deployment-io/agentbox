@@ -90,3 +90,18 @@ func fileExists(path string) bool {
 func (*detector) AllowedHosts() []string {
 	return []string{"registry.npmjs.org", "registry.yarnpkg.com"}
 }
+
+// VerifyHosts are the public registries the agent phase may reach to resolve
+// verify-time JS deps (and any the agent newly adds). Same as the vendor
+// hosts — npm/yarn have no private-git-host equivalent to exclude.
+func (*detector) VerifyHosts() []string {
+	return []string{"registry.npmjs.org", "registry.yarnpkg.com"}
+}
+
+// Env: Node needs no shared-cache env — node_modules lives in the repo dir
+// under /work and persists into the agent phase on its own.
+func (*detector) Env(string, []string) []string { return nil }
+
+// Finalize: no cross-repo workspace step for Node today (yarn/npm workspaces
+// are a follow-up — see PLAN_tasks_verification.md).
+func (*detector) Finalize(string, []string) error { return nil }

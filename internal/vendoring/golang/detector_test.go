@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -41,5 +42,66 @@ func TestMetadata(t *testing.T) {
 	}
 	if len(d.AllowedHosts()) == 0 {
 		t.Error("AllowedHosts() should be non-empty")
+	}
+	if len(d.VerifyHosts()) == 0 {
+		t.Error("VerifyHosts() should be non-empty")
+	}
+}
+
+func TestEnv(t *testing.T) {
+	d := &detector{}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module github.com/acme/svc\n\ngo 1.24\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]bool{
+		"GOCACHE=" + goBuildCache:   true,
+		"GOMODCACHE=/cache/gomod":   true,
+		"GOPRIVATE=github.com/acme": true,
+	}
+	for _, kv := range d.Env("/cache", []string{dir}) {
+		delete(want, kv)
+	}
+	if len(want) != 0 {
+		t.Errorf("Env missing entries: %v", want)
+	}
+
+	// No cacheDir → no GOMODCACHE override.
+	for _, kv := range d.Env("", []string{dir}) {
+		if strings.HasPrefix(kv, "GOMODCACHE=") {
+			t.Errorf("Env(\"\") should not set GOMODCACHE, got %q", kv)
+		}
+	}
+}
+
+func TestFinalizeWritesGoWork(t *testing.T) {
+	d := &detector{}
+	work := t.TempDir()
+	a, b := filepath.Join(work, "0-kit"), filepath.Join(work, "1-app")
+	for _, dir := range []string{a, b} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := d.Finalize(work, []string{a, b}); err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(work, "go.work"))
+	if err != nil {
+		t.Fatalf("go.work not written: %v", err)
+	}
+	for _, want := range []string{"go " + goWorkspaceVersion, "use (", "./0-kit", "./1-app"} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("go.work missing %q; got:\n%s", want, data)
+		}
+	}
+
+	// <2 modules → no go.work.
+	solo := t.TempDir()
+	if err := d.Finalize(solo, []string{filepath.Join(solo, "0-only")}); err != nil {
+		t.Fatalf("Finalize(1 repo): %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(solo, "go.work")); !os.IsNotExist(err) {
+		t.Error("go.work should not be written for <2 modules")
 	}
 }

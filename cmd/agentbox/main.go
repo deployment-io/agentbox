@@ -50,12 +50,25 @@ func runAgent() {
 		exitWithFailure("driver error", err)
 	}
 
+	// Detect the in-Step languages so this phase mirrors the vendor phase's
+	// cache wiring: apply each ecosystem's Env (e.g. GOMODCACHE/GOPRIVATE so
+	// the agent's `go build` resolves the pre-vendored deps offline) and add
+	// its public verify hosts to the allowlist. Best-effort — a detection
+	// error just means no language-specific wiring.
+	verifyHosts := driver.AllowedHosts()
+	if plan, perr := vendoring.BuildPlan(cfg.WorkDir); perr == nil {
+		applyEnv(plan.Env(cacheDir()))
+		verifyHosts = append(verifyHosts, plan.VerifyHosts()...)
+	} else {
+		fmt.Fprintf(os.Stderr, "[agentbox] language detection skipped: %v\n", perr)
+	}
+
 	// Start the network-allowlist proxy before Driver.Ensure so that
 	// `npm install -g claude-code` (and any other install-time HTTPS
 	// fetches) also routes through the allowlist. The HTTP_PROXY env
 	// vars get exported to agentbox's own process env so all subsequent
 	// child processes (npm, the agent itself) inherit and respect them.
-	proxySrv, err := startProxy(driver.AllowedHosts())
+	proxySrv, err := startProxy(verifyHosts)
 	if err != nil {
 		exitWithFailure("proxy start failed", err)
 	}
@@ -167,6 +180,10 @@ func runVendor() {
 		return
 	}
 
+	// Apply each ecosystem's cache env (e.g. GOMODCACHE/GOPRIVATE) so the
+	// vendor subprocesses download into the shared shelf.
+	applyEnv(plan.Env(cacheDir()))
+
 	// Detection is filesystem-only, so the proxy starts after planning —
 	// seeded with exactly the hosts the matched ecosystems need to fetch.
 	proxySrv, err := startProxy(plan.AllowedHosts())
@@ -190,4 +207,19 @@ func runVendor() {
 func vendorFail(label string, err error) {
 	fmt.Fprintf(os.Stderr, "[agentbox] %s: %v\n", label, err)
 	os.Exit(result.ExitExecutionFailure)
+}
+
+// cacheDir is the shared module-cache mount the consumer (the runner)
+// provides via AGENTBOX_CACHE_DIR. Empty when agentbox runs standalone, in
+// which case each ecosystem falls back to its default cache location.
+func cacheDir() string { return os.Getenv("AGENTBOX_CACHE_DIR") }
+
+// applyEnv sets each "KEY=VALUE" entry in the current process env so spawned
+// subprocesses (the vendor commands, the agent) inherit it.
+func applyEnv(kvs []string) {
+	for _, kv := range kvs {
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			_ = os.Setenv(k, v)
+		}
+	}
 }

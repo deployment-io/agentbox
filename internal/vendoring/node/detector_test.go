@@ -77,4 +77,13 @@ func TestMetadata(t *testing.T) {
 	if len(d.AllowedHosts()) == 0 {
 		t.Error("AllowedHosts() should be non-empty")
 	}
+	if len(d.VerifyHosts()) == 0 {
+		t.Error("VerifyHosts() should be non-empty")
+	}
+	if d.Env("/cache", nil) != nil {
+		t.Error("Env() should be nil for Node")
+	}
+	if err := d.Finalize("/work", nil); err != nil {
+		t.Errorf("Finalize() = %v, want nil", err)
+	}
 }

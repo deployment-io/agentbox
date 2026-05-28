@@ -32,8 +32,23 @@ type Detector interface {
 	Vendor(ctx context.Context, repoDir string) error
 	// AllowedHosts are the hostnames this ecosystem's fetch needs outbound
 	// access to (package proxy, checksum db, private git host). Unioned
-	// across matched detectors to seed the vendor-phase proxy allowlist.
+	// across matched detectors to seed the VENDOR-phase proxy allowlist.
 	AllowedHosts() []string
+	// VerifyHosts are the public hostnames the AGENT phase may reach to
+	// resolve verify-time deps (and any the agent newly adds) — narrower
+	// than AllowedHosts: no private git host, since the agent holds no
+	// token. Unioned across matched detectors into the agent-phase allowlist.
+	VerifyHosts() []string
+	// Env returns the environment variables this ecosystem needs to use the
+	// shared cache, applied in BOTH phases (e.g. Go's GOMODCACHE/GOPRIVATE).
+	// cacheDir is the shared cache mount ("" when none); repoDirs are the
+	// matched repos (for deriving values like GOPRIVATE). Each "KEY=VALUE".
+	Env(cacheDir string, repoDirs []string) []string
+	// Finalize runs once after all of this ecosystem's repos are vendored,
+	// for cross-repo setup — e.g. Go writes a /work/go.work so the agent's
+	// verify resolves multi-module edits against local source. No-op for
+	// ecosystems that need none.
+	Finalize(workDir string, repoDirs []string) error
 }
 
 var registry []Detector
