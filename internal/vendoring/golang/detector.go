@@ -36,12 +36,15 @@ func (*detector) Detect(repoDir string) (bool, error) {
 // agentbox image, so it is present in both the vendor and agent phases.
 func (*detector) EnsureToolchain(context.Context) error { return nil }
 
-// Vendor populates the shared module cache with the repo's full module
-// graph. GOMODCACHE (set via Env) points at the shared shelf; GOWORK=off
-// forces standalone resolution so a checked-out repo vendors the same set
-// it would resolve in CI, not against an ambient workspace.
+// Vendor populates the shared module cache with the repo's build/test
+// dependencies (the module build list — sufficient for an offline
+// `go build`/`go test ./...`, and lighter than `download all`, which also
+// tends to rewrite go.sum). GOMODCACHE (set via Env) points at the shared
+// shelf; GOWORK=off forces standalone resolution so a checked-out repo
+// vendors the same set it would resolve in CI, not against an ambient
+// workspace.
 func (*detector) Vendor(ctx context.Context, repoDir string) error {
-	cmd := exec.CommandContext(ctx, "go", "mod", "download", "all")
+	cmd := exec.CommandContext(ctx, "go", "mod", "download")
 	cmd.Dir = repoDir
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
@@ -54,23 +57,27 @@ func (*detector) Vendor(ctx context.Context, repoDir string) error {
 
 // AllowedHosts are the hosts `go mod download` reaches:
 //   - proxy.golang.org / sum.golang.org — public module proxy + checksum db
+//   - storage.googleapis.com — the GCS backend proxy.golang.org serves
+//     module zips from; without it, downloads fail mid-fetch
 //   - github.com / objects.githubusercontent.com — direct fetch of
 //     GOPRIVATE modules (e.g. github.com/deployment-io) and their archives
 func (*detector) AllowedHosts() []string {
 	return []string{
 		"proxy.golang.org",
 		"sum.golang.org",
+		"storage.googleapis.com",
 		"github.com",
 		"objects.githubusercontent.com",
 	}
 }
 
 // VerifyHosts are the public hosts the agent phase may reach to resolve
-// verify-time Go deps — the module proxy + checksum db only. github.com is
-// deliberately excluded: private modules are pre-vendored on the shared
-// cache and the agent holds no token to fetch them directly.
+// verify-time Go deps — the module proxy, its checksum db, and the GCS
+// backend it serves zips from. github.com is deliberately excluded: private
+// modules are pre-vendored on the shared cache and the agent holds no token
+// to fetch them directly.
 func (*detector) VerifyHosts() []string {
-	return []string{"proxy.golang.org", "sum.golang.org"}
+	return []string{"proxy.golang.org", "sum.golang.org", "storage.googleapis.com"}
 }
 
 // goBuildCache is GOCACHE (compiled-artifact cache) on tmpfs — never the
