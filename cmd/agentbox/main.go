@@ -114,8 +114,6 @@ func startProxy(driver agent.Driver) (*proxy.Server, error) {
 	// NO_PROXY guards localhost so e.g. agent-internal RPC can bypass.
 	_ = os.Setenv("NO_PROXY", "127.0.0.1,localhost")
 	_ = os.Setenv("no_proxy", "127.0.0.1,localhost")
-	fmt.Fprintf(os.Stderr, "[agentbox] proxy started on %s; allowlist: %s; block_private_ips: %t\n",
-		srv.Addr(), strings.Join(allowed, ","), cfg.BlockPrivateIPs)
 	return srv, nil
 }
 

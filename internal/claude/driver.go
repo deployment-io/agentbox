@@ -87,8 +87,8 @@ func (d *Driver) Ensure(ctx context.Context) error {
 	if d.version != "" {
 		pkg += "@" + d.version
 	}
-	fmt.Fprintf(os.Stderr, "[agentbox] installing %s\n", pkg)
-	cmd := exec.CommandContext(ctx, "npm", "install", "-g", pkg)
+	fmt.Fprintf(os.Stderr, "[agentbox] using %s\n", pkg)
+	cmd := exec.CommandContext(ctx, "npm", "install", "-g", "--silent", pkg)
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
