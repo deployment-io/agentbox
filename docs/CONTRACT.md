@@ -131,11 +131,14 @@ Written on exit. Schema:
 ```
 
 The `error` field is omitted on success; all other fields are always
-populated. On failure it names the specific cause when known — e.g. a
-turn-limit exhaustion reads `claude reached its turn limit after 26
-turns; raise max_turns to allow more steps` instead of a bare `claude
-exited with error: exit status 1` — and when the agent crashed before
-reporting one, the tail of its stderr is appended. `denied_hosts` is omitted when no allowlist denies happened
+populated. On failure it carries the most specific detail available, in
+priority order: a tailored reason for known causes (e.g. a turn-limit
+exhaustion reads `claude reached its turn limit after 26 turns; raise
+max_turns to allow more steps`), else the agent's own error description,
+else the failure-subtype name (e.g. `error_during_execution`), falling
+back to the exit status plus a tail of stderr only when the agent
+crashed before reporting anything. A bare `exit status N` is never the
+whole story when the agent told us more. `denied_hosts` is omitted when no allowlist denies happened
 during the run.
 
 `denied_hosts` lists hostnames the in-process CONNECT proxy refused

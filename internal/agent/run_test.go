@@ -39,6 +39,36 @@ func TestFailureMessage_PrefersFailureReason(t *testing.T) {
 	}
 }
 
+func TestFailureMessage_PrefersAgentDescriptionOverExitStatus(t *testing.T) {
+	// The agent exited non-zero but its result event described the
+	// failure. That description must win over a bare "exit status 1" —
+	// the exit error fires for the same run and says nothing useful.
+	state := ParsedState{
+		IsError:        true,
+		ChangesSummary: "build failed: undefined symbol Foo",
+		ErrorSubtype:   "error_during_execution",
+	}
+	got := failureMessage(realExitError(t), state, "unrelated stderr noise", "claude")
+
+	if !strings.Contains(got, "build failed: undefined symbol Foo") {
+		t.Errorf("want the agent's own error description, got %q", got)
+	}
+	if strings.Contains(got, "exit status 1") {
+		t.Errorf("raw exit status should not win over the description: %q", got)
+	}
+}
+
+func TestFailureMessage_NamesSubtypeWhenNoDescription(t *testing.T) {
+	// Classified error, no description, no stderr — name the class so the
+	// subtype is never silently dropped from the surfaced error.
+	state := ParsedState{IsError: true, ErrorSubtype: "error_during_execution"}
+	got := failureMessage(realExitError(t), state, "", "claude")
+
+	if !strings.Contains(got, "error_during_execution") {
+		t.Errorf("want the subtype named when there's no other detail, got %q", got)
+	}
+}
+
 func TestFailureMessage_ExitErrorAppendsStderrTail(t *testing.T) {
 	// No FailureReason: the agent died before a result event. The only
 	// useful detail is in stderr, so it should be appended to the

@@ -239,28 +239,37 @@ func classifyFailure(err error, state ParsedState, stderrText, binary string) re
 	}
 }
 
+// failureMessage builds the result.Error string, ordered most- to
+// least-specific so the agent's own account of the failure always wins
+// over a bare exit status. The raw "exit status N" branch is the last
+// resort, reached only when the agent died without reporting anything.
 func failureMessage(err error, state ParsedState, stderrText, binary string) string {
 	switch {
 	case state.FailureReason != "":
-		// The agent's own output explained why (e.g. hit max turns) —
-		// far more actionable than a raw exit status, and the only
+		// Tailored, actionable reason (e.g. hit max turns) — and the only
 		// signal when the agent exits 0 yet reports is_error.
 		return binary + " " + state.FailureReason
+	case state.IsError && state.ChangesSummary != "":
+		// The agent emitted a result event describing the failure in its
+		// own words — prefer that over the exit status, which fires for
+		// the same run and says nothing useful.
+		return fmt.Sprintf("%s reported error: %s", binary, state.ChangesSummary)
+	case state.IsError && state.ErrorSubtype != "":
+		// Classified error with no description — at least name the class
+		// (e.g. error_during_execution) so the subtype isn't lost.
+		return fmt.Sprintf("%s reported error: %s", binary, state.ErrorSubtype)
+	case state.IsError:
+		return binary + " reported error"
 	case err != nil && isExitError(err):
-		// No structured reason: the agent likely died before emitting a
-		// result event (crash, early exit). "exit status 1" alone is
-		// useless, so append the tail of its stderr as the best
-		// available detail.
+		// No result event at all: the agent died before reporting (crash,
+		// early exit). "exit status 1" alone is useless, so append the
+		// tail of its stderr as the best available detail.
 		if tail := stderrTail(stderrText); tail != "" {
 			return fmt.Sprintf("%s exited with error: %v — %s", binary, err, tail)
 		}
 		return fmt.Sprintf("%s exited with error: %v", binary, err)
 	case err != nil:
 		return fmt.Sprintf("failed to run %s: %v", binary, err)
-	case state.IsError && state.ChangesSummary != "":
-		return fmt.Sprintf("%s reported error: %s", binary, state.ChangesSummary)
-	case state.IsError:
-		return binary + " reported error"
 	default:
 		return binary + " reported error with no detail"
 	}

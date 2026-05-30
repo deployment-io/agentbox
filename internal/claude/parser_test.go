@@ -284,6 +284,20 @@ func TestStreamParser_FailureReason(t *testing.T) {
 	}
 }
 
+func TestStreamParser_ErrorSubtypeExposedOnlyOnError(t *testing.T) {
+	p := newStreamParser()
+	p.Consume(strings.NewReader(`{"type":"result","result":"boom","is_error":true,"subtype":"error_during_execution"}`))
+	if got := p.State().ErrorSubtype; got != "error_during_execution" {
+		t.Errorf("ErrorSubtype = %q, want error_during_execution", got)
+	}
+
+	ok := newStreamParser()
+	ok.Consume(strings.NewReader(`{"type":"result","result":"done","is_error":false,"subtype":"success"}`))
+	if got := ok.State().ErrorSubtype; got != "" {
+		t.Errorf("ErrorSubtype = %q, want empty on success", got)
+	}
+}
+
 func equalStrings(a, b []string) bool {
 	if len(a) != len(b) {
 		return false

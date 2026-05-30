@@ -80,6 +80,7 @@ func (p *streamParser) State() agent.ParsedState {
 		IsError:        p.isError,
 		IsAuthFailure:  p.isAuthFailureLocked(),
 		FailureReason:  p.failureReasonLocked(),
+		ErrorSubtype:   p.errorSubtypeLocked(),
 		Model:          p.model,
 		PRTitle:        p.prTitle,
 	}
@@ -269,4 +270,15 @@ func (p *streamParser) failureReasonLocked() string {
 		return fmt.Sprintf("reached its turn limit after %d turns; raise max_turns to allow more steps", p.turns)
 	}
 	return "reached its turn limit; raise max_turns to allow more steps"
+}
+
+// errorSubtypeLocked returns the raw result-event subtype when the run
+// failed (e.g. "error_during_execution"), else "". Lets the
+// orchestrator name the failure class as a last resort so the subtype
+// is never lost from the surfaced error. Caller must hold p.mu.
+func (p *streamParser) errorSubtypeLocked() string {
+	if !p.isError {
+		return ""
+	}
+	return p.errorSubtype
 }
