@@ -252,6 +252,38 @@ func TestStreamParser_IsAuthFailure(t *testing.T) {
 	}
 }
 
+func TestStreamParser_FailureReason(t *testing.T) {
+	tests := []struct {
+		name         string
+		input        string
+		wantContains string // "" means FailureReason must be empty
+	}{
+		{"max turns with count names the count and remedy", `{"type":"result","result":"","is_error":true,"subtype":"error_max_turns","num_turns":26}`, "after 26 turns"},
+		{"max turns with count mentions max_turns", `{"type":"result","result":"","is_error":true,"subtype":"error_max_turns","num_turns":26}`, "max_turns"},
+		{"max turns without count still explains", `{"type":"result","result":"","is_error":true,"subtype":"error_max_turns"}`, "turn limit"},
+		{"success has no failure reason", `{"type":"result","result":"done","is_error":false,"subtype":"success"}`, ""},
+		{"other error subtype falls back (no reason)", `{"type":"result","result":"boom","is_error":true,"subtype":"error_during_execution"}`, ""},
+		{"error without subtype falls back (no reason)", `{"type":"result","result":"boom","is_error":true}`, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := newStreamParser()
+			p.Consume(strings.NewReader(tt.input))
+			got := p.State().FailureReason
+			if tt.wantContains == "" {
+				if got != "" {
+					t.Errorf("FailureReason = %q, want empty", got)
+				}
+				return
+			}
+			if !strings.Contains(got, tt.wantContains) {
+				t.Errorf("FailureReason = %q, want substring %q", got, tt.wantContains)
+			}
+		})
+	}
+}
+
 func equalStrings(a, b []string) bool {
 	if len(a) != len(b) {
 		return false

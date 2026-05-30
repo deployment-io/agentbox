@@ -230,7 +230,7 @@ func classifyFailure(err error, state ParsedState, stderrText, binary string) re
 	return result.Outcome{
 		Status:         result.StatusFailure,
 		ExitCode:       exitCode,
-		Error:          failureMessage(err, state, binary),
+		Error:          failureMessage(err, state, stderrText, binary),
 		ChangesSummary: state.ChangesSummary,
 		FilesChanged:   state.FilesChanged,
 		TokenUsage:     state.TokenUsage,
@@ -239,9 +239,21 @@ func classifyFailure(err error, state ParsedState, stderrText, binary string) re
 	}
 }
 
-func failureMessage(err error, state ParsedState, binary string) string {
+func failureMessage(err error, state ParsedState, stderrText, binary string) string {
 	switch {
+	case state.FailureReason != "":
+		// The agent's own output explained why (e.g. hit max turns) —
+		// far more actionable than a raw exit status, and the only
+		// signal when the agent exits 0 yet reports is_error.
+		return binary + " " + state.FailureReason
 	case err != nil && isExitError(err):
+		// No structured reason: the agent likely died before emitting a
+		// result event (crash, early exit). "exit status 1" alone is
+		// useless, so append the tail of its stderr as the best
+		// available detail.
+		if tail := stderrTail(stderrText); tail != "" {
+			return fmt.Sprintf("%s exited with error: %v — %s", binary, err, tail)
+		}
 		return fmt.Sprintf("%s exited with error: %v", binary, err)
 	case err != nil:
 		return fmt.Sprintf("failed to run %s: %v", binary, err)
@@ -257,4 +269,26 @@ func failureMessage(err error, state ParsedState, binary string) string {
 func isExitError(err error) bool {
 	var exitErr *exec.ExitError
 	return errors.As(err, &exitErr)
+}
+
+// stderrTail returns the last non-empty line of the agent's stderr,
+// trimmed and rune-capped, for embedding in a failure message. Returns
+// "" when stderr held nothing useful. This is the only failure detail
+// available when the agent dies before emitting a result event, so a
+// noisy tail still beats a bare "exit status 1"; the full stderr is
+// echoed to the container log regardless.
+func stderrTail(s string) string {
+	const maxRunes = 200
+	lines := strings.Split(s, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+		if r := []rune(line); len(r) > maxRunes {
+			return string(r[:maxRunes]) + "…"
+		}
+		return line
+	}
+	return ""
 }

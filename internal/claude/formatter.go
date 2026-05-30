@@ -405,6 +405,11 @@ func formatResult(e humanEvent) string {
 		status = "error"
 	}
 	parts := []string{"[done]", "status=" + status}
+	// Surface the agent's own failure subtype (e.g. error_max_turns) so
+	// the one-line summary says *why* it failed, not just that it did.
+	if e.IsError && e.Subtype != "" && e.Subtype != "success" {
+		parts = append(parts, "reason="+e.Subtype)
+	}
 	if e.NumTurns > 0 {
 		parts = append(parts, fmt.Sprintf("turns=%d", e.NumTurns))
 	}
