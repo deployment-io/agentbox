@@ -79,6 +79,26 @@ type ParsedState struct {
 	IsError        bool
 	IsAuthFailure  bool
 
+	// FailureReason is a human-readable, binary-agnostic explanation of
+	// why the run failed (e.g. "reached its turn limit after 26 turns;
+	// raise max_turns to allow more steps"), meant to be prefixed with
+	// the agent binary name by the orchestrator. Populated only when the
+	// agent's own output carries an actionable failure signal; empty
+	// otherwise, so the orchestrator falls back to the raw exit error +
+	// stderr. Generic across agents — each parser maps whatever its
+	// protocol surfaces. For Claude Code, derived from the stream-json
+	// result event's subtype (e.g. error_max_turns).
+	FailureReason string
+
+	// ErrorSubtype is the raw failure classifier the agent reported
+	// (e.g. "error_during_execution"), or "" on success / when the agent
+	// reported none. Distinct from FailureReason: this is the unmapped
+	// machine token, used to name the failure class when no better
+	// human detail (description or stderr) is available, so a subtype is
+	// never silently dropped from the surfaced error. For Claude Code,
+	// the stream-json result event's subtype field.
+	ErrorSubtype string
+
 	// Model is the actual model identifier the agent reported using
 	// (when the agent exposes one). Generic across agents — each parser
 	// populates from whatever its protocol surfaces, or leaves empty.

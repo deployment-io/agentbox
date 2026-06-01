@@ -83,6 +83,23 @@ func TestHumanLogFormatter_FixtureEmitsExpectedLines(t *testing.T) {
 	}
 }
 
+func TestFormatResult_IncludesFailureSubtype(t *testing.T) {
+	got := formatResult(humanEvent{Type: "result", IsError: true, Subtype: "error_max_turns", NumTurns: 26})
+	if !strings.Contains(got, "status=error") {
+		t.Errorf("want status=error in %q", got)
+	}
+	if !strings.Contains(got, "reason=error_max_turns") {
+		t.Errorf("want reason=error_max_turns in %q", got)
+	}
+}
+
+func TestFormatResult_SuccessHasNoReason(t *testing.T) {
+	got := formatResult(humanEvent{Type: "result", IsError: false, Subtype: "success", NumTurns: 4})
+	if strings.Contains(got, "reason=") {
+		t.Errorf("success line should not carry reason=: %q", got)
+	}
+}
+
 func TestHumanLogFormatter_PassesThroughNonJSON(t *testing.T) {
 	var sink bytes.Buffer
 	f := newHumanLogFormatter(&sink, nil)

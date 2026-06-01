@@ -62,6 +62,11 @@ are translated to lines like:
 [done] status=ok turns=4 tokens=1.2k/350 duration=23.1s summary=…
 ```
 
+On a failed run the `[done]` line reads `status=error` and, when the
+agent reported a specific failure subtype, carries a `reason=` token —
+e.g. `[done] status=error reason=error_max_turns turns=26 …` — so the
+cause is visible without opening `/result.json`.
+
 Per-message usage counters, session IDs, UUIDs, parent-tool-use IDs,
 and thinking signatures are dropped — they're encryption material or
 debugging hooks, never useful to a human reader. Lines that don't
@@ -126,7 +131,14 @@ Written on exit. Schema:
 ```
 
 The `error` field is omitted on success; all other fields are always
-populated. `denied_hosts` is omitted when no allowlist denies happened
+populated. On failure it carries the most specific detail available, in
+priority order: a tailored reason for known causes (e.g. a turn-limit
+exhaustion reads `claude reached its turn limit after 26 turns; raise
+max_turns to allow more steps`), else the agent's own error description,
+else the failure-subtype name (e.g. `error_during_execution`), falling
+back to the exit status plus a tail of stderr only when the agent
+crashed before reporting anything. A bare `exit status N` is never the
+whole story when the agent told us more. `denied_hosts` is omitted when no allowlist denies happened
 during the run.
 
 `denied_hosts` lists hostnames the in-process CONNECT proxy refused

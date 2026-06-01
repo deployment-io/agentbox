@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"regexp"
 	"sort"
@@ -82,6 +83,8 @@ func (p *streamParser) State() agent.ParsedState {
 		Turns:          p.turns,
 		IsError:        p.isError,
 		IsAuthFailure:  p.isAuthFailureLocked(),
+		FailureReason:  p.failureReasonLocked(),
+		ErrorSubtype:   p.errorSubtypeLocked(),
 		Model:          p.model,
 		PRTitle:        p.prTitle,
 		VerifyResult:   p.verifyResult,
@@ -275,4 +278,37 @@ func (p *streamParser) isAuthFailureLocked() bool {
 		return true
 	}
 	return agent.HasAuthKeyword(strings.ToLower(p.changesSummary))
+}
+
+// failureReasonLocked maps Claude Code's result-event subtype to a
+// human-readable failure predicate (e.g. "reached its turn limit after
+// 26 turns ..."), meant to be prefixed with the agent binary name by
+// the caller. Returns "" when the subtype carries no actionable detail,
+// letting the orchestrator fall back to the raw exit error + stderr.
+//
+// Only error_max_turns is special-cased: it's the one failure whose
+// remedy (raise max_turns) the message can name, and Claude Code can
+// signal it while exiting 0, so a status-only message would be
+// actively misleading. error_during_execution and friends are left to
+// the fallback path, which surfaces the agent's stderr — more useful
+// than a generic restatement of the subtype. Caller must hold p.mu.
+func (p *streamParser) failureReasonLocked() string {
+	if !p.isError || p.errorSubtype != "error_max_turns" {
+		return ""
+	}
+	if p.turns > 0 {
+		return fmt.Sprintf("reached its turn limit after %d turns; raise max_turns to allow more steps", p.turns)
+	}
+	return "reached its turn limit; raise max_turns to allow more steps"
+}
+
+// errorSubtypeLocked returns the raw result-event subtype when the run
+// failed (e.g. "error_during_execution"), else "". Lets the
+// orchestrator name the failure class as a last resort so the subtype
+// is never lost from the surfaced error. Caller must hold p.mu.
+func (p *streamParser) errorSubtypeLocked() string {
+	if !p.isError {
+		return ""
+	}
+	return p.errorSubtype
 }
