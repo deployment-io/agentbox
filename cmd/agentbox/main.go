@@ -116,7 +116,6 @@ func startProxy(baseHosts []string, allowAll bool) (*proxy.Server, error) {
 		BlockPrivateIPs: blockPrivateIPsFromEnv(),
 	}
 	var list *proxy.AllowList
-	summary := "all public hosts"
 	if allowAll {
 		list = proxy.NewAllowAllList()
 	} else {
@@ -129,7 +128,6 @@ func startProxy(baseHosts []string, allowAll bool) (*proxy.Server, error) {
 			}
 		}
 		list = proxy.NewAllowList(allowed)
-		summary = strings.Join(allowed, ",")
 	}
 	srv, err := proxy.Start(list, cfg)
 	if err != nil {
