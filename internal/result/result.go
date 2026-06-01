@@ -92,6 +92,13 @@ type Outcome struct {
 	// what + why. PRTitle is title-shaped (imperative mood, one line).
 	PRTitle string `json:"pr_title,omitempty"`
 
+	// VerifyResult captures the in-container build/test check the agent
+	// runs before declaring done (Tasks self-verification). Nil/omitted
+	// until the agent-output parser populates it; the runner gates
+	// CommitAndPush on VerifyResult.Passed when present. See
+	// PLAN_tasks_verification.md.
+	VerifyResult *VerifyResult `json:"verify_result,omitempty"`
+
 	// ExitCode is the classified exit code (see Exit* constants:
 	// 0 success, 1 generic execution failure, 2 auth/rate-limit,
 	// 3 cancelled, 4 timeout). agentbox's process exits with this
@@ -104,6 +111,22 @@ type TokenUsage struct {
 	InputTokens     int `json:"input_tokens"`
 	OutputTokens    int `json:"output_tokens"`
 	CacheReadTokens int `json:"cache_read_tokens"`
+}
+
+// VerifyResult is the structured outcome of the agent's in-container
+// build/test verification. Ran is false when no verify ran (no
+// detectable build command, or the agent judged it unnecessary), in
+// which case SkippedReason carries a one-liner. When Ran is true, Passed
+// reflects the verify command's exit status and the *Tail fields carry
+// the (capped) command output for debugging and Re-run-with-feedback.
+type VerifyResult struct {
+	Ran           bool   `json:"ran"`
+	Passed        bool   `json:"passed"`
+	Command       string `json:"command,omitempty"`
+	DurationMs    int64  `json:"duration_ms,omitempty"`
+	StdoutTail    string `json:"stdout_tail,omitempty"`
+	StderrTail    string `json:"stderr_tail,omitempty"`
+	SkippedReason string `json:"skipped_reason,omitempty"`
 }
 
 // Path returns the destination for result.json — $RESULT_PATH or the

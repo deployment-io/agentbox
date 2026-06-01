@@ -46,6 +46,10 @@ type streamParser struct {
 	// final assistant message's <pr_title>...</pr_title> trailer (see
 	// finalMessageInstruction in driver.go).
 	prTitle string
+	// verifyResult is the agent's self-reported build/test outcome, parsed
+	// from the final message's <verify>{json}</verify> trailer. Nil when the
+	// agent emitted none (or the JSON didn't parse).
+	verifyResult *result.VerifyResult
 }
 
 func newStreamParser() *streamParser {
@@ -80,6 +84,7 @@ func (p *streamParser) State() agent.ParsedState {
 		IsAuthFailure:  p.isAuthFailureLocked(),
 		Model:          p.model,
 		PRTitle:        p.prTitle,
+		VerifyResult:   p.verifyResult,
 	}
 }
 
@@ -178,10 +183,12 @@ func (p *streamParser) processAssistantMessage(raw json.RawMessage) {
 
 func (p *streamParser) processResultEvent(event streamEvent) {
 	summary, prTitle := splitPRTitleTrailer(event.Result)
+	summary, verify := splitVerifyTrailer(summary)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.changesSummary = summary
 	p.prTitle = prTitle
+	p.verifyResult = verify
 	p.turns = event.NumTurns
 	p.isError = event.IsError
 	p.errorSubtype = event.Subtype
@@ -208,6 +215,29 @@ func splitPRTitleTrailer(result string) (summary, prTitle string) {
 	prTitle = strings.TrimSpace(result[match[2]:match[3]])
 	summary = strings.TrimRightFunc(result[:match[0]]+result[match[1]:], isSpaceOrNewline)
 	return summary, prTitle
+}
+
+// verifyRe matches the <verify>{json}</verify> trailer carrying the agent's
+// self-reported build/test outcome (see finalMessageInstruction).
+var verifyRe = regexp.MustCompile(`(?s)<verify>(.*?)</verify>`)
+
+// splitVerifyTrailer extracts and parses the <verify> JSON block from the
+// agent's final message. Returns the summary with the tag removed and the
+// parsed VerifyResult — nil when the block is absent or the JSON doesn't
+// parse. A missing or garbled block is "no verify reported", never a hard
+// error; the tag is still stripped so it can't leak into the PR body.
+func splitVerifyTrailer(text string) (summary string, verify *result.VerifyResult) {
+	match := verifyRe.FindStringSubmatchIndex(text)
+	if match == nil {
+		return text, nil
+	}
+	payload := strings.TrimSpace(text[match[2]:match[3]])
+	summary = strings.TrimRightFunc(text[:match[0]]+text[match[1]:], isSpaceOrNewline)
+	var vr result.VerifyResult
+	if err := json.Unmarshal([]byte(payload), &vr); err != nil {
+		return summary, nil
+	}
+	return summary, &vr
 }
 
 func isSpaceOrNewline(r rune) bool {
