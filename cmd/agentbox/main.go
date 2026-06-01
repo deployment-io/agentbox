@@ -17,13 +17,26 @@ import (
 	"github.com/deployment-io/agentbox/internal/proxy"
 	"github.com/deployment-io/agentbox/internal/result"
 	"github.com/deployment-io/agentbox/internal/signals"
+	"github.com/deployment-io/agentbox/internal/vendoring"
 
-	// Side-effect import: registers "claude-code" as a Driver with the
-	// agent package. To ship additional agents, add their package below.
+	// Side-effect imports register agents (Driver) and vendor detectors.
+	// To ship additional agents or languages, add their package here.
 	_ "github.com/deployment-io/agentbox/internal/claude"
+	_ "github.com/deployment-io/agentbox/internal/vendoring/golang"
+	_ "github.com/deployment-io/agentbox/internal/vendoring/node"
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "vendor" {
+		runVendor()
+		return
+	}
+	runAgent()
+}
+
+// runAgent is the default mode: install the agent, run it against
+// WORK_DIR, and write result.json.
+func runAgent() {
 	cfg, err := config.Load()
 	if err != nil {
 		exitWithFailure("config error", err)
@@ -37,12 +50,25 @@ func main() {
 		exitWithFailure("driver error", err)
 	}
 
+	// Detect the in-Step languages so this phase mirrors the vendor phase's
+	// cache wiring: apply each ecosystem's Env (e.g. GOMODCACHE/GOPRIVATE so
+	// the agent's `go build` resolves the pre-vendored deps offline) and add
+	// its public verify hosts to the allowlist. Best-effort — a detection
+	// error just means no language-specific wiring.
+	verifyHosts := driver.AllowedHosts()
+	if plan, perr := vendoring.BuildPlan(cfg.WorkDir); perr == nil {
+		applyEnv(plan.Env(cacheDir()))
+		verifyHosts = append(verifyHosts, plan.VerifyHosts()...)
+	} else {
+		fmt.Fprintf(os.Stderr, "[agentbox] language detection skipped: %v\n", perr)
+	}
+
 	// Start the network-allowlist proxy before Driver.Ensure so that
 	// `npm install -g claude-code` (and any other install-time HTTPS
 	// fetches) also routes through the allowlist. The HTTP_PROXY env
 	// vars get exported to agentbox's own process env so all subsequent
 	// child processes (npm, the agent itself) inherit and respect them.
-	proxySrv, err := startProxy(driver)
+	proxySrv, err := startProxy(verifyHosts, false)
 	if err != nil {
 		exitWithFailure("proxy start failed", err)
 	}
@@ -74,35 +100,38 @@ func exitWithFailure(label string, err error) {
 	os.Exit(result.ExitExecutionFailure)
 }
 
-// startProxy builds the allowlist (Driver-declared hosts ∪
-// ADDITIONAL_ALLOWED_HOSTS env var, comma-separated) and starts the
-// CONNECT proxy. Sets HTTP_PROXY, HTTPS_PROXY, NO_PROXY in agentbox's
-// own env so child processes inherit. Logs the resolved allowlist for
-// transparency.
+// startProxy starts the CONNECT proxy and exports HTTP(S)_PROXY/NO_PROXY into
+// agentbox's own env so child processes (npm, go, the agent) inherit it.
 //
-// Fallback when ADDITIONAL_ALLOWED_HOSTS is unset: just the Driver's
-// built-in allowlist applies. Empty Driver.AllowedHosts() AND empty
-// env var means the agent can't reach anything — surfaces immediately
-// as a denied CONNECT in the agent's own error output.
-//
-// Private-IP blocking defaults on (defense vs SSRF / cloud-metadata
-// resolution). Ops who legitimately need to reach internal RFC 1918
-// destinations (Nexus on 10.0.x.x, internal GitLab, etc.) can opt out
-// per-runner via AGENTBOX_BLOCK_PRIVATE_IPS=0.
-func startProxy(driver agent.Driver) (*proxy.Server, error) {
-	allowed := append([]string{}, driver.AllowedHosts()...)
-	if extra := strings.TrimSpace(os.Getenv("ADDITIONAL_ALLOWED_HOSTS")); extra != "" {
-		for _, h := range strings.Split(extra, ",") {
-			if h := strings.TrimSpace(h); h != "" {
-				allowed = append(allowed, h)
-			}
-		}
-	}
+// allowAll=false (agent phase): the allowlist is baseHosts ∪
+// ADDITIONAL_ALLOWED_HOSTS; anything else is denied. allowAll=true (vendor
+// phase): any public host is permitted — pinning a complete package-registry
+// /CDN allowlist for arbitrary projects is impractical. Either way the
+// SSRF/metadata defenses are unchanged: IP-literal CONNECTs are rejected and
+// hostnames resolving to private/special IPs are denied (BlockPrivateIPs,
+// default on; opt out per-runner via AGENTBOX_BLOCK_PRIVATE_IPS=0).
+func startProxy(baseHosts []string, allowAll bool) (*proxy.Server, error) {
 	cfg := proxy.Config{
 		Logger:          os.Stderr,
 		BlockPrivateIPs: blockPrivateIPsFromEnv(),
 	}
-	srv, err := proxy.Start(proxy.NewAllowList(allowed), cfg)
+	var list *proxy.AllowList
+	summary := "all public hosts"
+	if allowAll {
+		list = proxy.NewAllowAllList()
+	} else {
+		allowed := append([]string{}, baseHosts...)
+		if extra := strings.TrimSpace(os.Getenv("ADDITIONAL_ALLOWED_HOSTS")); extra != "" {
+			for _, h := range strings.Split(extra, ",") {
+				if h := strings.TrimSpace(h); h != "" {
+					allowed = append(allowed, h)
+				}
+			}
+		}
+		list = proxy.NewAllowList(allowed)
+		summary = strings.Join(allowed, ",")
+	}
+	srv, err := proxy.Start(list, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -115,7 +144,7 @@ func startProxy(driver agent.Driver) (*proxy.Server, error) {
 	_ = os.Setenv("NO_PROXY", "127.0.0.1,localhost")
 	_ = os.Setenv("no_proxy", "127.0.0.1,localhost")
 	fmt.Fprintf(os.Stderr, "[agentbox] proxy started on %s; allowlist: %s; block_private_ips: %t\n",
-		srv.Addr(), strings.Join(allowed, ","), cfg.BlockPrivateIPs)
+		srv.Addr(), summary, cfg.BlockPrivateIPs)
 	return srv, nil
 }
 
@@ -129,4 +158,86 @@ func blockPrivateIPsFromEnv() bool {
 		return false
 	}
 	return true
+}
+
+// vendorAllowAllEgress reports whether the vendor phase permits all public
+// egress (the default — pinning a complete allowlist for arbitrary project
+// deps is impractical). Set AGENTBOX_VENDOR_STRICT_EGRESS=1 to fall back to
+// the per-ecosystem allowlist. Private/metadata IPs are blocked either way.
+// The agent phase is always strict, regardless of this setting.
+func vendorAllowAllEgress() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("AGENTBOX_VENDOR_STRICT_EGRESS"))) {
+	case "1", "true", "yes":
+		return false
+	}
+	return true
+}
+
+// runVendor is the `agentbox vendor` subcommand. It pre-fetches each
+// in-Step repo's dependencies into the shared module cache using the
+// vendor-phase credentials, so the credential-less agent phase can build
+// and verify offline. Unlike the agent path it writes no result.json;
+// the runner reads its exit code (0 = vendored, non-zero = fetch failed).
+// See PLAN_tasks_verification.md.
+func runVendor() {
+	ctx, cancel := signals.NewContext(context.Background())
+	defer cancel()
+
+	workDir := os.Getenv("WORK_DIR")
+	if workDir == "" {
+		workDir = "/work"
+	}
+	plan, err := vendoring.BuildPlan(workDir)
+	if err != nil {
+		vendorFail("vendor planning failed", err)
+	}
+	if plan.Empty() {
+		fmt.Fprintf(os.Stderr, "[agentbox] vendor: no supported ecosystems detected under %s; nothing to do\n", workDir)
+		return
+	}
+
+	// Apply each ecosystem's cache env (e.g. GOMODCACHE/GOPRIVATE) so the
+	// vendor subprocesses download into the shared shelf.
+	applyEnv(plan.Env(cacheDir()))
+
+	// Trusted vendor phase: allow all public egress by default (a complete
+	// registry/CDN allowlist for arbitrary deps is impractical), still
+	// blocking private/metadata IPs. Opt back into the strict per-ecosystem
+	// allowlist with AGENTBOX_VENDOR_STRICT_EGRESS=1.
+	proxySrv, err := startProxy(plan.AllowedHosts(), vendorAllowAllEgress())
+	if err != nil {
+		vendorFail("proxy start failed", err)
+	}
+	defer proxySrv.Close()
+
+	if err := vendoring.ConfigureGit(os.Getenv("GIT_TOKEN")); err != nil {
+		vendorFail("git credential setup failed", err)
+	}
+	if err := plan.Execute(ctx); err != nil {
+		vendorFail("vendor failed", err)
+	}
+	fmt.Fprintln(os.Stderr, "[agentbox] vendor: complete")
+}
+
+// vendorFail logs and exits non-zero. Vendor mode emits no result.json;
+// the runner distinguishes vendor failures from agent failures by which
+// phase's container returned the non-zero code.
+func vendorFail(label string, err error) {
+	fmt.Fprintf(os.Stderr, "[agentbox] %s: %v\n", label, err)
+	os.Exit(result.ExitExecutionFailure)
+}
+
+// cacheDir is the shared module-cache mount the consumer (the runner)
+// provides via AGENTBOX_CACHE_DIR. Empty when agentbox runs standalone, in
+// which case each ecosystem falls back to its default cache location.
+func cacheDir() string { return os.Getenv("AGENTBOX_CACHE_DIR") }
+
+// applyEnv sets each "KEY=VALUE" entry in the current process env so spawned
+// subprocesses (the vendor commands, the agent) inherit it.
+func applyEnv(kvs []string) {
+	for _, kv := range kvs {
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			_ = os.Setenv(k, v)
+		}
+	}
 }
