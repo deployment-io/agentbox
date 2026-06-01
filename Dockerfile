@@ -15,7 +15,10 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
 FROM debian:bookworm-slim
 
 # Language runtimes and build tools needed by supported agents.
-# Node: Claude Code (npm-packaged).
+# Node + yarn + pnpm: Claude Code (npm-packaged), plus package-manager-
+# agnostic JS/TS dependency vendoring + verify (npm / yarn / pnpm). These
+# install to the system prefix (before NPM_CONFIG_PREFIX is set below), so
+# they survive the runtime tmpfs mounted over /home/agent.
 # Python: Aider and future pip-packaged agents (v2+).
 # build-essential, git, curl: used by agents at runtime.
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -28,14 +31,31 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates \
     && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
+    && npm install -g yarn pnpm \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
+# Go toolchain — baseline language for Tasks self-verification. The agent
+# runs `go build`/`go vet`/`go test` to check its edits before commit, and
+# the `agentbox vendor` subcommand uses `go mod download` to pre-fetch
+# module deps. dpkg arch keeps the multi-arch release builds (amd64/arm64)
+# correct; GOTOOLCHAIN=local pins this version (no per-repo auto-download).
+ARG GO_VERSION=1.24.11
+RUN ARCH="$(dpkg --print-architecture)" \
+    && curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${ARCH}.tar.gz" -o /tmp/go.tgz \
+    && tar -C /usr/local -xzf /tmp/go.tgz \
+    && rm /tmp/go.tgz
+ENV PATH=/usr/local/go/bin:$PATH
+ENV GOTOOLCHAIN=local
+
 # Non-root user with pre-configured per-user install prefixes, so
 # runtime `npm install -g` and `pip install --user` work without root.
+# /cache is pre-created + chowned so a fresh named volume the consumer
+# mounts there (the vendor/agent shared module cache) inherits uid-1000
+# ownership — otherwise the non-root container couldn't write to it.
 RUN useradd -m -u 1000 agent \
-    && mkdir -p /work /scratch /home/agent/.npm-global \
-    && chown -R agent:agent /work /scratch /home/agent/.npm-global
+    && mkdir -p /work /scratch /cache /home/agent/.npm-global \
+    && chown -R agent:agent /work /scratch /cache /home/agent/.npm-global
 
 ENV NPM_CONFIG_PREFIX=/home/agent/.npm-global
 ENV NPM_CONFIG_UPDATE_NOTIFIER=false
