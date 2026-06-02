@@ -98,9 +98,37 @@ func (*detector) VerifyHosts() []string {
 	return []string{"registry.npmjs.org", "registry.yarnpkg.com"}
 }
 
-// Env: Node needs no shared-cache env — node_modules lives in the repo dir
-// under /work and persists into the agent phase on its own.
-func (*detector) Env(string, []string) []string { return nil }
+// Env redirects each supported package manager's tarball / content-store
+// cache onto the shared cache volume when one is mounted. node_modules
+// itself lives in the repo dir under /work and persists into the agent
+// phase on its own — that part is unchanged. What this fixes is the
+// _intermediate_ download cache: by default yarn/npm/pnpm write to
+// ~/.cache/yarn, ~/.npm, ~/.local/share/pnpm/store, all of which land in
+// /home/agent — a tmpfs mount sized at 1 GB in the runner spawn. Big
+// projects (a Vite app pulls in every-platform @rollup/rollup-* via
+// rollup's optionalDependencies, easily >1 GB combined) ENOSPC on
+// install. Pointing the caches at the disk-backed /cache named volume
+// gets us off tmpfs and incidentally enables cross-Step caching once
+// /cache is reused across runs. cacheDir == "" (no shared cache mounted)
+// keeps each tool's default location, so single-process / dev runs are
+// unaffected.
+func (*detector) Env(cacheDir string, _ []string) []string {
+	if cacheDir == "" {
+		return nil
+	}
+	return []string{
+		// yarn (classic 1.x): standard env var for the tarball cache.
+		"YARN_CACHE_FOLDER=" + filepath.Join(cacheDir, "yarn"),
+		// npm: maps to the `cache` config key (covers tarballs +
+		// metadata). pnpm reads npm_config_* too, so this also moves
+		// pnpm's auxiliary cache off /home/agent.
+		"npm_config_cache=" + filepath.Join(cacheDir, "npm"),
+		// pnpm: its content-addressable store is configured separately
+		// from `cache`. Setting npm_config_store_dir is the env-var
+		// equivalent of `--store-dir` and avoids per-version flag drift.
+		"npm_config_store_dir=" + filepath.Join(cacheDir, "pnpm"),
+	}
+}
 
 // Finalize: no cross-repo workspace step for Node today (yarn/npm workspaces
 // are a follow-up — see PLAN_tasks_verification.md).
