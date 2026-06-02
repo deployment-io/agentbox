@@ -80,10 +80,34 @@ func TestMetadata(t *testing.T) {
 	if len(d.VerifyHosts()) == 0 {
 		t.Error("VerifyHosts() should be non-empty")
 	}
-	if d.Env("/cache", nil) != nil {
-		t.Error("Env() should be nil for Node")
-	}
 	if err := d.Finalize("/work", nil); err != nil {
 		t.Errorf("Finalize() = %v, want nil", err)
+	}
+}
+
+// TestEnvRedirectsToSharedCache verifies that when cacheDir is set, each
+// supported package manager's cache env var points into a subdirectory
+// of the shared cache — moving big tarball downloads off the
+// memory-backed /home/agent tmpfs.
+func TestEnvRedirectsToSharedCache(t *testing.T) {
+	d := &detector{}
+	got := d.Env("/cache", nil)
+	want := []string{
+		"YARN_CACHE_FOLDER=/cache/yarn",
+		"npm_config_cache=/cache/npm",
+		"npm_config_store_dir=/cache/pnpm",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Env(\"/cache\", nil) = %v, want %v", got, want)
+	}
+}
+
+// TestEnvEmptyCacheDirIsNoop confirms that with no shared cache mounted
+// the detector falls back to each package manager's default location.
+// Important so standalone agentbox runs (no /cache volume) keep working.
+func TestEnvEmptyCacheDirIsNoop(t *testing.T) {
+	d := &detector{}
+	if got := d.Env("", nil); got != nil {
+		t.Errorf("Env(\"\", nil) = %v, want nil (let pkg managers use defaults)", got)
 	}
 }
