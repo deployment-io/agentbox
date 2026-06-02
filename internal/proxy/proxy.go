@@ -302,7 +302,7 @@ func (s *Server) handle(client net.Conn) {
 		s.handleForwardHTTP(client, req)
 	default:
 		s.deny(client, http.StatusMethodNotAllowed,
-			fmt.Sprintf("agentbox proxy: method %s not supported", req.Method),
+			fmt.Sprintf("agentbox proxy: method %s to %q not supported", req.Method, req.URL.String()),
 			fmt.Sprintf("method-not-allowed:%s", req.Method))
 	}
 }
@@ -312,11 +312,11 @@ func (s *Server) handle(client net.Conn) {
 func (s *Server) handleConnect(client net.Conn, req *http.Request) {
 	host, port, err := net.SplitHostPort(req.URL.Host)
 	if err != nil {
-		s.deny(client, http.StatusBadRequest, "agentbox proxy: invalid host:port", "invalid-host")
+		s.deny(client, http.StatusBadRequest, fmt.Sprintf("agentbox proxy: invalid host:port %q in CONNECT", req.URL.Host), "invalid-host")
 		return
 	}
 	if port != "443" {
-		s.deny(client, http.StatusForbidden, fmt.Sprintf("agentbox proxy: only port 443 allowed, got %s", port), fmt.Sprintf("non-443-port:%s", host))
+		s.deny(client, http.StatusForbidden, fmt.Sprintf("agentbox proxy: only port 443 allowed for CONNECT, got %s:%s", host, port), fmt.Sprintf("non-443-port:%s", host))
 		return
 	}
 	// IP-literal CONNECTs are an SSRF/metadata-IP attack pattern. No
@@ -348,11 +348,18 @@ func (s *Server) handleForwardHTTP(client net.Conn, req *http.Request) {
 	// A relative URL (URL.Host == "") would be a request to us as an
 	// origin — we don't serve content, just bounce it.
 	if req.URL.Host == "" || req.URL.Scheme == "" {
-		s.deny(client, http.StatusBadRequest, "agentbox proxy: HTTP forward requires absolute URL in the request line", "invalid-request")
+		s.deny(client, http.StatusBadRequest,
+			fmt.Sprintf("agentbox proxy: HTTP forward requires absolute URL in the request line; got %s with Host=%q path=%q", req.Method, req.Host, req.URL.RequestURI()),
+			"invalid-request")
 		return
 	}
 	if strings.ToLower(req.URL.Scheme) != "http" {
-		s.deny(client, http.StatusBadRequest, fmt.Sprintf("agentbox proxy: HTTP forward only supports http:// (use CONNECT for %s)", req.URL.Scheme), "non-http-scheme")
+		// Common cause: axios (etc.) misconfigured to send the target URL
+		// as a forward-GET instead of CONNECT for https targets — set
+		// HTTPS_PROXY env, or proxy.protocol='https' in the client config.
+		s.deny(client, http.StatusBadRequest,
+			fmt.Sprintf("agentbox proxy: HTTPS via plain HTTP forward not supported (proxy is CONNECT-only for HTTPS); got %s %q — clients should send CONNECT for https targets", req.Method, req.URL.String()),
+			fmt.Sprintf("non-http-scheme:%s", req.URL.Host))
 		return
 	}
 	host, port, err := net.SplitHostPort(req.URL.Host)
@@ -361,7 +368,7 @@ func (s *Server) handleForwardHTTP(client net.Conn, req *http.Request) {
 		host, port = req.URL.Host, "80"
 	}
 	if port != "80" {
-		s.deny(client, http.StatusForbidden, fmt.Sprintf("agentbox proxy: only port 80 allowed for HTTP forward, got %s", port), fmt.Sprintf("non-80-port:%s", host))
+		s.deny(client, http.StatusForbidden, fmt.Sprintf("agentbox proxy: only port 80 allowed for HTTP forward, got %s:%s", host, port), fmt.Sprintf("non-80-port:%s", host))
 		return
 	}
 	if net.ParseIP(host) != nil {
