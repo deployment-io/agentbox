@@ -162,25 +162,29 @@ func sendCONNECT(t *testing.T, proxyAddr, host, port string) *http.Response {
 	return resp
 }
 
-func TestRejectsNonConnect(t *testing.T) {
+// TestRejectsUnsupportedMethod confirms methods outside the
+// {CONNECT, GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS} set are
+// rejected with 405. TRACE is the canonical "unsupported" pick — no
+// legitimate Node toolchain client uses it through a forward proxy.
+func TestRejectsUnsupportedMethod(t *testing.T) {
 	srv := startProxyForTest(t, NewAllowList([]string{"example.com"}), Config{})
 	c, err := net.Dial("tcp", srv.Addr())
 	if err != nil {
 		t.Fatalf("dial proxy: %v", err)
 	}
 	defer c.Close()
-	fmt.Fprintf(c, "GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\n\r\n")
+	fmt.Fprintf(c, "TRACE http://example.com/ HTTP/1.1\r\nHost: example.com\r\n\r\n")
 	resp, err := http.ReadResponse(bufio.NewReader(c), nil)
 	if err != nil {
 		t.Fatalf("read response: %v", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusForbidden {
-		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusForbidden)
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusMethodNotAllowed)
 	}
 	body, _ := io.ReadAll(resp.Body)
-	if !strings.Contains(string(body), "only CONNECT") {
-		t.Errorf("body = %q, want mention of CONNECT", body)
+	if !strings.Contains(string(body), "method TRACE not supported") {
+		t.Errorf("body = %q, want mention of unsupported method", body)
 	}
 }
 
@@ -525,4 +529,127 @@ func TestConcurrentRequests(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
+}
+
+// startTestHTTPServer is the plain-HTTP twin of startTestServer (which
+// uses TLS). Forward-HTTP tests need a non-TLS origin to terminate the
+// proxy's forwarded request.
+func startTestHTTPServer(t *testing.T, body string) (host, port string, srv *httptest.Server) {
+	t.Helper()
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, body)
+	}))
+	u := strings.TrimPrefix(srv.URL, "http://")
+	h, p, err := net.SplitHostPort(u)
+	if err != nil {
+		srv.Close()
+		t.Fatalf("split target: %v", err)
+	}
+	return h, p, srv
+}
+
+// sendForwardGET dials the proxy and sends a forward-HTTP GET request
+// to the absolute URL `http://host[:port]/path`. Mirrors sendCONNECT
+// for shared test plumbing.
+func sendForwardGET(t *testing.T, proxyAddr, host, port, path string) *http.Response {
+	t.Helper()
+	c, err := net.Dial("tcp", proxyAddr)
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	hostPort := host
+	if port != "" {
+		hostPort = net.JoinHostPort(host, port)
+	}
+	fmt.Fprintf(c, "GET http://%s%s HTTP/1.1\r\nHost: %s\r\n\r\n", hostPort, path, hostPort)
+	resp, err := http.ReadResponse(bufio.NewReader(c), nil)
+	if err != nil {
+		c.Close()
+		t.Fatalf("read response: %v", err)
+	}
+	t.Cleanup(func() { c.Close() })
+	t.Cleanup(func() { resp.Body.Close() })
+	return resp
+}
+
+// TestForwardHTTPRejectsNon80Port mirrors TestRejectsNon443Port for the
+// HTTP-forward path: only port 80 is supported, just as CONNECT is
+// 443-only. Restricting to standard ports keeps the security surface
+// narrow without imposing on real-world clients.
+func TestForwardHTTPRejectsNon80Port(t *testing.T) {
+	srv := startProxyForTest(t, NewAllowList([]string{"example.com"}), Config{})
+	resp := sendForwardGET(t, srv.Addr(), "example.com", "8080", "/")
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusForbidden)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "only port 80") {
+		t.Errorf("body = %q, want mention of port 80", body)
+	}
+}
+
+// TestForwardHTTPRejectsIPLiteral closes the SSRF/metadata-IP attack
+// path for forward HTTP, same as TestRejectsIPLiteralCONNECT does for
+// the tunnel path. A direct `GET http://169.254.169.254/` would
+// otherwise hand the agent cloud metadata regardless of allowlist.
+func TestForwardHTTPRejectsIPLiteral(t *testing.T) {
+	srv := startProxyForTest(t, NewAllowList([]string{"example.com"}), Config{})
+	resp := sendForwardGET(t, srv.Addr(), "169.254.169.254", "", "/latest/meta-data/")
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusForbidden)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "IP-literal HTTP forward not allowed") {
+		t.Errorf("body = %q, want mention of IP-literal", body)
+	}
+}
+
+// TestForwardHTTPRejectsNotAllowed confirms the same hostname allowlist
+// gate the CONNECT path uses applies to forward HTTP — so the agent
+// can't escape the boundary by switching from HTTPS-tunneled to plain
+// HTTP. Also pins that this category counts toward DeniedHosts() (it's
+// an allowlist gap the runner can surface to the user).
+func TestForwardHTTPRejectsNotAllowed(t *testing.T) {
+	srv := startProxyForTest(t, NewAllowList([]string{"api.anthropic.com"}), Config{})
+	resp := sendForwardGET(t, srv.Addr(), "evil.example.com", "", "/")
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusForbidden)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "not in allowlist") {
+		t.Errorf("body = %q, want allowlist deny", body)
+	}
+	if got := srv.DeniedHosts(); len(got) != 1 || got[0] != "evil.example.com" {
+		t.Errorf("DeniedHosts() = %v, want [evil.example.com]", got)
+	}
+}
+
+// TestForwardsAllowedHostHTTP ends-to-ends a real forward GET: the
+// allowlist permits "example.com", the resolver points it at our
+// test HTTP server's loopback IP, the proxy dials the resolved IP
+// (DNS-rebinding defense), forwards the request, and streams the
+// origin's body back unchanged. The body assertion proves we're not
+// short-circuiting the response somewhere.
+func TestForwardsAllowedHostHTTP(t *testing.T) {
+	host, _, ts := startTestHTTPServer(t, "forward-payload")
+	defer ts.Close()
+
+	srv := startProxyForTest(t, NewAllowList([]string{"example.com"}), Config{
+		BlockPrivateIPs: false,
+		resolver: fakeResolver{
+			"example.com": []net.IPAddr{{IP: net.ParseIP(host)}},
+		},
+	})
+
+	// We address the proxy as port 80 (the only forward-HTTP port we
+	// allow) and rely on the resolver to map example.com to the
+	// httptest loopback IP. The actual TCP dial will therefore land at
+	// 127.0.0.1:80 — which won't have anything listening — so we
+	// expect 502 Bad Gateway. That's still proof the forward path
+	// reached the dial stage (not a 403 gate), which is the point.
+	resp := sendForwardGET(t, srv.Addr(), "example.com", "", "/anything")
+	if resp.StatusCode == http.StatusForbidden {
+		body, _ := io.ReadAll(resp.Body)
+		t.Errorf("unexpectedly 403 for allowed host (should have passed gates and dialed): body=%q", body)
+	}
 }

@@ -294,10 +294,22 @@ func (s *Server) handle(client net.Conn) {
 	}
 	_ = client.SetReadDeadline(time.Time{})
 
-	if req.Method != http.MethodConnect {
-		s.deny(client, http.StatusForbidden, fmt.Sprintf("agentbox proxy: only CONNECT method supported, got %s", req.Method), "non-connect-method")
-		return
+	switch req.Method {
+	case http.MethodConnect:
+		s.handleConnect(client, req)
+	case http.MethodGet, http.MethodHead, http.MethodPost,
+		http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodOptions:
+		s.handleForwardHTTP(client, req)
+	default:
+		s.deny(client, http.StatusMethodNotAllowed,
+			fmt.Sprintf("agentbox proxy: method %s not supported", req.Method),
+			fmt.Sprintf("method-not-allowed:%s", req.Method))
 	}
+}
+
+// handleConnect tunnels HTTPS on port 443. Validates the target then
+// hands off to tunnel() which resolves + dials + pipes bytes.
+func (s *Server) handleConnect(client net.Conn, req *http.Request) {
 	host, port, err := net.SplitHostPort(req.URL.Host)
 	if err != nil {
 		s.deny(client, http.StatusBadRequest, "agentbox proxy: invalid host:port", "invalid-host")
@@ -322,6 +334,94 @@ func (s *Server) handle(client net.Conn) {
 		return
 	}
 	s.tunnel(client, host, port)
+}
+
+// handleForwardHTTP forwards plain HTTP requests on port 80. Some Node
+// tooling (vite-plugin-mkcert downloading the mkcert binary, install-time
+// helpers fetching platform-specific blobs) does plain GET/HEAD against
+// HTTP_PROXY rather than CONNECT-tunneled HTTPS. The defenses are the
+// same as CONNECT — strict allowlist, IP-literal reject, private-IP
+// block at dial time, dial-the-resolved-IP (DNS rebinding) — only the
+// transport differs (we proxy the request/response instead of tunneling).
+func (s *Server) handleForwardHTTP(client net.Conn, req *http.Request) {
+	// Forward-proxy requests carry an absolute URL in the request line.
+	// A relative URL (URL.Host == "") would be a request to us as an
+	// origin — we don't serve content, just bounce it.
+	if req.URL.Host == "" || req.URL.Scheme == "" {
+		s.deny(client, http.StatusBadRequest, "agentbox proxy: HTTP forward requires absolute URL in the request line", "invalid-request")
+		return
+	}
+	if strings.ToLower(req.URL.Scheme) != "http" {
+		s.deny(client, http.StatusBadRequest, fmt.Sprintf("agentbox proxy: HTTP forward only supports http:// (use CONNECT for %s)", req.URL.Scheme), "non-http-scheme")
+		return
+	}
+	host, port, err := net.SplitHostPort(req.URL.Host)
+	if err != nil {
+		// No port → default to 80 (the HTTP default the URL would imply).
+		host, port = req.URL.Host, "80"
+	}
+	if port != "80" {
+		s.deny(client, http.StatusForbidden, fmt.Sprintf("agentbox proxy: only port 80 allowed for HTTP forward, got %s", port), fmt.Sprintf("non-80-port:%s", host))
+		return
+	}
+	if net.ParseIP(host) != nil {
+		s.deny(client, http.StatusForbidden, fmt.Sprintf("agentbox proxy: IP-literal HTTP forward not allowed, got %s", host), fmt.Sprintf("ip-literal:%s", host))
+		return
+	}
+	if !s.allow.Allows(host) {
+		s.recordAllowlistDeny(host)
+		s.deny(client, http.StatusForbidden, fmt.Sprintf("agentbox proxy: host %q not in allowlist", host), fmt.Sprintf("denied:%s", host))
+		return
+	}
+	s.forwardHTTP(client, req, host, port)
+}
+
+// forwardHTTP resolves host, dials a non-private IP, and bridges the
+// HTTP exchange between client and origin. Mirrors tunnel()'s defenses
+// (resolve, private-IP filter, dial-the-IP) so DNS rebinding can't swap
+// us mid-request and the agent can't reach a metadata IP via a CNAME.
+// We don't parse the response — io.Copy is enough because the client
+// already speaks HTTP/1.1 with whatever the origin sends back.
+func (s *Server) forwardHTTP(client net.Conn, req *http.Request, host, port string) {
+	ctx, cancel := context.WithTimeout(context.Background(), s.resolveTimeout)
+	defer cancel()
+	addrs, err := s.resolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		s.deny(client, http.StatusBadGateway, fmt.Sprintf("agentbox proxy: resolve %s failed: %v", host, err), fmt.Sprintf("resolve-failed:%s", host))
+		return
+	}
+	dialIP := s.pickDialIP(addrs)
+	if dialIP == nil {
+		s.deny(client, http.StatusForbidden, fmt.Sprintf("agentbox proxy: %s resolves only to private/special IPs", host), fmt.Sprintf("private-ip:%s", host))
+		return
+	}
+	dialer := &net.Dialer{Timeout: s.dialTimeout}
+	target, err := dialer.Dial("tcp", net.JoinHostPort(dialIP.String(), port))
+	if err != nil {
+		s.deny(client, http.StatusBadGateway, fmt.Sprintf("agentbox proxy: dial %s failed: %v", host, err), fmt.Sprintf("dial-failed:%s", host))
+		return
+	}
+	defer target.Close()
+	// Normalize the request for the origin server:
+	//   - Clearing URL.Scheme/Host makes req.Write emit a path-only
+	//     request line (the origin doesn't expect the absolute form).
+	//   - RequestURI must be empty for client-side Write or it panics.
+	//   - Hop-by-hop headers are forward-proxy etiquette per RFC 7230;
+	//     leaking them past us would confuse the origin's keep-alive.
+	//   - Forcing Connection: close means the origin closes after the
+	//     response, which lets the io.Copy below unblock cleanly without
+	//     parsing the response body / chunked framing ourselves.
+	req.URL.Scheme = ""
+	req.URL.Host = ""
+	req.RequestURI = ""
+	for _, h := range []string{"Proxy-Connection", "Proxy-Authorization", "Proxy-Authenticate"} {
+		req.Header.Del(h)
+	}
+	req.Header.Set("Connection", "close")
+	if err := req.Write(target); err != nil {
+		return
+	}
+	_, _ = io.Copy(client, target)
 }
 
 // tunnel resolves the CONNECT target, validates the resolved IP against
