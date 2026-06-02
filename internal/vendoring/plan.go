@@ -9,14 +9,6 @@ import (
 	"strings"
 )
 
-// maxRepoSearchDepth bounds how many directory levels below workDir
-// BuildPlan walks looking for a detector match. 2 matches both supported
-// layouts: the runner's checkout (/work/<idx>-<owner>/<repo>/, depth 2)
-// and flat dev mounts (/work/<repo>/, depth 1). Walking deeper invites
-// false matches inside language-specific dependency dirs (node_modules,
-// target/, __pycache__, …) on layouts we don't ship.
-const maxRepoSearchDepth = 2
-
 // task pairs a matched detector with the repo directory it matched.
 type task struct {
 	detector Detector
@@ -31,62 +23,45 @@ type Plan struct {
 	tasks   []task
 }
 
-// BuildPlan walks the directory tree under workDir up to
-// maxRepoSearchDepth levels and records a task for every (detector, repo)
-// match. Descent stops at any directory that already matched a detector,
-// so a matched repo's interior (sub-packages, vendored deps, node_modules)
-// is not searched and cannot double-match. Hidden dirs (e.g. .git, .github)
-// are also pruned. The runner's checkout layout puts repos at
-// /work/<idx>-<owner>/<repo>/ (depth 2); flat layouts like /work/<repo>/
-// (depth 1) are equally supported. Detection is filesystem-only, so it is
-// safe to call before the egress proxy is started.
+// BuildPlan walks the runner's deterministic checkout layout —
+// /work/<idx>-<owner>/<repo>/ — running every registered detector against
+// each <repo>. Each immediate child of workDir is treated as an owner
+// group, and each immediate child of an owner group as a repo candidate.
+// Files and dot-prefixed directories at either level are ignored.
+// Detection is filesystem-only, so it is safe to call before the egress
+// proxy is started.
 func BuildPlan(workDir string) (*Plan, error) {
 	p := &Plan{workDir: workDir}
-	if err := discoverRepos(p, workDir, 1); err != nil {
-		return nil, err
+	owners, err := os.ReadDir(workDir)
+	if err != nil {
+		return nil, fmt.Errorf("read work dir %s: %w", workDir, err)
+	}
+	for _, o := range owners {
+		if !o.IsDir() || strings.HasPrefix(o.Name(), ".") {
+			continue
+		}
+		ownerDir := filepath.Join(workDir, o.Name())
+		repos, err := os.ReadDir(ownerDir)
+		if err != nil {
+			return nil, fmt.Errorf("read owner dir %s: %w", ownerDir, err)
+		}
+		for _, r := range repos {
+			if !r.IsDir() || strings.HasPrefix(r.Name(), ".") {
+				continue
+			}
+			repoDir := filepath.Join(ownerDir, r.Name())
+			for _, d := range registry {
+				ok, err := d.Detect(repoDir)
+				if err != nil {
+					return nil, fmt.Errorf("detect %s in %s: %w", d.Name(), repoDir, err)
+				}
+				if ok {
+					p.tasks = append(p.tasks, task{detector: d, repoDir: repoDir})
+				}
+			}
+		}
 	}
 	return p, nil
-}
-
-// discoverRepos walks dir's children, running each registered detector
-// against each subdirectory. Matched dirs are recorded and not descended
-// into; unmatched dirs recurse up to maxRepoSearchDepth levels deep.
-func discoverRepos(p *Plan, dir string, depth int) error {
-	if depth > maxRepoSearchDepth {
-		return nil
-	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return fmt.Errorf("read dir %s: %w", dir, err)
-	}
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		name := e.Name()
-		if strings.HasPrefix(name, ".") {
-			continue
-		}
-		sub := filepath.Join(dir, name)
-		matched := false
-		for _, d := range registry {
-			ok, err := d.Detect(sub)
-			if err != nil {
-				return fmt.Errorf("detect %s in %s: %w", d.Name(), sub, err)
-			}
-			if ok {
-				p.tasks = append(p.tasks, task{detector: d, repoDir: sub})
-				matched = true
-			}
-		}
-		if matched {
-			continue
-		}
-		if err := discoverRepos(p, sub, depth+1); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 // Empty reports whether no ecosystems were detected.

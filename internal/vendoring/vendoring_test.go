@@ -131,18 +131,25 @@ func TestPlanVerifyHostsAndEnv(t *testing.T) {
 	}
 }
 
-func TestBuildPlanDetectsRepoSubdirs(t *testing.T) {
-	Register(fakeDetector{name: "buildplan-test", marker: "trigger.marker"})
+// TestBuildPlanIgnoresEmptyAndFileEntries confirms file entries at workDir
+// or owner level, plus empty owner dirs, are tolerated without error and
+// don't produce spurious matches.
+func TestBuildPlanIgnoresEmptyAndFileEntries(t *testing.T) {
+	Register(fakeDetector{name: "buildplan-tolerate", marker: "match.marker"})
 
 	work := t.TempDir()
-	repo := filepath.Join(work, "0-acme-svc")
+	repo := filepath.Join(work, "0-acme", "svc")
 	if err := os.MkdirAll(repo, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(repo, "trigger.marker"), []byte("x"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(repo, "match.marker"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(work, "1-no-match"), 0o755); err != nil {
+	// Empty owner dir + stray file at workDir level — both should be ignored.
+	if err := os.MkdirAll(filepath.Join(work, "1-empty-owner"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(work, "stray.txt"), []byte("noise"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -150,17 +157,9 @@ func TestBuildPlanDetectsRepoSubdirs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildPlan: %v", err)
 	}
-	matches := 0
-	for _, tk := range p.tasks {
-		if tk.detector.Name() == "buildplan-test" {
-			matches++
-			if tk.repoDir != repo {
-				t.Errorf("matched repoDir = %q, want %q", tk.repoDir, repo)
-			}
-		}
-	}
-	if matches != 1 {
-		t.Errorf("buildplan-test matched %d dirs, want 1", matches)
+	got := matchedDirs(p, "buildplan-tolerate")
+	if want := []string{repo}; !reflect.DeepEqual(got, want) {
+		t.Errorf("matched = %v, want %v", got, want)
 	}
 }
 
@@ -209,36 +208,9 @@ func TestBuildPlanRunnerLayout(t *testing.T) {
 	}
 }
 
-// TestBuildPlanStopsAtMatch ensures a matched repo's interior isn't
-// searched — a nested go.mod inside a matched parent must not double-match.
-func TestBuildPlanStopsAtMatch(t *testing.T) {
-	Register(fakeDetector{name: "buildplan-stop", marker: "stop.marker"})
-
-	work := t.TempDir()
-	repo := filepath.Join(work, "svc")
-	nested := filepath.Join(repo, "sub-pkg")
-	if err := os.MkdirAll(nested, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	for _, dir := range []string{repo, nested} {
-		if err := os.WriteFile(filepath.Join(dir, "stop.marker"), []byte("x"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	p, err := BuildPlan(work)
-	if err != nil {
-		t.Fatalf("BuildPlan: %v", err)
-	}
-	got := matchedDirs(p, "buildplan-stop")
-	if want := []string{repo}; !reflect.DeepEqual(got, want) {
-		t.Errorf("matched = %v, want %v (outer repo only — must not descend into matched parent)", got, want)
-	}
-}
-
 // TestBuildPlanSkipsHidden confirms dotfile directories (.git, .github, …)
-// are pruned during discovery — universal OS convention, applies regardless
-// of which language detectors are registered.
+// at either the owner or the repo level are ignored — universal OS
+// convention, applies regardless of which language detectors are registered.
 func TestBuildPlanSkipsHidden(t *testing.T) {
 	Register(fakeDetector{name: "buildplan-skip", marker: "skip.marker"})
 
