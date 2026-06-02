@@ -80,23 +80,36 @@ func (*detector) VerifyHosts() []string {
 	return []string{"proxy.golang.org", "sum.golang.org", "storage.googleapis.com"}
 }
 
-// goBuildCache is GOCACHE (compiled-artifact cache) on tmpfs — never the
-// shared module shelf.
-const goBuildCache = "/tmp/gocache"
-
 // goWorkspaceVersion is the `go` directive written into a generated go.work.
 // Must be >= every in-Step module's go directive; tracks the Go baked into
 // the agentbox image (GO_VERSION in the Dockerfile) — bump together.
 const goWorkspaceVersion = "1.24.11"
 
-// Env points the toolchain at the shared module cache and marks the in-Step
-// repos' module owners as private (direct git via the vendor token, not the
-// public proxy). cacheDir is "" when no shared cache is mounted, in which
-// case Go falls back to its default module cache.
+// Env points the toolchain at the shared cache and marks the in-Step repos'
+// module owners as private (direct git via the vendor token, not the public
+// proxy). When cacheDir is set (the runner-spawned production case), every
+// cache-like env var — module cache, build cache, and the per-invocation
+// scratch dir — moves onto the disk-backed /cache volume. The build cache
+// in particular previously lived on /tmp (a 512 MB tmpfs); a kit-scale dep
+// graph fills that during `go build ./...` and the resulting ENOSPC
+// cascades into every subsequent shell command failing because /tmp is
+// also where bash/coreutils write scratch — mirrors the v1.3.2 Node cache
+// redirect, same shape, different ecosystem. When cacheDir is "" (no
+// shared cache mounted, standalone runs) the defaults stand so the
+// detector stays usable in dev/integration setups without a /cache volume.
 func (*detector) Env(cacheDir string, repoDirs []string) []string {
-	env := []string{"GOCACHE=" + goBuildCache}
+	var env []string
 	if cacheDir != "" {
-		env = append(env, "GOMODCACHE="+filepath.Join(cacheDir, "gomod"))
+		env = append(env,
+			"GOMODCACHE="+filepath.Join(cacheDir, "gomod"),
+			// GOCACHE = persistent compiled-artifact cache (survives
+			// across Steps once /cache is reused).
+			"GOCACHE="+filepath.Join(cacheDir, "gobuild"),
+			// GOTMPDIR = where `go build` writes per-invocation scratch
+			// (importcfg, link inputs, the b<N> tree). Not reused
+			// across builds; just needs disk room.
+			"GOTMPDIR="+filepath.Join(cacheDir, "gotmp"),
+		)
 	}
 	if gp := goPrivate(repoDirs); gp != "" {
 		env = append(env, "GOPRIVATE="+gp)

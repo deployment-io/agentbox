@@ -54,22 +54,30 @@ func TestEnv(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module github.com/acme/svc\n\ngo 1.24\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// With a shared /cache mounted: every cache-like var moves onto the
+	// disk-backed shelf. GOCACHE and GOTMPDIR matter just as much as
+	// GOMODCACHE — /tmp tmpfs is only 512 MB, kit-scale builds fill it
+	// and ENOSPC cascades into every shell command failing.
 	want := map[string]bool{
-		"GOCACHE=" + goBuildCache:   true,
 		"GOMODCACHE=/cache/gomod":   true,
+		"GOCACHE=/cache/gobuild":    true,
+		"GOTMPDIR=/cache/gotmp":     true,
 		"GOPRIVATE=github.com/acme": true,
 	}
 	for _, kv := range d.Env("/cache", []string{dir}) {
 		delete(want, kv)
 	}
 	if len(want) != 0 {
-		t.Errorf("Env missing entries: %v", want)
+		t.Errorf("Env(\"/cache\") missing entries: %v", want)
 	}
 
-	// No cacheDir → no GOMODCACHE override.
+	// No cacheDir → none of the redirects fire (let Go use its defaults).
+	// Standalone dev/integration runs without a /cache mount stay usable.
 	for _, kv := range d.Env("", []string{dir}) {
-		if strings.HasPrefix(kv, "GOMODCACHE=") {
-			t.Errorf("Env(\"\") should not set GOMODCACHE, got %q", kv)
+		for _, k := range []string{"GOMODCACHE=", "GOCACHE=", "GOTMPDIR="} {
+			if strings.HasPrefix(kv, k) {
+				t.Errorf("Env(\"\") should not set %s, got %q", k, kv)
+			}
 		}
 	}
 }
