@@ -10,19 +10,12 @@ import (
 )
 
 // maxRepoSearchDepth bounds how many directory levels below workDir
-// BuildPlan walks looking for a detector match. The runner's checkout
-// layout places repos at depth 2 (/work/<idx>-<owner>/<repo>/); 3 is a
-// safety margin for unusual mounts without inviting an unbounded walk.
-const maxRepoSearchDepth = 3
-
-// skipDirNames are directories never recursed into during discovery.
-// They commonly hold thousands of nested manifests (node_modules,
-// vendored Go deps) that are not themselves repos and would slow
-// detection to a crawl on real-world projects.
-var skipDirNames = map[string]struct{}{
-	"node_modules": {},
-	"vendor":       {},
-}
+// BuildPlan walks looking for a detector match. 2 matches both supported
+// layouts: the runner's checkout (/work/<idx>-<owner>/<repo>/, depth 2)
+// and flat dev mounts (/work/<repo>/, depth 1). Walking deeper invites
+// false matches inside language-specific dependency dirs (node_modules,
+// target/, __pycache__, …) on layouts we don't ship.
+const maxRepoSearchDepth = 2
 
 // task pairs a matched detector with the repo directory it matched.
 type task struct {
@@ -43,8 +36,8 @@ type Plan struct {
 // match. Descent stops at any directory that already matched a detector,
 // so a matched repo's interior (sub-packages, vendored deps, node_modules)
 // is not searched and cannot double-match. Hidden dirs (e.g. .git, .github)
-// and skipDirNames are also pruned. The runner's checkout layout puts repos
-// at /work/<idx>-<owner>/<repo>/ (depth 2); flat layouts like /work/<repo>/
+// are also pruned. The runner's checkout layout puts repos at
+// /work/<idx>-<owner>/<repo>/ (depth 2); flat layouts like /work/<repo>/
 // (depth 1) are equally supported. Detection is filesystem-only, so it is
 // safe to call before the egress proxy is started.
 func BuildPlan(workDir string) (*Plan, error) {
@@ -72,9 +65,6 @@ func discoverRepos(p *Plan, dir string, depth int) error {
 		}
 		name := e.Name()
 		if strings.HasPrefix(name, ".") {
-			continue
-		}
-		if _, skip := skipDirNames[name]; skip {
 			continue
 		}
 		sub := filepath.Join(dir, name)

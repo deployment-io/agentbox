@@ -236,23 +236,19 @@ func TestBuildPlanStopsAtMatch(t *testing.T) {
 	}
 }
 
-// TestBuildPlanSkipsNodeModulesAndHidden confirms node_modules / vendor /
-// dotfile directories are pruned so a manifest deep in transitive deps
-// doesn't masquerade as a repo to vendor.
-func TestBuildPlanSkipsNodeModulesAndHidden(t *testing.T) {
+// TestBuildPlanSkipsHidden confirms dotfile directories (.git, .github, …)
+// are pruned during discovery — universal OS convention, applies regardless
+// of which language detectors are registered.
+func TestBuildPlanSkipsHidden(t *testing.T) {
 	Register(fakeDetector{name: "buildplan-skip", marker: "skip.marker"})
 
 	work := t.TempDir()
-	for _, dir := range []string{
-		filepath.Join(work, "node_modules", "dep"),
-		filepath.Join(work, ".git", "objects"),
-	} {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(dir, "skip.marker"), []byte("x"), 0o644); err != nil {
-			t.Fatal(err)
-		}
+	hidden := filepath.Join(work, ".git", "objects")
+	if err := os.MkdirAll(hidden, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hidden, "skip.marker"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
 	}
 
 	p, err := BuildPlan(work)
@@ -260,6 +256,6 @@ func TestBuildPlanSkipsNodeModulesAndHidden(t *testing.T) {
 		t.Fatalf("BuildPlan: %v", err)
 	}
 	if got := matchedDirs(p, "buildplan-skip"); len(got) != 0 {
-		t.Errorf("matched = %v, want none (node_modules + hidden dirs must be pruned)", got)
+		t.Errorf("matched = %v, want none (hidden dirs must be pruned)", got)
 	}
 }
