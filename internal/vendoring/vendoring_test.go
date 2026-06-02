@@ -172,3 +172,94 @@ func TestConfigureGitEmptyIsNoop(t *testing.T) {
 		t.Errorf("ConfigureGit(spaces) = %v, want nil", err)
 	}
 }
+
+// matchedDirs returns the repo dirs the given detector name matched in p.
+func matchedDirs(p *Plan, name string) []string {
+	var out []string
+	for _, tk := range p.tasks {
+		if tk.detector.Name() == name {
+			out = append(out, tk.repoDir)
+		}
+	}
+	return out
+}
+
+// TestBuildPlanRunnerLayout exercises the runner's two-level checkout
+// layout (/work/<idx>-<owner>/<repo>/) — the case the original
+// single-level walk silently missed.
+func TestBuildPlanRunnerLayout(t *testing.T) {
+	Register(fakeDetector{name: "buildplan-runner", marker: "go.mod.marker"})
+
+	work := t.TempDir()
+	repo := filepath.Join(work, "0-deployment-io", "team-ai")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "go.mod.marker"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	p, err := BuildPlan(work)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+	got := matchedDirs(p, "buildplan-runner")
+	if want := []string{repo}; !reflect.DeepEqual(got, want) {
+		t.Errorf("matched = %v, want %v", got, want)
+	}
+}
+
+// TestBuildPlanStopsAtMatch ensures a matched repo's interior isn't
+// searched — a nested go.mod inside a matched parent must not double-match.
+func TestBuildPlanStopsAtMatch(t *testing.T) {
+	Register(fakeDetector{name: "buildplan-stop", marker: "stop.marker"})
+
+	work := t.TempDir()
+	repo := filepath.Join(work, "svc")
+	nested := filepath.Join(repo, "sub-pkg")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{repo, nested} {
+		if err := os.WriteFile(filepath.Join(dir, "stop.marker"), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	p, err := BuildPlan(work)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+	got := matchedDirs(p, "buildplan-stop")
+	if want := []string{repo}; !reflect.DeepEqual(got, want) {
+		t.Errorf("matched = %v, want %v (outer repo only — must not descend into matched parent)", got, want)
+	}
+}
+
+// TestBuildPlanSkipsNodeModulesAndHidden confirms node_modules / vendor /
+// dotfile directories are pruned so a manifest deep in transitive deps
+// doesn't masquerade as a repo to vendor.
+func TestBuildPlanSkipsNodeModulesAndHidden(t *testing.T) {
+	Register(fakeDetector{name: "buildplan-skip", marker: "skip.marker"})
+
+	work := t.TempDir()
+	for _, dir := range []string{
+		filepath.Join(work, "node_modules", "dep"),
+		filepath.Join(work, ".git", "objects"),
+	} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "skip.marker"), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	p, err := BuildPlan(work)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+	if got := matchedDirs(p, "buildplan-skip"); len(got) != 0 {
+		t.Errorf("matched = %v, want none (node_modules + hidden dirs must be pruned)", got)
+	}
+}
