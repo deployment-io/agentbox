@@ -183,8 +183,14 @@ func TestRejectsUnsupportedMethod(t *testing.T) {
 		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusMethodNotAllowed)
 	}
 	body, _ := io.ReadAll(resp.Body)
-	if !strings.Contains(string(body), "method TRACE not supported") {
-		t.Errorf("body = %q, want mention of unsupported method", body)
+	// Pin both the method and the target URL — the deny message should
+	// name what was requested so an operator can debug from the log line
+	// alone, not just the rejection class.
+	if !strings.Contains(string(body), "TRACE") {
+		t.Errorf("body = %q, want mention of TRACE method", body)
+	}
+	if !strings.Contains(string(body), "http://example.com/") {
+		t.Errorf("body = %q, want mention of target URL", body)
 	}
 }
 
@@ -195,6 +201,9 @@ func TestRejectsNon443Port(t *testing.T) {
 		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusForbidden)
 	}
 	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "example.com:8080") {
+		t.Errorf("body = %q, want mention of host:port", body)
+	}
 	if !strings.Contains(string(body), "only port 443") {
 		t.Errorf("body = %q, want mention of port 443", body)
 	}
@@ -583,8 +592,42 @@ func TestForwardHTTPRejectsNon80Port(t *testing.T) {
 		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusForbidden)
 	}
 	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "example.com:8080") {
+		t.Errorf("body = %q, want mention of host:port", body)
+	}
 	if !strings.Contains(string(body), "only port 80") {
 		t.Errorf("body = %q, want mention of port 80", body)
+	}
+}
+
+// TestRejectsHTTPSForwardWithTargetURL pins the deny message for the
+// motivating real-world case: an axios client (vite-plugin-mkcert) sends
+// `GET https://github.com/...` through HTTP_PROXY instead of CONNECT.
+// The proxy must (a) reject it because we don't terminate TLS, AND
+// (b) name the offending URL so an operator can pinpoint which dep is
+// misconfigured without parsing a downstream stack trace.
+func TestRejectsHTTPSForwardWithTargetURL(t *testing.T) {
+	srv := startProxyForTest(t, NewAllowList([]string{"github.com"}), Config{})
+	c, err := net.Dial("tcp", srv.Addr())
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	defer c.Close()
+	fmt.Fprintf(c, "GET https://github.com/foo/bar/releases HTTP/1.1\r\nHost: github.com\r\n\r\n")
+	resp, err := http.ReadResponse(bufio.NewReader(c), nil)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "https://github.com/foo/bar/releases") {
+		t.Errorf("body = %q, want full target URL", body)
+	}
+	if !strings.Contains(string(body), "CONNECT") {
+		t.Errorf("body = %q, want hint to use CONNECT", body)
 	}
 }
 
