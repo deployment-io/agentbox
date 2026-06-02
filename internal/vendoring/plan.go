@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 )
 
 // task pairs a matched detector with the repo directory it matched.
@@ -22,28 +23,41 @@ type Plan struct {
 	tasks   []task
 }
 
-// BuildPlan walks the immediate subdirectories of workDir (the per-repo
-// checkout layout, e.g. /work/0-acme-svc) and records a task for every
-// (detector, repo) match. Detection is filesystem-only, so it is safe to
-// call before the egress proxy is started.
+// BuildPlan walks the runner's deterministic checkout layout —
+// /work/<idx>-<owner>/<repo>/ — running every registered detector against
+// each <repo>. Each immediate child of workDir is treated as an owner
+// group, and each immediate child of an owner group as a repo candidate.
+// Files and dot-prefixed directories at either level are ignored.
+// Detection is filesystem-only, so it is safe to call before the egress
+// proxy is started.
 func BuildPlan(workDir string) (*Plan, error) {
-	entries, err := os.ReadDir(workDir)
+	p := &Plan{workDir: workDir}
+	owners, err := os.ReadDir(workDir)
 	if err != nil {
 		return nil, fmt.Errorf("read work dir %s: %w", workDir, err)
 	}
-	p := &Plan{workDir: workDir}
-	for _, e := range entries {
-		if !e.IsDir() {
+	for _, o := range owners {
+		if !o.IsDir() || strings.HasPrefix(o.Name(), ".") {
 			continue
 		}
-		repoDir := filepath.Join(workDir, e.Name())
-		for _, d := range registry {
-			ok, err := d.Detect(repoDir)
-			if err != nil {
-				return nil, fmt.Errorf("detect %s in %s: %w", d.Name(), repoDir, err)
+		ownerDir := filepath.Join(workDir, o.Name())
+		repos, err := os.ReadDir(ownerDir)
+		if err != nil {
+			return nil, fmt.Errorf("read owner dir %s: %w", ownerDir, err)
+		}
+		for _, r := range repos {
+			if !r.IsDir() || strings.HasPrefix(r.Name(), ".") {
+				continue
 			}
-			if ok {
-				p.tasks = append(p.tasks, task{detector: d, repoDir: repoDir})
+			repoDir := filepath.Join(ownerDir, r.Name())
+			for _, d := range registry {
+				ok, err := d.Detect(repoDir)
+				if err != nil {
+					return nil, fmt.Errorf("detect %s in %s: %w", d.Name(), repoDir, err)
+				}
+				if ok {
+					p.tasks = append(p.tasks, task{detector: d, repoDir: repoDir})
+				}
 			}
 		}
 	}
