@@ -100,6 +100,21 @@ const goWorkspaceVersion = "1.24.11"
 func (*detector) Env(cacheDir string, repoDirs []string) []string {
 	var env []string
 	if cacheDir != "" {
+		// Pre-create the cache subdirs before anyone consumes the env.
+		// `go build` requires GOCACHE and GOTMPDIR to exist (it
+		// MkdirAll's the per-invocation b<N> tree underneath but does
+		// not create the parent); if either is missing the build aborts
+		// before doing useful work with a misleading "mkdir" error
+		// pointing at the temp tree rather than at GOTMPDIR itself.
+		// GOMODCACHE is auto-created by `go mod download` so it isn't
+		// strictly necessary, but a symmetric MkdirAll keeps the
+		// invariant obvious and survives partial /cache wipes. Errors
+		// are intentionally swallowed — if MkdirAll fails here the
+		// subsequent go invocation will surface a real, actionable
+		// permission/ENOSPC error pointing at the env-var value.
+		for _, sub := range []string{"gomod", "gobuild", "gotmp"} {
+			_ = os.MkdirAll(filepath.Join(cacheDir, sub), 0o755)
+		}
 		env = append(env,
 			"GOMODCACHE="+filepath.Join(cacheDir, "gomod"),
 			// GOCACHE = persistent compiled-artifact cache (survives
