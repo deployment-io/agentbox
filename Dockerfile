@@ -79,10 +79,10 @@ ENV DISABLE_AUTOUPDATER=1
 # installs the selected agent.
 ARG CLAUDE_CODE_VERSION=2.1.141
 ENV CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION}
-# CODEX_VERSION is empty by default → Driver.Ensure installs the latest
-# @openai/codex. Pin a specific version (--build-arg CODEX_VERSION=X.Y.Z)
-# for reproducible release images before GA.
-ARG CODEX_VERSION=
+# Pinned @openai/codex version installed by the Codex Driver.Ensure on first
+# container run. Bump deliberately (or override with --build-arg
+# CODEX_VERSION=X.Y.Z) as Codex releases ship.
+ARG CODEX_VERSION=0.136.0
 ENV CODEX_VERSION=${CODEX_VERSION}
 
 LABEL org.opencontainers.image.title="agentbox"
