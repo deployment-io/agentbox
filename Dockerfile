@@ -15,10 +15,11 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
 FROM debian:bookworm-slim
 
 # Language runtimes and build tools needed by supported agents.
-# Node + yarn + pnpm: Claude Code (npm-packaged), plus package-manager-
-# agnostic JS/TS dependency vendoring + verify (npm / yarn / pnpm). These
-# install to the system prefix (before NPM_CONFIG_PREFIX is set below), so
-# they survive the runtime tmpfs mounted over /home/agent.
+# Node 22 + yarn + pnpm: Claude Code and Codex are both npm-packaged
+# (@openai/codex requires Node >= 22), plus package-manager-agnostic JS/TS
+# dependency vendoring + verify (npm / yarn / pnpm). These install to the
+# system prefix (before NPM_CONFIG_PREFIX is set below), so they survive the
+# runtime tmpfs mounted over /home/agent.
 # Python: Aider and future pip-packaged agents (v2+).
 # build-essential, git, curl: used by agents at runtime.
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -29,7 +30,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       python3-venv \
       curl \
       ca-certificates \
-    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && npm install -g yarn pnpm \
     && apt-get clean \
@@ -78,12 +79,18 @@ ENV DISABLE_AUTOUPDATER=1
 # installs the selected agent.
 ARG CLAUDE_CODE_VERSION=2.1.141
 ENV CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION}
+# CODEX_VERSION is empty by default → Driver.Ensure installs the latest
+# @openai/codex. Pin a specific version (--build-arg CODEX_VERSION=X.Y.Z)
+# for reproducible release images before GA.
+ARG CODEX_VERSION=
+ENV CODEX_VERSION=${CODEX_VERSION}
 
 LABEL org.opencontainers.image.title="agentbox"
 LABEL org.opencontainers.image.description="Open-source agent orchestrator"
 LABEL org.opencontainers.image.source="https://github.com/deployment-io/agentbox"
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 LABEL com.anthropic.claude-code.version="${CLAUDE_CODE_VERSION}"
+LABEL com.openai.codex.version="${CODEX_VERSION}"
 
 COPY --from=builder /out/agentbox /usr/local/bin/agentbox
 

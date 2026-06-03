@@ -221,6 +221,7 @@ Maintained list of agent types consumers can set `AGENT_TYPE` to:
 | Agent Type | Package | Status |
 |---|---|---|
 | `claude-code` | `internal/claude` | v1 |
+| `codex` | `internal/codex` | v1 |
 
 When adding a new agent, add its row above and to the README's
 "Supported Agents" section.

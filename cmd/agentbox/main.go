@@ -22,6 +22,7 @@ import (
 	// Side-effect imports register agents (Driver) and vendor detectors.
 	// To ship additional agents or languages, add their package here.
 	_ "github.com/deployment-io/agentbox/internal/claude"
+	_ "github.com/deployment-io/agentbox/internal/codex"
 	_ "github.com/deployment-io/agentbox/internal/vendoring/golang"
 	_ "github.com/deployment-io/agentbox/internal/vendoring/node"
 )
