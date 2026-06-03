@@ -265,6 +265,13 @@ func limitExceeded(st ParsedState, maxTurns, tokenBudget int) (string, bool) {
 		return fmt.Sprintf("reached its turn limit of %d", maxTurns), true
 	}
 	if tokenBudget > 0 {
+		// Codex's input_tokens already includes its cached_input_tokens
+		// (OpenAI reports cached as a subset of input, not a separate
+		// bucket), so InputTokens+OutputTokens is the full count. Do NOT
+		// add CacheReadTokens here — for Codex it would double-count the
+		// cached portion. (Claude reports cache reads as a separate
+		// additive bucket, but its parser surfaces usage only at the end,
+		// so this watcher never trips for Claude regardless.)
 		if used := st.TokenUsage.InputTokens + st.TokenUsage.OutputTokens; used >= tokenBudget {
 			return fmt.Sprintf("reached its token budget of %d (used %d)", tokenBudget, used), true
 		}
