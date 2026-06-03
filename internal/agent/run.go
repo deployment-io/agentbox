@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -42,6 +43,7 @@ type cancelReason int
 const (
 	reasonSignal cancelReason = iota
 	reasonTimeout
+	reasonLimit
 )
 
 // Run spawns the agent subprocess via the Driver, streams its output
@@ -131,6 +133,14 @@ func Run(ctx context.Context, cfg *config.Config, driver Driver) (outcome result
 	timeoutReached := make(chan struct{}, 1)
 	go watchActivity(watcherCtx, tracker, cfg.NoActivityTimeout, timeoutReached)
 
+	// Limit watcher: bounds turns / tokens for agents whose CLI lacks a
+	// native cap (Codex). maxTurns reuses MAX_TURNS (the same value passed
+	// to claude's --max-turns) as the numeric cap. Agents that report
+	// turns/usage only at the end (claude) never trip it mid-run.
+	limitReached := make(chan string, 1)
+	maxTurnsLimit, _ := strconv.Atoi(cfg.MaxTurns)
+	go watchLimits(watcherCtx, parser, maxTurnsLimit, cfg.TokenBudget, limitReached)
+
 	done := make(chan error, 1)
 	go func() {
 		err := cmd.Wait()
@@ -147,10 +157,15 @@ func Run(ctx context.Context, cfg *config.Config, driver Driver) (outcome result
 	case err := <-done:
 		return buildOutcome(err, parser.State(), stderrBuf.String(), driver.Binary())
 	case <-ctx.Done():
-		return gracefulShutdown(cmd, done, parser, reasonSignal, cfg.NoActivityTimeout)
+		return gracefulShutdown(cmd, done, parser, reasonSignal, "")
 	case <-timeoutReached:
-		fmt.Fprintf(os.Stderr, "[agentbox] no agent output for %s; killing subprocess\n", cfg.NoActivityTimeout)
-		return gracefulShutdown(cmd, done, parser, reasonTimeout, cfg.NoActivityTimeout)
+		detail := fmt.Sprintf("no agent output for %s; subprocess killed", cfg.NoActivityTimeout)
+		fmt.Fprintf(os.Stderr, "[agentbox] %s\n", detail)
+		return gracefulShutdown(cmd, done, parser, reasonTimeout, detail)
+	case msg := <-limitReached:
+		detail := msg + "; subprocess killed"
+		fmt.Fprintf(os.Stderr, "[agentbox] %s\n", detail)
+		return gracefulShutdown(cmd, done, parser, reasonLimit, detail)
 	}
 }
 
@@ -164,7 +179,7 @@ func buildEnv(cfg *config.Config) []string {
 	return env
 }
 
-func gracefulShutdown(cmd *exec.Cmd, done <-chan error, parser OutputParser, reason cancelReason, timeout time.Duration) result.Outcome {
+func gracefulShutdown(cmd *exec.Cmd, done <-chan error, parser OutputParser, reason cancelReason, detail string) result.Outcome {
 	if cmd.Process != nil {
 		_ = cmd.Process.Signal(syscall.SIGTERM)
 	}
@@ -192,13 +207,76 @@ func gracefulShutdown(cmd *exec.Cmd, done <-chan error, parser OutputParser, rea
 	case reasonTimeout:
 		base.Status = result.StatusTimeout
 		base.ExitCode = result.ExitTimeout
-		base.Error = fmt.Sprintf("no agent output for %s; subprocess killed", timeout)
+		base.Error = detail
+	case reasonLimit:
+		// A turn / token cap the agent's CLI didn't self-enforce — treated
+		// as a failure (the Step didn't complete within budget), mirroring
+		// claude's own error_max_turns being a failure.
+		base.Status = result.StatusFailure
+		base.ExitCode = result.ExitExecutionFailure
+		base.Error = detail
 	default:
 		base.Status = result.StatusCancelled
 		base.ExitCode = result.ExitCancelled
 		base.Error = "cancelled by signal"
 	}
 	return base
+}
+
+// limitCheckInterval is how often the limit watcher samples the parser's
+// progress. Coarse on purpose — turns and tokens move in chunks, and a few
+// seconds of overshoot past the cap is acceptable for a backstop.
+const limitCheckInterval = 3 * time.Second
+
+// watchLimits polls the parser's accumulated turns / token usage and sends a
+// reason on reached when a configured cap is exceeded, so the Run loop can
+// shut the subprocess down. Agent-agnostic: agents whose parser surfaces
+// these counters only at the very end (claude, which also self-limits via
+// --max-turns) never trip it mid-run; agents that report incrementally
+// (codex, which has no CLI cap) are bounded here. No-op when neither cap is
+// set.
+func watchLimits(ctx context.Context, parser OutputParser, maxTurns, tokenBudget int, reached chan<- string) {
+	if maxTurns <= 0 && tokenBudget <= 0 {
+		return
+	}
+	ticker := time.NewTicker(limitCheckInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if msg, ok := limitExceeded(parser.State(), maxTurns, tokenBudget); ok {
+				select {
+				case reached <- msg:
+				default:
+				}
+				return
+			}
+		}
+	}
+}
+
+// limitExceeded reports whether the run has hit a configured turn or token
+// cap, with a human-readable reason. Pure function — the watcher's decision
+// logic, unit-tested without timers.
+func limitExceeded(st ParsedState, maxTurns, tokenBudget int) (string, bool) {
+	if maxTurns > 0 && st.Turns >= maxTurns {
+		return fmt.Sprintf("reached its turn limit of %d", maxTurns), true
+	}
+	if tokenBudget > 0 {
+		// Codex's input_tokens already includes its cached_input_tokens
+		// (OpenAI reports cached as a subset of input, not a separate
+		// bucket), so InputTokens+OutputTokens is the full count. Do NOT
+		// add CacheReadTokens here — for Codex it would double-count the
+		// cached portion. (Claude reports cache reads as a separate
+		// additive bucket, but its parser surfaces usage only at the end,
+		// so this watcher never trips for Claude regardless.)
+		if used := st.TokenUsage.InputTokens + st.TokenUsage.OutputTokens; used >= tokenBudget {
+			return fmt.Sprintf("reached its token budget of %d (used %d)", tokenBudget, used), true
+		}
+	}
+	return "", false
 }
 
 // buildOutcome maps a subprocess exit to an Outcome. Some agents can

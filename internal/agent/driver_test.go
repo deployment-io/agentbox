@@ -28,8 +28,8 @@ func (passthroughWriteCloser) Close() error { return nil }
 
 type fakeParser struct{}
 
-func (*fakeParser) Consume(io.Reader)    {}
-func (*fakeParser) State() ParsedState   { return ParsedState{} }
+func (*fakeParser) Consume(io.Reader)  {}
+func (*fakeParser) State() ParsedState { return ParsedState{} }
 
 func TestDriverFor_Unknown(t *testing.T) {
 	_, err := DriverFor("definitely-not-registered", "")

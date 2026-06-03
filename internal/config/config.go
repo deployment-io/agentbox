@@ -6,6 +6,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -21,6 +22,13 @@ type Config struct {
 	MaxTurns             string
 	AgentType            string
 	AgentVersion         string
+
+	// TokenBudget is the cumulative input+output token cap for one run, 0
+	// when unset (uncapped). Enforced agentbox-side by the Run loop's
+	// limit watcher for agents whose CLI lacks a native budget flag (e.g.
+	// Codex); Claude Code reports usage only at the end, so the watcher
+	// never preempts it.
+	TokenBudget int
 
 	// NoActivityTimeout is zero when the detector is disabled.
 	NoActivityTimeout time.Duration
@@ -70,6 +78,13 @@ func Load() (*Config, error) {
 	}
 	c.NoActivityTimeout = timeout
 
+	// TOKEN_BUDGET is an optional integer cap; absent / malformed / negative
+	// all resolve to 0 (uncapped). Strict validation isn't worth a hard
+	// failure here — the limit watcher simply doesn't engage at 0.
+	if tb, convErr := strconv.Atoi(os.Getenv("TOKEN_BUDGET")); convErr == nil && tb > 0 {
+		c.TokenBudget = tb
+	}
+
 	if err := c.loadCredentials(); err != nil {
 		return nil, err
 	}
@@ -84,6 +99,8 @@ func agentVersionForType(agentType string) string {
 	switch agentType {
 	case "claude-code":
 		return os.Getenv("CLAUDE_CODE_VERSION")
+	case "codex":
+		return os.Getenv("CODEX_VERSION")
 	}
 	return ""
 }
@@ -104,7 +121,29 @@ func parseNoActivityTimeout(v string) (time.Duration, error) {
 	return d, nil
 }
 
+// loadCredentials validates that the credentials the chosen agent needs
+// are present, failing fast at startup. The agent CLI itself reads its key
+// from the inherited process env (buildEnv forwards os.Environ); this is a
+// presence check, not a hand-off.
 func (c *Config) loadCredentials() error {
+	if c.AgentType == "codex" {
+		return c.loadCodexCredentials()
+	}
+	return c.loadClaudeCredentials()
+}
+
+// loadCodexCredentials requires CODEX_API_KEY — the key `codex exec` reads
+// for headless runs. OpenAI direct only in v1 (no provider dispatch).
+func (c *Config) loadCodexCredentials() error {
+	if strings.TrimSpace(os.Getenv("CODEX_API_KEY")) == "" {
+		return fmt.Errorf("CODEX_API_KEY is required for codex")
+	}
+	return nil
+}
+
+// loadClaudeCredentials validates the Anthropic Direct or Bedrock path
+// (exactly one must be set).
+func (c *Config) loadClaudeCredentials() error {
 	anthropicKey := strings.TrimSpace(os.Getenv("ANTHROPIC_API_KEY"))
 	bedrockFlag := os.Getenv("CLAUDE_CODE_USE_BEDROCK") == "1"
 

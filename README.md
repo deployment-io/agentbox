@@ -143,10 +143,11 @@ Get a key at [platform.claude.com](https://platform.claude.com).
 
 ## Supported Agents
 
-**v1:** Claude Code only.
+**v1:** Claude Code and Codex (OpenAI). Select via `AGENT_TYPE`
+(`claude-code` | `codex`).
 
-**Planned:** other agent runtimes (Codex, Aider, …) will register through
-the same `Driver` interface and dispatch on `AGENT_TYPE`. See
+**Planned:** other agent runtimes (Aider, …) register through the same
+`Driver` interface and dispatch on `AGENT_TYPE`. See
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## How It Works
@@ -158,7 +159,7 @@ Docker container
             └── agent's own subprocesses (bash, git, npm, ...)
 ```
 
-- Pre-built language runtimes (Node.js 20, Python 3) live in the image
+- Pre-built language runtimes (Node.js 22, Python 3) live in the image
   at build time.
 - At startup, the Go orchestrator installs the selected agent package
   (`npm install -g` / `pip install --user`) as a non-root user. This
