@@ -82,6 +82,27 @@ func TestEnv(t *testing.T) {
 	}
 }
 
+// TestEnvCreatesCacheSubdirs guards the v1.3.5 regression where
+// /cache/gobuild and /cache/gotmp were referenced in env but never
+// created — `go build` then aborts with a misleading mkdir error
+// before doing useful work. Env must MkdirAll the subdirs it points at.
+func TestEnvCreatesCacheSubdirs(t *testing.T) {
+	d := &detector{}
+	cache := t.TempDir()
+	_ = d.Env(cache, nil)
+	for _, sub := range []string{"gomod", "gobuild", "gotmp"} {
+		path := filepath.Join(cache, sub)
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Errorf("Env should create %s: %v", path, err)
+			continue
+		}
+		if !info.IsDir() {
+			t.Errorf("%s exists but is not a directory", path)
+		}
+	}
+}
+
 func TestFinalizeWritesGoWork(t *testing.T) {
 	d := &detector{}
 	work := t.TempDir()
