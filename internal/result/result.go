@@ -48,7 +48,15 @@ type Outcome struct {
 	FilesChanged   []string   `json:"files_changed"`
 	TokenUsage     TokenUsage `json:"token_usage"`
 	Turns          int        `json:"turns"`
-	Error          string     `json:"error,omitempty"`
+
+	// CostUSD is the agent-reported total run cost in US dollars, when the
+	// agent emits one. Claude Code's stream-json result event carries
+	// total_cost_usd; Codex reports token usage only, so this stays nil for
+	// Codex runs (downstream estimates from token counts + published rates).
+	// Pointer so an unreported cost (nil) stays distinct from a real $0.00.
+	CostUSD *float64 `json:"cost_usd,omitempty"`
+
+	Error string `json:"error,omitempty"`
 
 	// Model is the actual model identifier the agent reported using
 	// (e.g., "claude-opus-4-7"). Captured from the agent's output
