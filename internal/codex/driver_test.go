@@ -39,6 +39,12 @@ func TestBuildArgs_Minimal(t *testing.T) {
 	if slices.Contains(args, "--model") {
 		t.Error("--model should not be present when Model is empty")
 	}
+	// Non-essential network calls are disabled via -c overrides.
+	for _, k := range []string{"check_for_update_on_startup=false", "analytics.enabled=false"} {
+		if !slices.Contains(args, k) {
+			t.Errorf("expected -c %q to disable non-essential calls", k)
+		}
+	}
 	// The prompt is the last arg and carries the user prompt plus the
 	// final-message instruction (Codex exec has no system-prompt flag).
 	last := args[len(args)-1]
