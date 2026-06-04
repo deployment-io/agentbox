@@ -106,6 +106,12 @@ type ParsedState struct {
 	// (with assistant-message.model as a fallback).
 	Model string
 
+	// CostUSD is the agent-reported total run cost in US dollars, when the
+	// agent emits one (Claude Code's result event carries total_cost_usd).
+	// Nil when the agent reports no cost (Codex emits token usage only); the
+	// orchestrator persists nil and downstream estimates from token counts.
+	CostUSD *float64
+
 	// PRTitle is the short, imperative title the agent produced for the
 	// resulting pull request, parsed out of the agent's final message.
 	// Distinct from ChangesSummary (which is longer + describes what +

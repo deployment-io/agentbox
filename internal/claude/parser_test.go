@@ -30,6 +30,33 @@ func TestStreamParser_ResultEventPopulatesState(t *testing.T) {
 	}
 }
 
+func TestStreamParser_CapturesTotalCostUSD(t *testing.T) {
+	p := newStreamParser()
+	p.Consume(strings.NewReader(`
+{"type":"result","result":"done","num_turns":2,"is_error":false,"total_cost_usd":0.0421,"usage":{"input_tokens":1200,"output_tokens":350}}
+`))
+	got := p.State().CostUSD
+	if got == nil {
+		t.Fatal("CostUSD should be captured from the result event's total_cost_usd, got nil")
+	}
+	if *got != 0.0421 {
+		t.Errorf("CostUSD = %v, want 0.0421", *got)
+	}
+}
+
+func TestStreamParser_CostNilWhenNotReported(t *testing.T) {
+	// Streams without total_cost_usd (e.g. Codex, or an interrupted Claude
+	// run) must leave CostUSD nil so downstream can tell "no cost reported"
+	// apart from a genuine $0.00.
+	p := newStreamParser()
+	p.Consume(strings.NewReader(`
+{"type":"result","result":"done","num_turns":1,"is_error":false,"usage":{"input_tokens":10,"output_tokens":5}}
+`))
+	if got := p.State().CostUSD; got != nil {
+		t.Errorf("CostUSD should be nil when total_cost_usd is absent, got %v", *got)
+	}
+}
+
 func TestStreamParser_AssistantToolUseTracksFileEdits(t *testing.T) {
 	p := newStreamParser()
 	p.Consume(strings.NewReader(`

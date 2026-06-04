@@ -128,10 +128,17 @@ Written on exit. Schema:
     "cache_read_tokens": 0
   },
   "turns": 0,
+  "cost_usd": 0.0421,
   "error": "error description",
   "denied_hosts": ["pypi.org", "files.pythonhosted.org"]
 }
 ```
+
+`cost_usd` is the agent's self-reported total run cost in US dollars. It
+is present only for agents that emit one — Claude Code reports it
+(`total_cost_usd` in its stream-json result event); Codex reports token
+usage only, so the field is omitted for `codex` runs and consumers
+estimate cost from `token_usage` and the published per-model rates.
 
 The `error` field is omitted on success; all other fields are always
 populated. On failure it carries the most specific detail available, in

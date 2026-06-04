@@ -36,8 +36,11 @@ type streamParser struct {
 	filesChanged   map[string]struct{}
 	turns          int
 	usage          result.TokenUsage
-	isError        bool
-	errorSubtype   string
+	// costUSD is Claude Code's self-reported total_cost_usd from the final
+	// result event (USD). Pointer so "unreported" stays distinct from $0.
+	costUSD      *float64
+	isError      bool
+	errorSubtype string
 	// model is the most recently observed Claude model identifier
 	// (e.g., "claude-opus-4-7"). Claude Code emits it on the
 	// system.init event and also on each assistant message; last seen
@@ -86,6 +89,7 @@ func (p *streamParser) State() agent.ParsedState {
 		FailureReason:  p.failureReasonLocked(),
 		ErrorSubtype:   p.errorSubtypeLocked(),
 		Model:          p.model,
+		CostUSD:        p.costUSD,
 		PRTitle:        p.prTitle,
 		VerifyResult:   p.verifyResult,
 	}
@@ -129,6 +133,9 @@ type streamEvent struct {
 	IsError  bool            `json:"is_error"`
 	Subtype  string          `json:"subtype"`
 	Model    string          `json:"model"`
+	// TotalCostUSD is Claude Code's computed total run cost in USD on the
+	// final result event. Pointer to distinguish absent from a real 0.
+	TotalCostUSD *float64 `json:"total_cost_usd"`
 }
 
 type streamUsage struct {
@@ -201,6 +208,9 @@ func (p *streamParser) processResultEvent(event streamEvent) {
 			OutputTokens:    event.Usage.OutputTokens,
 			CacheReadTokens: event.Usage.CacheReadInputTokens,
 		}
+	}
+	if event.TotalCostUSD != nil {
+		p.costUSD = event.TotalCostUSD
 	}
 }
 

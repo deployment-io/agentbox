@@ -109,11 +109,13 @@ func Run(ctx context.Context, cfg *config.Config, driver Driver) (outcome result
 	// nor a torn read.
 	var startedAt, endedAt int64
 	defer func() {
+		st := parser.State()
 		outcome.AgentType = cfg.AgentType
 		outcome.AgentVersion = agentVersion
 		outcome.StartedAt = startedAt
 		outcome.EndedAt = endedAt
-		outcome.Model = parser.State().Model
+		outcome.Model = st.Model
+		outcome.CostUSD = st.CostUSD
 	}()
 
 	startedAt = time.Now().Unix()
