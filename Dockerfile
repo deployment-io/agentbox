@@ -24,6 +24,7 @@ FROM debian:bookworm-slim
 # build-essential, git, curl: used by agents at runtime.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       git \
+      ripgrep \
       build-essential \
       python3 \
       python3-pip \
@@ -61,6 +62,15 @@ RUN useradd -m -u 1000 agent \
 ENV NPM_CONFIG_PREFIX=/home/agent/.npm-global
 ENV NPM_CONFIG_UPDATE_NOTIFIER=false
 ENV PATH=/home/agent/.npm-global/bin:/home/agent/.local/bin:$PATH
+
+# Some agents shell out via a LOGIN shell (Codex uses `/bin/sh -lc`), which
+# resets PATH from /etc/profile and drops the ENV PATH additions above — so
+# `go`, the npm-global bin, and pip --user bins vanish for those commands
+# (Codex's `go test` self-verify failed with "go: not found"). Re-export them
+# via profile.d so login shells resolve the toolchain too. Written as root at
+# build time; the runtime user `agent` can't write /etc/profile.d.
+RUN printf 'export PATH=/usr/local/go/bin:/home/agent/.npm-global/bin:/home/agent/.local/bin:$PATH\n' \
+      > /etc/profile.d/agentbox-path.sh
 
 # Disable Claude Code non-essential outbound traffic. The master
 # CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC variable kills telemetry

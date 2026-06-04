@@ -119,6 +119,14 @@ func (d *Driver) BuildArgs(cfg *config.Config) []string {
 		"--sandbox", "danger-full-access",
 		"--dangerously-bypass-approvals-and-sandbox",
 		"--skip-git-repo-check",
+		// Silence the non-essential outbound calls the agentbox proxy
+		// blocks anyway, so they don't add deny-log noise or latency: the
+		// GitHub update check (github.com) and the Statsig analytics /
+		// feature-flag traffic (chatgpt.com / ab.chatgpt.com).
+		"-c", "check_for_update_on_startup=false",
+		"-c", "analytics.enabled=false",
+		"-c", "otel.exporter=none",
+		"-c", "otel.metrics_exporter=none",
 	}
 	if cfg.Model != "" {
 		args = append(args, "--model", cfg.Model)
