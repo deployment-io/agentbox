@@ -98,9 +98,14 @@ func (d *Driver) Binary() string {
 //
 //   - --json: newline-delimited JSON events on stdout (consumed by the
 //     OutputParser)
-//   - --sandbox danger-full-access + --ask-for-approval never: fully
-//     non-interactive, mirroring Claude Code's --dangerously-skip-
-//     permissions. The container + network proxy are the real sandbox.
+//   - --sandbox danger-full-access + --dangerously-bypass-approvals-and-sandbox:
+//     fully autonomous — no approval prompts, full filesystem access —
+//     mirroring Claude Code's --dangerously-skip-permissions. The container
+//   - network proxy are the real sandbox. (--ask-for-approval is a
+//     top-level flag, NOT a `codex exec` option, so it can't be used here.)
+//   - --skip-git-repo-check: the runner checks the repo out into a SUBDIR of
+//     WORK_DIR, so WORK_DIR itself isn't a git repo; without this `codex
+//     exec` refuses to start.
 //
 // The prompt is passed as the trailing positional arg (per the documented
 // `codex exec [FLAGS] "<prompt>"` form). Codex runs in cmd.Dir (WORK_DIR,
@@ -112,7 +117,8 @@ func (d *Driver) BuildArgs(cfg *config.Config) []string {
 		"exec",
 		"--json",
 		"--sandbox", "danger-full-access",
-		"--ask-for-approval", "never",
+		"--dangerously-bypass-approvals-and-sandbox",
+		"--skip-git-repo-check",
 	}
 	if cfg.Model != "" {
 		args = append(args, "--model", cfg.Model)

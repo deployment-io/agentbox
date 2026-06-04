@@ -28,7 +28,8 @@ func TestBuildArgs_Minimal(t *testing.T) {
 		"exec",
 		"--json",
 		"--sandbox", "danger-full-access",
-		"--ask-for-approval", "never",
+		"--dangerously-bypass-approvals-and-sandbox",
+		"--skip-git-repo-check",
 	}
 	for i, w := range wantPrefix {
 		if i >= len(args) || args[i] != w {
@@ -54,7 +55,12 @@ func TestBuildArgs_WithModel(t *testing.T) {
 	args := d.BuildArgs(&config.Config{StepPrompt: "hello", Model: "gpt-5.5"})
 	assertFollowedBy(t, args, "--model", "gpt-5.5")
 	assertFollowedBy(t, args, "--sandbox", "danger-full-access")
-	assertFollowedBy(t, args, "--ask-for-approval", "never")
+	if !slices.Contains(args, "--dangerously-bypass-approvals-and-sandbox") {
+		t.Error("--dangerously-bypass-approvals-and-sandbox should be present")
+	}
+	if !slices.Contains(args, "--skip-git-repo-check") {
+		t.Error("--skip-git-repo-check should be present")
+	}
 }
 
 func TestAllowedHosts_IncludesOpenAI(t *testing.T) {
