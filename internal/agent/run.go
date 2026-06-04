@@ -63,7 +63,7 @@ func Run(ctx context.Context, cfg *config.Config, driver Driver) (outcome result
 
 	cmd := exec.Command(driver.Binary(), driver.BuildArgs(cfg)...)
 	cmd.Dir = cfg.WorkDir
-	cmd.Env = buildEnv(cfg)
+	cmd.Env = buildEnv()
 
 	parser := driver.NewOutputParser()
 	pr, pw := io.Pipe()
@@ -169,12 +169,31 @@ func Run(ctx context.Context, cfg *config.Config, driver Driver) (outcome result
 	}
 }
 
-// buildEnv forwards the parent env plus optional extras. Credential-path
-// dispatch is the agent's responsibility; agentbox just forwards.
-func buildEnv(cfg *config.Config) []string {
-	env := os.Environ()
-	if cfg.PreviousStepsSummary != "" {
-		env = append(env, "PREVIOUS_STEPS_SUMMARY="+cfg.PreviousStepsSummary)
+// agentboxInputEnv are env vars that form agentbox's OWN input contract
+// (read by config.Load into cfg) and are not consumed by the agent CLI —
+// the agent receives the prompt via its CLI args, not the environment. They
+// are stripped from the agent subprocess env: leaking them is pointless, and
+// STEP_PROMPT in particular carries the task description with embedded quotes
+// and newlines, which breaks Codex's shell-environment snapshot
+// ("Unterminated quoted string"). Credentials (ANTHROPIC_API_KEY /
+// CODEX_API_KEY) and the toolchain/cache vars are NOT here — the agent needs
+// those — so they pass through untouched.
+var agentboxInputEnv = map[string]bool{
+	"STEP_PROMPT":            true,
+	"PREVIOUS_STEPS_SUMMARY": true,
+}
+
+// buildEnv forwards the parent env minus agentbox's own input-contract vars
+// (already captured into cfg). Credential-path dispatch is the agent's
+// responsibility; agentbox just forwards the rest.
+func buildEnv() []string {
+	parent := os.Environ()
+	env := make([]string, 0, len(parent))
+	for _, kv := range parent {
+		if eq := strings.IndexByte(kv, '='); eq >= 0 && agentboxInputEnv[kv[:eq]] {
+			continue
+		}
+		env = append(env, kv)
 	}
 	return env
 }

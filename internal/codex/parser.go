@@ -146,13 +146,16 @@ func (e codexEvent) failureMessage() string {
 // (the runner commits from the actual git diff), so an imperfect match just
 // yields an empty list rather than a broken run.
 type codexItem struct {
-	Type    string        `json:"type"`
-	Text    string        `json:"text"`
-	Changes []codexChange `json:"changes"`
+	Type     string        `json:"type"`
+	Text     string        `json:"text"`
+	Command  string        `json:"command"`
+	ExitCode *int          `json:"exit_code"`
+	Changes  []codexChange `json:"changes"`
 }
 
 type codexChange struct {
 	Path string `json:"path"`
+	Kind string `json:"kind"`
 }
 
 func (p *jsonlParser) processItem(raw json.RawMessage) {

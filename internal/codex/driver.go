@@ -154,14 +154,11 @@ func (d *Driver) NewOutputParser() agent.OutputParser {
 	return newJSONLParser()
 }
 
-// NewLogFormatter for Codex is a passthrough: the --json event stream is
-// already line-oriented and reasonably readable in the container log. A
-// richer one-line summarizer (mirroring the claude formatter) can come
-// later if the raw stream proves too noisy.
+// NewLogFormatter turns Codex's `exec --json` JSONL into compact one-line
+// summaries (session/turn markers, agent messages, commands, file edits) for
+// the container log, while teeing the unfiltered stream to /scratch/agent.log
+// for deep debugging. Non-JSON lines (npm output, proxy denies) pass through
+// verbatim. Mirrors the claude driver's formatter.
 func (d *Driver) NewLogFormatter(sink io.Writer) io.WriteCloser {
-	return nopWriteCloser{sink}
+	return newHumanLogFormatter(sink, openRawStreamLog())
 }
-
-type nopWriteCloser struct{ io.Writer }
-
-func (nopWriteCloser) Close() error { return nil }
