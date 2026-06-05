@@ -33,8 +33,8 @@ func TestParser_HappyPath(t *testing.T) {
 	if st.TokenUsage.InputTokens != 3000 {
 		t.Errorf("InputTokens = %d, want 3000", st.TokenUsage.InputTokens)
 	}
-	if st.TokenUsage.OutputTokens != 160 { // (50+10) + (80+20)
-		t.Errorf("OutputTokens = %d, want 160", st.TokenUsage.OutputTokens)
+	if st.TokenUsage.OutputTokens != 130 { // 50 + 80; reasoning is already inside output_tokens, not added on top
+		t.Errorf("OutputTokens = %d, want 130", st.TokenUsage.OutputTokens)
 	}
 	if st.TokenUsage.CacheReadTokens != 200 {
 		t.Errorf("CacheReadTokens = %d, want 200", st.TokenUsage.CacheReadTokens)

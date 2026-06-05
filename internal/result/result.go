@@ -119,6 +119,11 @@ type TokenUsage struct {
 	InputTokens     int `json:"input_tokens"`
 	OutputTokens    int `json:"output_tokens"`
 	CacheReadTokens int `json:"cache_read_tokens"`
+	// CacheCreationTokens is the cache-write input tokens (Claude bills these
+	// at ~1.25x the base input rate, separately from input/cache_read). Zero
+	// for Codex, whose cached tokens are a subset of input_tokens, not a
+	// separately-billed bucket.
+	CacheCreationTokens int `json:"cache_creation_tokens"`
 }
 
 // VerifyResult is the structured outcome of the agent's in-container
