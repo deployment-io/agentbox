@@ -94,10 +94,16 @@ func (p *jsonlParser) processLine(line []byte) {
 		p.mu.Lock()
 		p.turns++
 		if ev.Usage != nil {
-			// Codex reports per-turn usage; accumulate the billed totals
-			// across turns. Reasoning tokens are output-side.
+			// Codex reports per-turn usage; accumulate the billed totals across
+			// turns. Following OpenAI's accounting: input_tokens already includes
+			// the cached subset, and output_tokens already includes reasoning
+			// tokens — so neither cached nor reasoning is added on top, or they'd
+			// be double-counted in the total (and, since cost bills OutputTokens
+			// at the output rate, reasoning would be over-charged). CacheReadTokens
+			// is recorded separately only so cost can re-price that subset of the
+			// input at the cheaper cached rate (see app-server estimateCodexCostUSD).
 			p.usage.InputTokens += ev.Usage.InputTokens
-			p.usage.OutputTokens += ev.Usage.OutputTokens + ev.Usage.ReasoningOutputTokens
+			p.usage.OutputTokens += ev.Usage.OutputTokens
 			p.usage.CacheReadTokens += ev.Usage.CachedInputTokens
 		}
 		p.mu.Unlock()

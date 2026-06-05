@@ -11,7 +11,7 @@ func TestStreamParser_ResultEventPopulatesState(t *testing.T) {
 	p := newStreamParser()
 	p.Consume(strings.NewReader(`
 {"type":"system","session_id":"abc"}
-{"type":"result","result":"Added AuthToken type to kit/auth.","num_turns":4,"is_error":false,"usage":{"input_tokens":1200,"output_tokens":350,"cache_read_input_tokens":8000}}
+{"type":"result","result":"Added AuthToken type to kit/auth.","num_turns":4,"is_error":false,"usage":{"input_tokens":1200,"output_tokens":350,"cache_read_input_tokens":8000,"cache_creation_input_tokens":1500}}
 `))
 
 	state := p.State()
@@ -24,7 +24,7 @@ func TestStreamParser_ResultEventPopulatesState(t *testing.T) {
 	if state.IsError {
 		t.Error("IsError should be false")
 	}
-	want := result.TokenUsage{InputTokens: 1200, OutputTokens: 350, CacheReadTokens: 8000}
+	want := result.TokenUsage{InputTokens: 1200, OutputTokens: 350, CacheReadTokens: 8000, CacheCreationTokens: 1500}
 	if state.TokenUsage != want {
 		t.Errorf("TokenUsage = %+v, want %+v", state.TokenUsage, want)
 	}

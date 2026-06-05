@@ -125,7 +125,8 @@ Full spec: [docs/CONTRACT.md](docs/CONTRACT.md). Summary:
   "token_usage": {
     "input_tokens": 4,
     "output_tokens": 125,
-    "cache_read_tokens": 28143
+    "cache_read_tokens": 28143,
+    "cache_creation_tokens": 0
   },
   "turns": 2
 }

@@ -139,9 +139,10 @@ type streamEvent struct {
 }
 
 type streamUsage struct {
-	InputTokens          int `json:"input_tokens"`
-	OutputTokens         int `json:"output_tokens"`
-	CacheReadInputTokens int `json:"cache_read_input_tokens"`
+	InputTokens              int `json:"input_tokens"`
+	OutputTokens             int `json:"output_tokens"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
 }
 
 type assistantMessage struct {
@@ -204,9 +205,10 @@ func (p *streamParser) processResultEvent(event streamEvent) {
 	p.errorSubtype = event.Subtype
 	if event.Usage != nil {
 		p.usage = result.TokenUsage{
-			InputTokens:     event.Usage.InputTokens,
-			OutputTokens:    event.Usage.OutputTokens,
-			CacheReadTokens: event.Usage.CacheReadInputTokens,
+			InputTokens:         event.Usage.InputTokens,
+			OutputTokens:        event.Usage.OutputTokens,
+			CacheReadTokens:     event.Usage.CacheReadInputTokens,
+			CacheCreationTokens: event.Usage.CacheCreationInputTokens,
 		}
 	}
 	if event.TotalCostUSD != nil {
