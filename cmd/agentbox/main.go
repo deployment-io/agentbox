@@ -14,6 +14,7 @@ import (
 
 	"github.com/deployment-io/agentbox/internal/agent"
 	"github.com/deployment-io/agentbox/internal/config"
+	"github.com/deployment-io/agentbox/internal/interactive"
 	"github.com/deployment-io/agentbox/internal/proxy"
 	"github.com/deployment-io/agentbox/internal/result"
 	"github.com/deployment-io/agentbox/internal/signals"
@@ -79,9 +80,22 @@ func runAgent() {
 		exitWithFailure("agent install failed", err)
 	}
 
-	outcome := agent.Run(ctx, cfg, driver)
+	// Batch (default) runs one prompt and exits; interactive keeps the
+	// container alive for a long-lived bidirectional session driven by
+	// user messages on the filesystem (see internal/interactive). Both
+	// share the proxy / Ensure / vendoring setup above.
+	var outcome result.Outcome
+	if cfg.Mode == config.ModeInteractive {
+		iio, ioErr := interactive.New(cfg.WorkDir)
+		if ioErr != nil {
+			exitWithFailure("interactive io setup failed", ioErr)
+		}
+		outcome = agent.RunInteractive(ctx, cfg, driver, iio)
+	} else {
+		outcome = agent.Run(ctx, cfg, driver)
+	}
 
-	// Snapshot allowlist-deny hostnames AFTER agent.Run returns so we
+	// Snapshot allowlist-deny hostnames AFTER the agent returns so we
 	// capture every deny across the run lifetime. Tracked by the proxy
 	// itself; we just promote the snapshot into the outcome JSON so
 	// downstream consumers (runner → dashboard) can surface "add this

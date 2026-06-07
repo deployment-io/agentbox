@@ -11,7 +11,7 @@ logs, and read `/tmp/result.json` (or `$RESULT_PATH`) after exit.
 
 | Variable | Description |
 |---|---|
-| `STEP_PROMPT` | The prompt the agent executes. Free-form text. |
+| `STEP_PROMPT` | The prompt the agent executes (batch mode). Free-form text. Required unless `AGENT_MODE=interactive`, where user turns arrive over the message pipe instead. |
 | `WORK_DIR` | Path to the bind-mounted working directory. Conventionally `/work`. agentbox validates that the directory exists before spawning the agent. |
 
 ### Credentials
@@ -36,6 +36,33 @@ logs, and read `/tmp/result.json` (or `$RESULT_PATH`) after exit.
 | `RESULT_PATH` | Override where `/result.json` is written. Default: `/tmp/result.json`. |
 | `ADDITIONAL_ALLOWED_HOSTS` | Comma-separated list of additional hostnames the agent can reach (e.g. `nexus.corp.local,api.linear.app`). Unioned with the active Driver's built-in allowlist (`api.anthropic.com,registry.npmjs.org` for `claude-code`). Empty / unset = only Driver-declared hosts are reachable. See [Network Restrictions](#network-restrictions). |
 | `AGENTBOX_BLOCK_PRIVATE_IPS` | When `1` / `true` / unset (default): the proxy resolves each CONNECT target and rejects the request if any resolved IP is in a private/special range (RFC 1918, 169.254/16 cloud metadata, ULA, loopback, multicast, CGN, …). Closes the SSRF / metadata-IP-via-DNS attack class. Set to `0` / `false` / `no` for runners that legitimately need to reach internal-IP destinations (self-hosted GitLab on `10.0.x.x`, internal Nexus, etc.). See [Network Restrictions](#network-restrictions). |
+
+### Interactive mode
+
+A long-lived, bidirectional session (repo-aware chat) instead of one-shot
+batch, selected with `AGENT_MODE=interactive`. `STEP_PROMPT` is not
+required in this mode.
+
+| Variable | Description |
+|---|---|
+| `AGENT_MODE` | `batch` (default) or `interactive`. |
+| `SESSION_ID` | Stable session id forwarded as `claude --session-id` (must be a valid UUID) so the transcript persists and can be resumed after a container restart. Optional but recommended. |
+| `READ_ONLY` | `1` / `true` / `yes` restricts the agent to read-only investigation: a tool allowlist (`Read`, `Grep`, `Glob`, and safe read-only `Bash(...)` patterns) is applied and `--dangerously-skip-permissions` is omitted so the allowlist is enforced. Default: off. |
+| `MAX_BUDGET_USD` | Cap total spend for the session (`claude --max-budget-usd`); the agent self-exits when reached. Default: uncapped. |
+| `APPEND_SYSTEM_PROMPT_FILE` | Path to a file whose contents are appended to the agent's system prompt (`claude --append-system-prompt`; the CLI has no `-file` variant, so agentbox reads the file and passes it inline). |
+
+**Filesystem I/O** (under `$WORK_DIR`), all written atomically (temp + rename):
+
+| Path | Direction | Contents |
+|---|---|---|
+| `.agentbox-input/messages/<name>.json` | consumer → agentbox | one user turn `{"id","content","ts"}`; consumed (deleted) in filename order. |
+| `.agentbox-output/messages/<seq>.json` | agentbox → consumer | assistant output `{"seq","type":"chunk"\|"final","text"}`; zero-padded `seq` so lexical order is chronological. |
+| `.agentbox-output/task-spec.json` | agentbox → consumer | latest extracted task-spec (overwritten): the structured fields plus `raw`. |
+| `.agentbox-output/heartbeat.json` | agentbox → consumer | liveness `{"ts","turns","input_tokens","output_tokens"}` (overwritten ~every 30s). |
+
+The session ends when the agent exits (e.g. `MAX_BUDGET_USD` reached), the
+container receives SIGTERM (graceful: stdin is closed, then SIGTERM with a
+10s grace), or `NO_ACTIVITY_TIMEOUT` elapses with no agent output.
 
 ### Not in the contract
 

@@ -1,0 +1,132 @@
+package claude
+
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+
+	"github.com/deployment-io/agentbox/internal/agent"
+)
+
+type captureSink struct {
+	chunks []string
+	finals []string
+	specs  []agent.SpecSnapshot
+}
+
+func (s *captureSink) ForwardChunk(c agent.AssistantChunk) error {
+	s.chunks = append(s.chunks, c.Text)
+	return nil
+}
+func (s *captureSink) ForwardFinal(m agent.AssistantMessage) error {
+	s.finals = append(s.finals, m.Text)
+	return nil
+}
+func (s *captureSink) ForwardSpecUpdate(sp agent.SpecSnapshot) error {
+	s.specs = append(s.specs, sp)
+	return nil
+}
+
+func assistantLine(text string) string {
+	env := map[string]any{
+		"type": "assistant",
+		"message": map[string]any{
+			"role":    "assistant",
+			"content": []map[string]any{{"type": "text", "text": text}},
+		},
+	}
+	b, _ := json.Marshal(env)
+	return string(b) + "\n"
+}
+
+func partialLine(text string) string {
+	env := map[string]any{
+		"type": "stream_event",
+		"event": map[string]any{
+			"type":  "content_block_delta",
+			"delta": map[string]any{"type": "text_delta", "text": text},
+		},
+	}
+	b, _ := json.Marshal(env)
+	return string(b) + "\n"
+}
+
+func TestForwarder_CompleteMessage(t *testing.T) {
+	sink := &captureSink{}
+	fwd := (&Driver{}).NewChunkForwarder(sink)
+	_, _ = fwd.Write([]byte(assistantLine("Hello there")))
+	_ = fwd.Close()
+
+	if len(sink.chunks) != 1 || sink.chunks[0] != "Hello there" {
+		t.Errorf("chunks = %v, want [Hello there]", sink.chunks)
+	}
+	if len(sink.finals) != 1 || sink.finals[0] != "Hello there" {
+		t.Errorf("finals = %v, want [Hello there]", sink.finals)
+	}
+}
+
+func TestForwarder_StripsSpecBlock(t *testing.T) {
+	sink := &captureSink{}
+	fwd := (&Driver{}).NewChunkForwarder(sink)
+	text := "Here is the plan.\n\n```task-spec\n{\"title\":\"T\",\"goal\":\"G\"}\n```"
+	_, _ = fwd.Write([]byte(assistantLine(text)))
+	_ = fwd.Close()
+
+	if len(sink.specs) != 1 {
+		t.Fatalf("expected 1 spec update, got %d", len(sink.specs))
+	}
+	if sink.specs[0].Goal != "G" {
+		t.Errorf("spec goal = %q, want G", sink.specs[0].Goal)
+	}
+	if len(sink.finals) != 1 || strings.Contains(sink.finals[0], "task-spec") {
+		t.Errorf("final should have the spec block stripped: %v", sink.finals)
+	}
+	if !strings.Contains(sink.finals[0], "Here is the plan.") {
+		t.Errorf("final should keep prose: %v", sink.finals)
+	}
+}
+
+func TestForwarder_PartialDeltasThenComplete(t *testing.T) {
+	sink := &captureSink{}
+	fwd := (&Driver{}).NewChunkForwarder(sink)
+	_, _ = fwd.Write([]byte(partialLine("Hel")))
+	_, _ = fwd.Write([]byte(partialLine("lo")))
+	_, _ = fwd.Write([]byte(assistantLine("Hello")))
+	_ = fwd.Close()
+
+	if strings.Join(sink.chunks, "") != "Hello" {
+		t.Errorf("streamed chunks joined = %q, want Hello (%v)", strings.Join(sink.chunks, ""), sink.chunks)
+	}
+	if len(sink.chunks) != 2 {
+		t.Errorf("expected 2 partial chunks (no duplicate for the completed message), got %d: %v", len(sink.chunks), sink.chunks)
+	}
+	if len(sink.finals) != 1 || sink.finals[0] != "Hello" {
+		t.Errorf("finals = %v, want [Hello]", sink.finals)
+	}
+}
+
+func TestForwarder_LineSplitAcrossWrites(t *testing.T) {
+	sink := &captureSink{}
+	fwd := (&Driver{}).NewChunkForwarder(sink)
+	line := assistantLine("split message")
+	half := len(line) / 2
+	_, _ = fwd.Write([]byte(line[:half]))
+	_, _ = fwd.Write([]byte(line[half:]))
+	_ = fwd.Close()
+
+	if len(sink.finals) != 1 || sink.finals[0] != "split message" {
+		t.Errorf("finals = %v, want [split message]", sink.finals)
+	}
+}
+
+func TestForwarder_IgnoresNonJSON(t *testing.T) {
+	sink := &captureSink{}
+	fwd := (&Driver{}).NewChunkForwarder(sink)
+	_, _ = fwd.Write([]byte("npm install output, not stream-json\n"))
+	_, _ = fwd.Write([]byte(assistantLine("real message")))
+	_ = fwd.Close()
+
+	if len(sink.finals) != 1 || sink.finals[0] != "real message" {
+		t.Errorf("non-JSON noise should be ignored; finals = %v", sink.finals)
+	}
+}
