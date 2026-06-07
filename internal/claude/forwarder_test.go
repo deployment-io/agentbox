@@ -36,7 +36,7 @@ func assistantLine(text string) string {
 		},
 	}
 	b, _ := json.Marshal(env)
-	return string(b) + "\n"
+	return string(b)
 }
 
 func partialLine(text string) string {
@@ -48,14 +48,13 @@ func partialLine(text string) string {
 		},
 	}
 	b, _ := json.Marshal(env)
-	return string(b) + "\n"
+	return string(b)
 }
 
 func TestForwarder_CompleteMessage(t *testing.T) {
 	sink := &captureSink{}
-	fwd := (&Driver{}).NewChunkForwarder(sink)
-	_, _ = fwd.Write([]byte(assistantLine("Hello there")))
-	_ = fwd.Close()
+	fwd := newChunkForwarder(sink)
+	fwd.handleLine([]byte(assistantLine("Hello there")))
 
 	if len(sink.chunks) != 1 || sink.chunks[0] != "Hello there" {
 		t.Errorf("chunks = %v, want [Hello there]", sink.chunks)
@@ -67,10 +66,9 @@ func TestForwarder_CompleteMessage(t *testing.T) {
 
 func TestForwarder_StripsSpecBlock(t *testing.T) {
 	sink := &captureSink{}
-	fwd := (&Driver{}).NewChunkForwarder(sink)
+	fwd := newChunkForwarder(sink)
 	text := "Here is the plan.\n\n```task-spec\n{\"title\":\"T\",\"goal\":\"G\"}\n```"
-	_, _ = fwd.Write([]byte(assistantLine(text)))
-	_ = fwd.Close()
+	fwd.handleLine([]byte(assistantLine(text)))
 
 	if len(sink.specs) != 1 {
 		t.Fatalf("expected 1 spec update, got %d", len(sink.specs))
@@ -88,11 +86,10 @@ func TestForwarder_StripsSpecBlock(t *testing.T) {
 
 func TestForwarder_PartialDeltasThenComplete(t *testing.T) {
 	sink := &captureSink{}
-	fwd := (&Driver{}).NewChunkForwarder(sink)
-	_, _ = fwd.Write([]byte(partialLine("Hel")))
-	_, _ = fwd.Write([]byte(partialLine("lo")))
-	_, _ = fwd.Write([]byte(assistantLine("Hello")))
-	_ = fwd.Close()
+	fwd := newChunkForwarder(sink)
+	fwd.handleLine([]byte(partialLine("Hel")))
+	fwd.handleLine([]byte(partialLine("lo")))
+	fwd.handleLine([]byte(assistantLine("Hello")))
 
 	if strings.Join(sink.chunks, "") != "Hello" {
 		t.Errorf("streamed chunks joined = %q, want Hello (%v)", strings.Join(sink.chunks, ""), sink.chunks)
@@ -105,26 +102,11 @@ func TestForwarder_PartialDeltasThenComplete(t *testing.T) {
 	}
 }
 
-func TestForwarder_LineSplitAcrossWrites(t *testing.T) {
-	sink := &captureSink{}
-	fwd := (&Driver{}).NewChunkForwarder(sink)
-	line := assistantLine("split message")
-	half := len(line) / 2
-	_, _ = fwd.Write([]byte(line[:half]))
-	_, _ = fwd.Write([]byte(line[half:]))
-	_ = fwd.Close()
-
-	if len(sink.finals) != 1 || sink.finals[0] != "split message" {
-		t.Errorf("finals = %v, want [split message]", sink.finals)
-	}
-}
-
 func TestForwarder_IgnoresNonJSON(t *testing.T) {
 	sink := &captureSink{}
-	fwd := (&Driver{}).NewChunkForwarder(sink)
-	_, _ = fwd.Write([]byte("npm install output, not stream-json\n"))
-	_, _ = fwd.Write([]byte(assistantLine("real message")))
-	_ = fwd.Close()
+	fwd := newChunkForwarder(sink)
+	fwd.handleLine([]byte("npm install output, not stream-json"))
+	fwd.handleLine([]byte(assistantLine("real message")))
 
 	if len(sink.finals) != 1 || sink.finals[0] != "real message" {
 		t.Errorf("non-JSON noise should be ignored; finals = %v", sink.finals)

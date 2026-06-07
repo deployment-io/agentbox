@@ -40,16 +40,24 @@ logs, and read `/tmp/result.json` (or `$RESULT_PATH`) after exit.
 ### Interactive mode
 
 A long-lived, bidirectional session (repo-aware chat) instead of one-shot
-batch, selected with `AGENT_MODE=interactive`. `STEP_PROMPT` is not
-required in this mode.
+batch, selected with `AGENT_MODE=interactive`. `STEP_PROMPT` is not required
+in this mode. Both agents are supported (via `AGENT_TYPE`), each over its own
+wire protocol: **claude-code** uses stream-json on stdin/stdout; **codex**
+uses the App Server JSON-RPC (`codex app-server`). The driver hides the
+difference — the filesystem I/O below is identical for both.
 
 | Variable | Description |
 |---|---|
 | `AGENT_MODE` | `batch` (default) or `interactive`. |
 | `SESSION_ID` | Stable session id forwarded as `claude --session-id` (must be a valid UUID) so the transcript persists and can be resumed after a container restart. Optional but recommended. |
-| `READ_ONLY` | `1` / `true` / `yes` restricts the agent to read-only investigation: a tool allowlist (`Read`, `Grep`, `Glob`, and safe read-only `Bash(...)` patterns) is applied and `--dangerously-skip-permissions` is omitted so the allowlist is enforced. Default: off. |
+| `READ_ONLY` | `1` / `true` / `yes` restricts the agent to read-only investigation. **claude-code**: a tool allowlist (`Read`, `Grep`, `Glob`, safe read-only `Bash(...)` patterns) with `--dangerously-skip-permissions` omitted so the allowlist is enforced. **codex**: the app-server read-only sandbox with `approvalPolicy: never`. Default: off. |
 | `MAX_BUDGET_USD` | Cap total spend for the session (`claude --max-budget-usd`); the agent self-exits when reached. Default: uncapped. |
-| `APPEND_SYSTEM_PROMPT_FILE` | Path to a file whose contents are appended to the agent's system prompt (`claude --append-system-prompt`; the CLI has no `-file` variant, so agentbox reads the file and passes it inline). |
+| `APPEND_SYSTEM_PROMPT_FILE` | Path to a file whose contents are appended to the agent's system prompt. **claude-code**: passed inline via `--append-system-prompt` (the CLI has no `-file` variant). **codex**: prepended to the first user turn (the app-server has no separate system-prompt channel). |
+
+Per-agent applicability: `READ_ONLY` and `APPEND_SYSTEM_PROMPT_FILE` apply to
+both agents. `SESSION_ID` and `MAX_BUDGET_USD` are **claude-code** only in v1
+— codex's app-server manages its own thread id, and codex budget capping is
+not yet wired.
 
 **Filesystem I/O** (under `$WORK_DIR`), all written atomically (temp + rename):
 

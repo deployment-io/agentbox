@@ -94,7 +94,7 @@ func TestPumpUserMessages(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		pumpUserMessages(context.Background(), encode, fio, w)
+		PumpTextStdin(context.Background(), fio, encode, w)
 		close(done)
 	}()
 	select {
@@ -118,7 +118,7 @@ func TestPumpUserMessages_StopsOnContextCancel(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		pumpUserMessages(ctx, func(string) ([]byte, error) { return nil, nil }, fio, w)
+		PumpTextStdin(ctx, fio, func(string) ([]byte, error) { return nil, nil }, w)
 		close(done)
 	}()
 	cancel()
@@ -137,7 +137,7 @@ func TestHeartbeatLoop(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		heartbeatLoop(ctx, time.Millisecond, &fakeParser{}, fio)
+		RunHeartbeat(ctx, time.Millisecond, fio, func() SessionState { return SessionState{Turns: 1} })
 		close(done)
 	}()
 	time.Sleep(25 * time.Millisecond)

@@ -106,7 +106,7 @@ func TestBuildInteractiveArgs_OptionalFlags(t *testing.T) {
 func TestEncodeUserMessage(t *testing.T) {
 	d := &Driver{}
 	in := `fix the "login" bug` + "\nsecond line"
-	line, err := d.EncodeUserMessage(in)
+	line, err := d.encodeUserMessage(in)
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}

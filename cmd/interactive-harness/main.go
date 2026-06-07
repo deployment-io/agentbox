@@ -45,6 +45,7 @@ func main() {
 	agentboxBin := flag.String("agentbox", "", "path to the built agentbox binary (required)")
 	workdir := flag.String("workdir", "", "work dir / repo for the agent to investigate (required)")
 	model := flag.String("model", "", "model override (optional)")
+	agentType := flag.String("agent", "claude-code", "agent type: claude-code | codex")
 	readonly := flag.Bool("readonly", true, "run the agent read-only")
 	flag.Parse()
 
@@ -68,6 +69,7 @@ func main() {
 	cmd := exec.Command(*agentboxBin)
 	cmd.Env = append(os.Environ(),
 		"AGENT_MODE=interactive",
+		"AGENT_TYPE="+*agentType,
 		"WORK_DIR="+*workdir,
 		"SESSION_ID="+mustUUID(),
 		"APPEND_SYSTEM_PROMPT_FILE="+promptPath,

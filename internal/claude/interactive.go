@@ -78,15 +78,16 @@ func (d *Driver) BuildInteractiveArgs(cfg *config.Config) []string {
 	return args
 }
 
-// EncodeUserMessage renders one user turn as the stream-json stdin
-// envelope Claude Code reads under --input-format stream-json, with a
-// trailing newline so it is a complete line. Shape:
+// encodeUserMessage renders one user turn as the stream-json stdin envelope
+// Claude Code reads under --input-format stream-json, with a trailing
+// newline so it is a complete line. Shape:
 //
 //	{"type":"user","message":{"role":"user","content":"..."}}
 //
 // json.Marshal escapes the user text, so arbitrary content (quotes,
-// newlines, control characters) is safe to embed.
-func (d *Driver) EncodeUserMessage(text string) ([]byte, error) {
+// newlines, control characters) is safe to embed. Passed to
+// agent.PumpTextStdin by RunSession.
+func (d *Driver) encodeUserMessage(text string) ([]byte, error) {
 	var env userEnvelope
 	env.Type = "user"
 	env.Message.Role = "user"
