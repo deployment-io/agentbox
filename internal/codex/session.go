@@ -41,7 +41,7 @@ func (d *Driver) RunSession(ctx context.Context, cfg *config.Config, sess *agent
 	defer r.close()
 
 	// 1. Handshake.
-	if err := enc.Encode(rpcRequest{JSONRPC: "2.0", ID: 0, Method: "initialize", Params: initializeParams{
+	if err := enc.Encode(rpcRequest{ID: 0, Method: "initialize", Params: initializeParams{
 		ClientInfo: clientInfo{Name: "agentbox", Title: "agentbox", Version: "1"},
 	}}); err != nil {
 		return fmt.Errorf("codex initialize: %w", err)
@@ -49,12 +49,12 @@ func (d *Driver) RunSession(ctx context.Context, cfg *config.Config, sess *agent
 	if err := r.awaitResponse(0); err != nil {
 		return fmt.Errorf("codex initialize: %w", err)
 	}
-	if err := enc.Encode(rpcNotification{JSONRPC: "2.0", Method: "initialized", Params: emptyParams{}}); err != nil {
+	if err := enc.Encode(rpcNotification{Method: "initialized", Params: emptyParams{}}); err != nil {
 		return fmt.Errorf("codex initialized: %w", err)
 	}
 
 	// 2. Start a thread — autonomous, read-only, no approval round-trips.
-	if err := enc.Encode(rpcRequest{JSONRPC: "2.0", ID: 1, Method: "thread/start", Params: threadStartParams{
+	if err := enc.Encode(rpcRequest{ID: 1, Method: "thread/start", Params: threadStartParams{
 		Cwd:            cfg.WorkDir,
 		Model:          cfg.Model,
 		ApprovalPolicy: "never",
@@ -83,7 +83,7 @@ func (d *Driver) RunSession(ctx context.Context, cfg *config.Config, sess *agent
 		}
 		first = false
 
-		if err := enc.Encode(rpcRequest{JSONRPC: "2.0", ID: nextID, Method: "turn/start", Params: turnStartParams{
+		if err := enc.Encode(rpcRequest{ID: nextID, Method: "turn/start", Params: turnStartParams{
 			ThreadID: threadID,
 			Input:    []inputItem{{Type: "text", Text: text}},
 		}}); err != nil {
@@ -98,17 +98,18 @@ func (d *Driver) RunSession(ctx context.Context, cfg *config.Config, sess *agent
 
 // --- JSON-RPC wire types ---
 
+// rpcRequest / rpcNotification match the Codex app-server schema, which
+// requires only {id, method, params} (and {method, params}) — notably NO
+// "jsonrpc" field; sending one risks a strict-deserialize rejection.
 type rpcRequest struct {
-	JSONRPC string `json:"jsonrpc"`
-	ID      int    `json:"id"`
-	Method  string `json:"method"`
-	Params  any    `json:"params"`
+	ID     int    `json:"id"`
+	Method string `json:"method"`
+	Params any    `json:"params"`
 }
 
 type rpcNotification struct {
-	JSONRPC string `json:"jsonrpc"`
-	Method  string `json:"method"`
-	Params  any    `json:"params"`
+	Method string `json:"method"`
+	Params any    `json:"params"`
 }
 
 type emptyParams struct{}

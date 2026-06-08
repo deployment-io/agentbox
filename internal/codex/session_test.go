@@ -126,10 +126,10 @@ func TestBuildInteractiveArgs_AppServer(t *testing.T) {
 }
 
 func TestSandboxMode(t *testing.T) {
-	if got := sandboxMode(&config.Config{ReadOnly: true}); got != "readOnly" {
-		t.Errorf("read-only sandbox = %q, want readOnly", got)
+	if got := sandboxMode(&config.Config{ReadOnly: true}); got != "read-only" {
+		t.Errorf("read-only sandbox = %q, want read-only", got)
 	}
-	if got := sandboxMode(&config.Config{ReadOnly: false}); got != "workspaceWrite" {
-		t.Errorf("non-read-only sandbox = %q, want workspaceWrite", got)
+	if got := sandboxMode(&config.Config{ReadOnly: false}); got != "workspace-write" {
+		t.Errorf("non-read-only sandbox = %q, want workspace-write", got)
 	}
 }

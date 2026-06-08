@@ -33,7 +33,7 @@ func (d *Driver) BuildInteractiveArgs(cfg *config.Config) []string {
 // get "readOnly"; others get workspace-write.
 func sandboxMode(cfg *config.Config) string {
 	if cfg.ReadOnly {
-		return "readOnly"
+		return "read-only"
 	}
-	return "workspaceWrite"
+	return "workspace-write"
 }
