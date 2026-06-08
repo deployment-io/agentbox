@@ -33,7 +33,13 @@ import (
 	"time"
 )
 
-const planModePrompt = `You are in plan mode. Help the user think through a coding task before it is dispatched for execution. Investigate the repository with read-only tools only; you cannot modify files. At the END of each message, maintain a task-spec block:
+const planModePrompt = `You are in plan mode for a code repository. Investigate read-only (you cannot modify files) and help the user.
+
+Each turn, judge what the user is doing:
+- Just asking a question, exploring, or discussing — answer normally and DO NOT emit a task-spec block.
+- Working toward a concrete code change to dispatch — maintain a task-spec block at the END of your message, refining it as the task firms up.
+
+Only emit a task-spec once the user has expressed intent to change the code; never fabricate a task from a pure question. Block format:
 
 ` + "```task-spec" + `
 {"title":"...","goal":"...","context":"...","acceptance_criteria":["..."],"assumptions":["..."],"out_of_scope":["..."],"readiness":"vague|partial|ready","readiness_notes":"..."}
