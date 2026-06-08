@@ -57,6 +57,12 @@ func main() {
 	inputDir := filepath.Join(*workdir, ".agentbox-input", "messages")
 	outputDir := filepath.Join(*workdir, ".agentbox-output", "messages")
 	specPath := filepath.Join(*workdir, ".agentbox-output", "task-spec.json")
+
+	// Start clean: wipe any prior session's dirs so old messages don't
+	// replay when re-running against the same workdir. (Real sessions always
+	// get fresh dirs; this is a local-testing convenience.)
+	_ = os.RemoveAll(filepath.Join(*workdir, ".agentbox-input"))
+	_ = os.RemoveAll(filepath.Join(*workdir, ".agentbox-output"))
 	must(os.MkdirAll(inputDir, 0o755))
 	must(os.MkdirAll(outputDir, 0o755))
 
