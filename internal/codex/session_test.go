@@ -133,3 +133,43 @@ func TestSandboxMode(t *testing.T) {
 		t.Errorf("non-read-only sandbox = %q, want workspace-write", got)
 	}
 }
+
+// notifLine builds one JSON-RPC notification line. json.Marshal handles all
+// escaping (backticks/quotes in the spec block).
+func notifLine(method string, params map[string]any) string {
+	b, _ := json.Marshal(map[string]any{"method": method, "params": params})
+	return string(b)
+}
+
+// TestRunTurn_MultipleAgentMessages verifies Codex's progressive narration
+// (multiple agentMessage items per turn) is forwarded as one final per item,
+// not collapsed into a single turn-final message.
+func TestRunTurn_MultipleAgentMessages(t *testing.T) {
+	specText := "Here is the plan.\n\n```task-spec\n{\"title\":\"T\",\"goal\":\"G\"}\n```"
+	lines := strings.Join([]string{
+		notifLine("item/agentMessage/delta", map[string]any{"itemId": "a", "delta": "Looking… "}),
+		notifLine("item/completed", map[string]any{"item": map[string]any{"type": "agentMessage", "id": "a", "text": "Looking… done."}}),
+		notifLine("item/agentMessage/delta", map[string]any{"itemId": "b", "delta": "Here is the plan."}),
+		notifLine("item/completed", map[string]any{"item": map[string]any{"type": "agentMessage", "id": "b", "text": specText}}),
+		notifLine("turn/completed", map[string]any{"turn": map[string]any{"id": "t", "status": "completed"}}),
+	}, "\n") + "\n"
+
+	sink := &codexFakeIO{}
+	r := newRPCReader(strings.NewReader(lines), io.Discard)
+	if err := r.runTurn(sink); err != nil {
+		t.Fatalf("runTurn: %v", err)
+	}
+
+	if len(sink.finals) != 2 {
+		t.Fatalf("expected 2 finals (one per agent message), got %d: %v", len(sink.finals), sink.finals)
+	}
+	if sink.finals[0] != "Looking… done." {
+		t.Errorf("finals[0] = %q, want %q", sink.finals[0], "Looking… done.")
+	}
+	if sink.finals[1] != "Here is the plan." {
+		t.Errorf("finals[1] = %q, want %q (spec stripped)", sink.finals[1], "Here is the plan.")
+	}
+	if len(sink.specs) != 1 || sink.specs[0].Goal != "G" {
+		t.Errorf("specs = %v, want one with goal G", sink.specs)
+	}
+}

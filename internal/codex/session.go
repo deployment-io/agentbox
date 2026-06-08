@@ -249,7 +249,9 @@ func (r *rpcReader) awaitThreadID(id int) (string, error) {
 // runTurn reads notifications until the turn completes, forwarding assistant
 // text and finalizing the message + spec at turn end.
 func (r *rpcReader) runTurn(out agent.InteractiveSink) error {
-	var lastMsg string
+	// streamed tracks whether deltas were forwarded for the in-progress
+	// agent message, so a completed message isn't re-sent as a duplicate
+	// chunk. Reset after each agent message is finalized.
 	streamed := false
 	for {
 		m, err := r.next()
@@ -266,20 +268,24 @@ func (r *rpcReader) runTurn(out agent.InteractiveSink) error {
 				_ = out.ForwardChunk(agent.AssistantChunk{Text: p.Delta})
 			}
 		case "item/completed":
+			// Codex emits multiple agentMessage items per turn (progress
+			// narration plus the final answer). Finalize each as its own
+			// message so the chat renders distinct bubbles, rather than
+			// collapsing the whole turn into one.
 			var p struct {
 				Item struct {
 					Type string `json:"type"`
 					Text string `json:"text"`
 				} `json:"item"`
 			}
-			if json.Unmarshal(m.Params, &p) == nil && p.Item.Type == "agentMessage" && p.Item.Text != "" {
-				lastMsg = p.Item.Text
+			if json.Unmarshal(m.Params, &p) == nil && p.Item.Type == "agentMessage" {
+				r.finalizeMessage(out, p.Item.Text, streamed)
+				streamed = false
 			}
-		case "turn/completed", "turn/failed":
-			r.finalizeTurn(out, lastMsg, streamed)
-			if m.Method == "turn/failed" {
-				fmt.Fprintln(r.log, "[codex] turn failed")
-			}
+		case "turn/completed":
+			return nil
+		case "turn/failed":
+			fmt.Fprintln(r.log, "[codex] turn failed")
 			return nil
 		case "error":
 			var p struct {
@@ -292,11 +298,14 @@ func (r *rpcReader) runTurn(out agent.InteractiveSink) error {
 	}
 }
 
-func (r *rpcReader) finalizeTurn(out agent.InteractiveSink, lastMsg string, streamed bool) {
-	if s, ok := spec.Extract(lastMsg); ok {
+// finalizeMessage forwards one completed agent message: any task-spec it
+// carries, then the user-visible text — as a chunk if it wasn't already
+// streamed via deltas — and the final.
+func (r *rpcReader) finalizeMessage(out agent.InteractiveSink, text string, streamed bool) {
+	if s, ok := spec.Extract(text); ok {
 		_ = out.ForwardSpecUpdate(s)
 	}
-	display := spec.Strip(lastMsg)
+	display := spec.Strip(text)
 	if display == "" {
 		return
 	}
