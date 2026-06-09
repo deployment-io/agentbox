@@ -24,6 +24,7 @@ func TestExtract_Valid(t *testing.T) {
 	  "acceptance_criteria": ["login works", "tests pass"],
 	  "assumptions": ["existing provider"],
 	  "out_of_scope": ["SSO"],
+	  "complexity": "medium",
 	  "readiness": "ready",
 	  "readiness_notes": "good to go"
 	}`)
@@ -42,6 +43,9 @@ func TestExtract_Valid(t *testing.T) {
 	}
 	if s.Readiness != "ready" {
 		t.Errorf("readiness = %q", s.Readiness)
+	}
+	if s.Complexity != "medium" {
+		t.Errorf("complexity = %q, want medium", s.Complexity)
 	}
 	if s.Notes != "good to go" {
 		t.Errorf("notes = %q", s.Notes)

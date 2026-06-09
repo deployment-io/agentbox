@@ -38,6 +38,7 @@ type parsedSpec struct {
 	OutOfScope  []string `json:"out_of_scope"`
 	Readiness   string   `json:"readiness"`
 	Notes       string   `json:"readiness_notes"`
+	Complexity  string   `json:"complexity"`
 }
 
 // Extract returns the task-spec parsed from the latest valid
@@ -69,6 +70,7 @@ func Extract(text string) (agent.SpecSnapshot, bool) {
 			OutOfScope:  p.OutOfScope,
 			Readiness:   p.Readiness,
 			Notes:       p.Notes,
+			Complexity:  p.Complexity,
 			Raw:         raw,
 		}, true
 	}

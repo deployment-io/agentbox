@@ -163,6 +163,7 @@ type specRecord struct {
 	OutOfScope  []string `json:"out_of_scope"`
 	Readiness   string   `json:"readiness"`
 	Notes       string   `json:"readiness_notes"`
+	Complexity  string   `json:"complexity"`
 	Raw         string   `json:"raw"`
 }
 
@@ -178,6 +179,7 @@ func (f *FSIO) ForwardSpecUpdate(s agent.SpecSnapshot) error {
 		OutOfScope:  s.OutOfScope,
 		Readiness:   s.Readiness,
 		Notes:       s.Notes,
+		Complexity:  s.Complexity,
 		Raw:         s.Raw,
 	})
 }

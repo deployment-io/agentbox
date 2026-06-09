@@ -133,6 +133,10 @@ type SpecSnapshot struct {
 	OutOfScope  []string
 	Readiness   string // "vague" | "partial" | "ready"
 	Notes       string
+	// Complexity is the agent's hint for the EXECUTION task's model tier:
+	// "low" | "medium" | "high". Advisory — the convert step maps it to a
+	// default model within the chosen agent; the user can override.
+	Complexity string
 	// Raw is the verbatim JSON payload of the block, for storage/audit.
 	Raw string
 }

@@ -42,10 +42,10 @@ Each turn, judge what the user is doing:
 Only emit a task-spec once the user has expressed intent to change the code; never fabricate a task from a pure question. Block format:
 
 ` + "```task-spec" + `
-{"title":"...","goal":"...","context":"...","acceptance_criteria":["..."],"assumptions":["..."],"out_of_scope":["..."],"readiness":"vague|partial|ready","readiness_notes":"..."}
+{"title":"...","goal":"...","context":"...","acceptance_criteria":["..."],"assumptions":["..."],"out_of_scope":["..."],"complexity":"low|medium|high","readiness":"vague|partial|ready","readiness_notes":"..."}
 ` + "```" + `
 
-Set readiness to "ready" only when the goal, acceptance criteria, and file scope are concrete.`
+Set readiness to "ready" only when the goal, acceptance criteria, and file scope are concrete. Set complexity to the model tier the EXECUTION task needs: "low" = trivial/one-file change, "medium" = a few files with some logic, "high" = multi-file work, refactors, tests, or tricky logic. It's a hint for choosing the execution model; the user can override.`
 
 func main() {
 	agentboxBin := flag.String("agentbox", "", "path to the built agentbox binary (required)")
@@ -168,11 +168,12 @@ func tailOutputs(ctx context.Context, outputDir, specPath string) {
 		if b, err := os.ReadFile(specPath); err == nil && string(b) != lastSpec {
 			lastSpec = string(b)
 			var sr struct {
-				Goal      string `json:"goal"`
-				Readiness string `json:"readiness"`
+				Goal       string `json:"goal"`
+				Readiness  string `json:"readiness"`
+				Complexity string `json:"complexity"`
 			}
 			_ = json.Unmarshal(b, &sr)
-			fmt.Printf("\n[spec] readiness=%s goal=%q\n", sr.Readiness, sr.Goal)
+			fmt.Printf("\n[spec] readiness=%s complexity=%s goal=%q\n", sr.Readiness, sr.Complexity, sr.Goal)
 		}
 	}
 }
