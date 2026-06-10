@@ -187,13 +187,24 @@ func (c *Config) loadCredentials() error {
 	return c.loadClaudeCredentials()
 }
 
-// loadCodexCredentials requires CODEX_API_KEY — the key `codex exec` reads
-// for headless runs. OpenAI direct only in v1 (no provider dispatch).
+// loadCodexCredentials requires OPENAI_API_KEY — the key the Codex CLI
+// actually authenticates with; without it codex falls back to interactive
+// ChatGPT login (blocked by the proxy) and 401s on api.openai.com.
+// CODEX_API_KEY — the original contract name, which nothing reads — is
+// accepted as a legacy alias and mapped onto OPENAI_API_KEY when only it is
+// set, so control planes that predate the rename keep authenticating.
+// OpenAI direct only in v1 (no provider dispatch).
 func (c *Config) loadCodexCredentials() error {
-	if strings.TrimSpace(os.Getenv("CODEX_API_KEY")) == "" {
-		return fmt.Errorf("CODEX_API_KEY is required for codex")
+	if strings.TrimSpace(os.Getenv("OPENAI_API_KEY")) != "" {
+		return nil
 	}
-	return nil
+	if legacy := strings.TrimSpace(os.Getenv("CODEX_API_KEY")); legacy != "" {
+		if err := os.Setenv("OPENAI_API_KEY", legacy); err != nil {
+			return fmt.Errorf("error mapping CODEX_API_KEY to OPENAI_API_KEY: %w", err)
+		}
+		return nil
+	}
+	return fmt.Errorf("OPENAI_API_KEY is required for codex (CODEX_API_KEY is accepted as a legacy alias)")
 }
 
 // loadClaudeCredentials validates the Anthropic Direct or Bedrock path

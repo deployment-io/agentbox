@@ -22,6 +22,8 @@ func setEnv(t *testing.T, want map[string]string) {
 		"CLAUDE_CODE_VERSION",
 		"NO_ACTIVITY_TIMEOUT",
 		"ANTHROPIC_API_KEY",
+		"OPENAI_API_KEY",
+		"CODEX_API_KEY",
 		"CLAUDE_CODE_USE_BEDROCK",
 		"AWS_ACCESS_KEY_ID",
 		"AWS_SECRET_ACCESS_KEY",
@@ -36,6 +38,59 @@ func setEnv(t *testing.T, want map[string]string) {
 	for _, v := range vars {
 		t.Setenv(v, want[v])
 	}
+}
+
+// TestLoadCodexCredentials pins the codex credential contract: OPENAI_API_KEY
+// is what the Codex CLI authenticates with; CODEX_API_KEY is a legacy alias
+// mapped onto it at startup; neither present fails fast with a clear message
+// instead of dying later with a misleading 401 from api.openai.com.
+func TestLoadCodexCredentials(t *testing.T) {
+	c := &Config{}
+
+	t.Run("openai key alone passes", func(t *testing.T) {
+		t.Setenv("OPENAI_API_KEY", "sk-real")
+		t.Setenv("CODEX_API_KEY", "")
+		if err := c.loadCodexCredentials(); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got := os.Getenv("OPENAI_API_KEY"); got != "sk-real" {
+			t.Errorf("OPENAI_API_KEY = %q, want untouched sk-real", got)
+		}
+	})
+
+	t.Run("legacy codex key maps onto OPENAI_API_KEY", func(t *testing.T) {
+		t.Setenv("OPENAI_API_KEY", "")
+		t.Setenv("CODEX_API_KEY", "sk-legacy")
+		if err := c.loadCodexCredentials(); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got := os.Getenv("OPENAI_API_KEY"); got != "sk-legacy" {
+			t.Errorf("OPENAI_API_KEY = %q, want mapped legacy value", got)
+		}
+	})
+
+	t.Run("both set keeps the explicit openai key", func(t *testing.T) {
+		t.Setenv("OPENAI_API_KEY", "sk-real")
+		t.Setenv("CODEX_API_KEY", "sk-legacy")
+		if err := c.loadCodexCredentials(); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got := os.Getenv("OPENAI_API_KEY"); got != "sk-real" {
+			t.Errorf("OPENAI_API_KEY = %q, want explicit value kept", got)
+		}
+	})
+
+	t.Run("neither fails fast naming OPENAI_API_KEY", func(t *testing.T) {
+		t.Setenv("OPENAI_API_KEY", "")
+		t.Setenv("CODEX_API_KEY", "")
+		err := c.loadCodexCredentials()
+		if err == nil {
+			t.Fatal("expected error with no codex credential")
+		}
+		if !strings.Contains(err.Error(), "OPENAI_API_KEY") {
+			t.Errorf("error %q should name OPENAI_API_KEY", err)
+		}
+	})
 }
 
 func TestLoad_MissingStepPrompt(t *testing.T) {

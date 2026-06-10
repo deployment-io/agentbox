@@ -178,7 +178,7 @@ func Run(ctx context.Context, cfg *config.Config, driver Driver) (outcome result
 // STEP_PROMPT in particular carries the task description with embedded quotes
 // and newlines, which breaks Codex's shell-environment snapshot
 // ("Unterminated quoted string"). Credentials (ANTHROPIC_API_KEY /
-// CODEX_API_KEY) and the toolchain/cache vars are NOT here — the agent needs
+// OPENAI_API_KEY) and the toolchain/cache vars are NOT here — the agent needs
 // those — so they pass through untouched.
 var agentboxInputEnv = map[string]bool{
 	"STEP_PROMPT":            true,
