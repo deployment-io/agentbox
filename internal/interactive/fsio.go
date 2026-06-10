@@ -201,16 +201,41 @@ func (f *FSIO) Heartbeat(s agent.SessionState) error {
 	})
 }
 
-// writeJSONAtomic marshals v and writes it via a temp file + rename so a
-// reader never sees a partially-written file.
+// writeJSONAtomic marshals v and writes it via a uniquely-named temp file in
+// the same directory, then renames it over path so a reader never sees a
+// partially-written file. The temp name is unique (os.CreateTemp), not a
+// shared path+".tmp": concurrent writers — to different logical paths, or
+// (defensively) the same one — never clobber each other's temp or race on the
+// rename. Same-directory keeps the rename atomic (one filesystem).
 func writeJSONAtomic(path string, v any) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.tmp")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(b); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return err
+	}
+	// CreateTemp makes the file 0o600; match the previous 0o644 so the runner
+	// (reading these back) sees the same perms.
+	if err := tmp.Chmod(0o644); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
+	return nil
 }

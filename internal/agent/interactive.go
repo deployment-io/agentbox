@@ -355,6 +355,12 @@ func PumpTextStdin(ctx context.Context, iio InteractiveIO, encode func(string) (
 // RunHeartbeat reports a liveness snapshot to iio every interval until ctx is
 // cancelled. stats supplies the current snapshot (drivers close over their
 // own accumulated counters).
+//
+// stats() runs on this heartbeat goroutine, concurrently with the driver's
+// stdout-reader goroutine. A driver whose stats closure reads counters it
+// mutates while parsing agent output MUST synchronize them (atomics or a
+// mutex) — otherwise that read/write is a data race. Both shipped drivers
+// return a zero SessionState, so this is latent today.
 func RunHeartbeat(ctx context.Context, interval time.Duration, iio InteractiveIO, stats func() SessionState) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
