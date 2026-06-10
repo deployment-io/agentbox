@@ -3,6 +3,7 @@ package agent
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -240,15 +241,17 @@ func RunInteractive(ctx context.Context, cfg *config.Config, driver Driver, iio 
 		return interactiveExitOutcome(waitErr, stderrBuf.String(), driver.Binary())
 	case serr := <-sessionDone:
 		// Driver finished or hit a fatal protocol error; wind the process
-		// down. The outcome reflects the driver's view, not the SIGTERM kill.
+		// down. terminate's wait error tells apart "we SIGTERMed a live
+		// process" (signal exit) from "the agent had already died on its
+		// own" (real exit code) — classifySessionEnd needs that distinction.
 		stopSession()
-		_ = terminate(cmd, done)
+		waitErr := terminate(cmd, done)
 		if ctx.Err() != nil {
 			// A cancellation that surfaced as a session error is still a
 			// cancellation, not a failure.
 			return result.Outcome{Status: result.StatusCancelled, ExitCode: result.ExitCancelled, Error: "cancelled by signal"}
 		}
-		return sessionEndOutcome(serr)
+		return classifySessionEnd(serr, waitErr, stderrBuf.String(), driver.Binary())
 	case <-ctx.Done():
 		stopSession()
 		_ = terminate(cmd, done)
@@ -316,13 +319,21 @@ func interactiveExitOutcome(waitErr error, stderrText, binary string) result.Out
 	return result.Outcome{Status: result.StatusFailure, ExitCode: exit, Error: msg}
 }
 
-// sessionEndOutcome maps a driver RunSession return to an Outcome. A nil
-// error is a clean session end (success); a non-nil error is a protocol
-// failure. The process's own exit status is ignored here because we SIGTERM
-// it after the session ends.
-func sessionEndOutcome(serr error) result.Outcome {
+// classifySessionEnd maps the driver's RunSession return plus the process's
+// wait error to an Outcome. A non-nil serr is a protocol failure regardless
+// of how the process exited. A nil serr is a clean session end — but stdout
+// EOF races the agent's own death: a fast startup failure (bad flag, invalid
+// --session-id, auth error) EOFs stdout and exits non-zero before anything
+// else notices, and without the wait-error check that crash would classify
+// as success. Our own wind-down SIGTERM/SIGKILL surfaces as a signal exit
+// (ExitCode -1), never a positive code, so it cannot trip this.
+func classifySessionEnd(serr, waitErr error, stderrText, binary string) result.Outcome {
 	if serr != nil {
 		return result.Outcome{Status: result.StatusFailure, ExitCode: result.ExitExecutionFailure, Error: serr.Error()}
+	}
+	var exitErr *exec.ExitError
+	if errors.As(waitErr, &exitErr) && exitErr.ExitCode() > 0 {
+		return interactiveExitOutcome(waitErr, stderrText, binary)
 	}
 	return result.Outcome{Status: result.StatusSuccess, ExitCode: result.ExitSuccess}
 }
