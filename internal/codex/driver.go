@@ -73,19 +73,42 @@ func (d *Driver) AllowedHosts() []string {
 // PATH. Mirrors the claude driver's install idiom; the Dockerfile ships
 // Node 22 because @openai/codex's npm package requires Node >= 22.
 func (d *Driver) Ensure(ctx context.Context) error {
-	if _, err := exec.LookPath(d.Binary()); err == nil {
+	if _, err := exec.LookPath(d.Binary()); err != nil {
+		pkg := "@openai/codex"
+		if d.version != "" {
+			pkg += "@" + d.version
+		}
+		fmt.Fprintf(os.Stderr, "[agentbox] using %s\n", pkg)
+		cmd := exec.CommandContext(ctx, "npm", "install", "-g", "--silent", pkg)
+		cmd.Stdout = os.Stderr
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("npm install -g %s failed: %w", pkg, err)
+		}
+	}
+	return d.loginWithAPIKey(ctx)
+}
+
+// loginWithAPIKey registers OPENAI_API_KEY with the codex CLI via
+// `codex login --with-api-key` (key on stdin), writing auth.json under
+// CODEX_HOME (default ~/.codex). The CLI's auth state — and notably the
+// app-server's responses websocket — authenticates from auth.json, NOT from
+// the OPENAI_API_KEY env var: verified empirically on 0.136.0, where a valid
+// key in the env alone still 401s on wss://api.openai.com/v1/responses while
+// this login path authenticates cleanly. Idempotent (overwrites any prior
+// login). Runs on every Ensure, including when the CLI is already installed.
+// No key set → no-op (config validation already gates codex on the key; the
+// claude-only harness path also lands here).
+func (d *Driver) loginWithAPIKey(ctx context.Context) error {
+	key := strings.TrimSpace(os.Getenv("OPENAI_API_KEY"))
+	if key == "" {
 		return nil
 	}
-	pkg := "@openai/codex"
-	if d.version != "" {
-		pkg += "@" + d.version
-	}
-	fmt.Fprintf(os.Stderr, "[agentbox] using %s\n", pkg)
-	cmd := exec.CommandContext(ctx, "npm", "install", "-g", "--silent", pkg)
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("npm install -g %s failed: %w", pkg, err)
+	cmd := exec.CommandContext(ctx, d.Binary(), "login", "--with-api-key")
+	cmd.Stdin = strings.NewReader(key)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("codex login --with-api-key failed: %w — %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }

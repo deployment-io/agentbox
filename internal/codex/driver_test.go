@@ -1,6 +1,9 @@
 package codex
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -16,6 +19,59 @@ func TestRegistered_Codex(t *testing.T) {
 	}
 	if d.Binary() != "codex" {
 		t.Errorf("Binary() = %q, want codex", d.Binary())
+	}
+}
+
+// stubCodexOnPath installs a fake `codex` executable that records its argv
+// and stdin, so the login wiring can be asserted without the real CLI.
+// Returns the capture file paths.
+func stubCodexOnPath(t *testing.T) (argsFile, stdinFile string) {
+	t.Helper()
+	dir := t.TempDir()
+	argsFile = filepath.Join(dir, "args")
+	stdinFile = filepath.Join(dir, "stdin")
+	script := "#!/bin/sh\necho \"$@\" > " + argsFile + "\ncat > " + stdinFile + "\necho Successfully logged in\n"
+	if err := os.WriteFile(filepath.Join(dir, "codex"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return argsFile, stdinFile
+}
+
+// TestEnsure_LoginWithAPIKey pins the auth contract: the Codex CLI does not
+// read OPENAI_API_KEY from the env for request auth (a valid key in the env
+// alone still 401s on the app-server's responses websocket — verified on
+// 0.136.0), so Ensure must register the key via `codex login --with-api-key`
+// with the key on stdin — including when the CLI is already installed.
+func TestEnsure_LoginWithAPIKey(t *testing.T) {
+	argsFile, stdinFile := stubCodexOnPath(t)
+	t.Setenv("OPENAI_API_KEY", "sk-test-abc123")
+
+	if err := (&Driver{}).Ensure(context.Background()); err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	args, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("stub codex was not invoked: %v", err)
+	}
+	if got := strings.TrimSpace(string(args)); got != "login --with-api-key" {
+		t.Errorf("codex argv = %q, want %q", got, "login --with-api-key")
+	}
+	stdin, _ := os.ReadFile(stdinFile)
+	if string(stdin) != "sk-test-abc123" {
+		t.Errorf("key on stdin = %q, want the env key", stdin)
+	}
+}
+
+func TestEnsure_NoKeyNoLogin(t *testing.T) {
+	argsFile, _ := stubCodexOnPath(t)
+	t.Setenv("OPENAI_API_KEY", "")
+
+	if err := (&Driver{}).Ensure(context.Background()); err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	if _, err := os.Stat(argsFile); !os.IsNotExist(err) {
+		t.Errorf("codex should not be invoked when no key is set")
 	}
 }
 
