@@ -13,6 +13,17 @@ import (
 
 const defaultNoActivityTimeout = 10 * time.Minute
 
+// Agent execution modes, selected via the AGENT_MODE env var.
+const (
+	// ModeBatch is the default fire-and-forget mode: one
+	// `claude -p "<STEP_PROMPT>"`, one /result.json, exit.
+	ModeBatch = "batch"
+	// ModeInteractive keeps the container alive for a long-lived,
+	// bidirectional stream-json session driven by user messages over a
+	// pipe (see internal/agent/interactive.go). Used by repo-aware chat.
+	ModeInteractive = "interactive"
+)
+
 // Config captures the validated inputs for one agentbox run.
 type Config struct {
 	StepPrompt           string
@@ -29,6 +40,32 @@ type Config struct {
 	// Codex); Claude Code reports usage only at the end, so the watcher
 	// never preempts it.
 	TokenBudget int
+
+	// Mode is batch (default) or interactive — see the Mode* constants.
+	// From AGENT_MODE.
+	Mode string
+
+	// SessionID, when set, is forwarded to the agent as a stable session
+	// identifier (claude --session-id) so the transcript persists on disk
+	// and can be resumed after a container restart. From SESSION_ID.
+	SessionID string
+
+	// MaxBudgetUSD caps total spend for the run (claude --max-budget-usd).
+	// Empty = uncapped. From MAX_BUDGET_USD.
+	MaxBudgetUSD string
+
+	// ReadOnly restricts the agent to read-only investigation. The driver
+	// builds a tool allowlist and deliberately omits
+	// --dangerously-skip-permissions, so the allowlist is enforced rather
+	// than bypassed. From READ_ONLY.
+	ReadOnly bool
+
+	// AppendSystemPrompt is extra text appended to the agent's default
+	// system prompt (claude --append-system-prompt). Loaded from the file
+	// named by APPEND_SYSTEM_PROMPT_FILE — the CLI has no
+	// --append-system-prompt-file flag, so agentbox reads the file and
+	// passes the contents inline. Empty = none.
+	AppendSystemPrompt string
 
 	// NoActivityTimeout is zero when the detector is disabled.
 	NoActivityTimeout time.Duration
@@ -60,11 +97,29 @@ func Load() (*Config, error) {
 		Model:                os.Getenv("MODEL"),
 		MaxTurns:             os.Getenv("MAX_TURNS"),
 		AgentType:            envOr("AGENT_TYPE", "claude-code"),
+		Mode:                 envOr("AGENT_MODE", ModeBatch),
+		SessionID:            strings.TrimSpace(os.Getenv("SESSION_ID")),
+		MaxBudgetUSD:         strings.TrimSpace(os.Getenv("MAX_BUDGET_USD")),
+		ReadOnly:             parseBoolEnv("READ_ONLY"),
 	}
 
-	if c.StepPrompt == "" {
+	switch c.Mode {
+	case ModeBatch, ModeInteractive:
+	default:
+		return nil, fmt.Errorf("invalid AGENT_MODE %q: must be %q or %q", c.Mode, ModeBatch, ModeInteractive)
+	}
+
+	// STEP_PROMPT is the batch-mode work item. Interactive mode receives
+	// user turns over the message pipe, so it is not required there.
+	if c.Mode == ModeBatch && c.StepPrompt == "" {
 		return nil, fmt.Errorf("STEP_PROMPT is required")
 	}
+
+	appendPrompt, err := loadAppendSystemPrompt()
+	if err != nil {
+		return nil, err
+	}
+	c.AppendSystemPrompt = appendPrompt
 
 	if _, err := os.Stat(c.WorkDir); err != nil {
 		return nil, fmt.Errorf("WORK_DIR %q is not accessible: %w", c.WorkDir, err)
@@ -178,4 +233,32 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// parseBoolEnv reports whether the named env var holds a truthy value
+// ("1", "true", or "yes", case-insensitive). Anything else, including
+// unset, is false.
+func parseBoolEnv(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+	case "1", "true", "yes":
+		return true
+	}
+	return false
+}
+
+// loadAppendSystemPrompt reads the file named by APPEND_SYSTEM_PROMPT_FILE
+// and returns its contents, to be passed inline via the agent's
+// --append-system-prompt flag (the CLI has no --append-system-prompt-file
+// variant). Returns "" when the env var is unset; errors when it is set
+// but the file cannot be read.
+func loadAppendSystemPrompt() (string, error) {
+	path := strings.TrimSpace(os.Getenv("APPEND_SYSTEM_PROMPT_FILE"))
+	if path == "" {
+		return "", nil
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("APPEND_SYSTEM_PROMPT_FILE %q is not readable: %w", path, err)
+	}
+	return string(b), nil
 }

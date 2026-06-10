@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -25,6 +27,11 @@ func setEnv(t *testing.T, want map[string]string) {
 		"AWS_SECRET_ACCESS_KEY",
 		"AWS_SESSION_TOKEN",
 		"AWS_REGION",
+		"AGENT_MODE",
+		"SESSION_ID",
+		"MAX_BUDGET_USD",
+		"READ_ONLY",
+		"APPEND_SYSTEM_PROMPT_FILE",
 	}
 	for _, v := range vars {
 		t.Setenv(v, want[v])
@@ -399,5 +406,163 @@ func TestLoad_NoActivityTimeoutNegative(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "non-negative") {
 		t.Errorf("error should mention the sign constraint: %v", err)
+	}
+}
+
+func TestLoad_DefaultModeBatch(t *testing.T) {
+	workDir := t.TempDir()
+	setEnv(t, map[string]string{
+		"STEP_PROMPT":       "do the thing",
+		"WORK_DIR":          workDir,
+		"ANTHROPIC_API_KEY": "sk-ant-test",
+	})
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Mode != ModeBatch {
+		t.Errorf("default Mode = %q, want %q", cfg.Mode, ModeBatch)
+	}
+}
+
+func TestLoad_InvalidMode(t *testing.T) {
+	workDir := t.TempDir()
+	setEnv(t, map[string]string{
+		"STEP_PROMPT":       "do the thing",
+		"WORK_DIR":          workDir,
+		"ANTHROPIC_API_KEY": "sk-ant-test",
+		"AGENT_MODE":        "bogus",
+	})
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error for invalid AGENT_MODE")
+	}
+	if !strings.Contains(err.Error(), "AGENT_MODE") {
+		t.Errorf("error should mention AGENT_MODE: %v", err)
+	}
+}
+
+func TestLoad_InteractiveModeAllowsEmptyStepPrompt(t *testing.T) {
+	// Interactive mode gets its work over the message pipe, not STEP_PROMPT,
+	// so an empty STEP_PROMPT must not fail Load the way it does in batch.
+	workDir := t.TempDir()
+	setEnv(t, map[string]string{
+		"WORK_DIR":          workDir,
+		"ANTHROPIC_API_KEY": "sk-ant-test",
+		"AGENT_MODE":        ModeInteractive,
+	})
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("interactive mode should not require STEP_PROMPT: %v", err)
+	}
+	if cfg.Mode != ModeInteractive {
+		t.Errorf("Mode = %q, want %q", cfg.Mode, ModeInteractive)
+	}
+	if cfg.StepPrompt != "" {
+		t.Errorf("StepPrompt = %q, want empty", cfg.StepPrompt)
+	}
+}
+
+func TestLoad_InteractiveFields(t *testing.T) {
+	workDir := t.TempDir()
+	setEnv(t, map[string]string{
+		"WORK_DIR":          workDir,
+		"ANTHROPIC_API_KEY": "sk-ant-test",
+		"AGENT_MODE":        ModeInteractive,
+		"SESSION_ID":        "11111111-2222-3333-4444-555555555555",
+		"MAX_BUDGET_USD":    "5.00",
+		"READ_ONLY":         "1",
+	})
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.SessionID != "11111111-2222-3333-4444-555555555555" {
+		t.Errorf("SessionID = %q", cfg.SessionID)
+	}
+	if cfg.MaxBudgetUSD != "5.00" {
+		t.Errorf("MaxBudgetUSD = %q, want 5.00", cfg.MaxBudgetUSD)
+	}
+	if !cfg.ReadOnly {
+		t.Error("ReadOnly = false, want true")
+	}
+}
+
+func TestLoad_ReadOnlyParsing(t *testing.T) {
+	tests := []struct {
+		val  string
+		want bool
+	}{
+		{"1", true},
+		{"true", true},
+		{"TRUE", true},
+		{"yes", true},
+		{"0", false},
+		{"false", false},
+		{"", false},
+		{"nope", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.val, func(t *testing.T) {
+			workDir := t.TempDir()
+			setEnv(t, map[string]string{
+				"STEP_PROMPT":       "do the thing",
+				"WORK_DIR":          workDir,
+				"ANTHROPIC_API_KEY": "sk-ant-test",
+				"READ_ONLY":         tt.val,
+			})
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if cfg.ReadOnly != tt.want {
+				t.Errorf("READ_ONLY=%q -> ReadOnly=%v, want %v", tt.val, cfg.ReadOnly, tt.want)
+			}
+		})
+	}
+}
+
+func TestLoad_AppendSystemPromptFromFile(t *testing.T) {
+	workDir := t.TempDir()
+	promptPath := filepath.Join(t.TempDir(), "system-prompt.txt")
+	want := "You are in plan mode. Be read-only."
+	if err := os.WriteFile(promptPath, []byte(want), 0o644); err != nil {
+		t.Fatalf("write prompt file: %v", err)
+	}
+	setEnv(t, map[string]string{
+		"WORK_DIR":                  workDir,
+		"ANTHROPIC_API_KEY":         "sk-ant-test",
+		"AGENT_MODE":                ModeInteractive,
+		"APPEND_SYSTEM_PROMPT_FILE": promptPath,
+	})
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.AppendSystemPrompt != want {
+		t.Errorf("AppendSystemPrompt = %q, want %q", cfg.AppendSystemPrompt, want)
+	}
+}
+
+func TestLoad_AppendSystemPromptFileMissing(t *testing.T) {
+	workDir := t.TempDir()
+	setEnv(t, map[string]string{
+		"WORK_DIR":                  workDir,
+		"ANTHROPIC_API_KEY":         "sk-ant-test",
+		"AGENT_MODE":                ModeInteractive,
+		"APPEND_SYSTEM_PROMPT_FILE": "/nonexistent/prompt.txt",
+	})
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error for unreadable APPEND_SYSTEM_PROMPT_FILE")
+	}
+	if !strings.Contains(err.Error(), "APPEND_SYSTEM_PROMPT_FILE") {
+		t.Errorf("error should mention the var: %v", err)
 	}
 }

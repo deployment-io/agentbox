@@ -183,6 +183,13 @@ func Run(ctx context.Context, cfg *config.Config, driver Driver) (outcome result
 var agentboxInputEnv = map[string]bool{
 	"STEP_PROMPT":            true,
 	"PREVIOUS_STEPS_SUMMARY": true,
+	// Interactive-mode inputs (read by config.Load; the agent receives the
+	// equivalents via CLI args from BuildInteractiveArgs, not the env).
+	"AGENT_MODE":                true,
+	"SESSION_ID":                true,
+	"READ_ONLY":                 true,
+	"MAX_BUDGET_USD":            true,
+	"APPEND_SYSTEM_PROMPT_FILE": true,
 }
 
 // buildEnv forwards the parent env minus agentbox's own input-contract vars
