@@ -55,6 +55,8 @@ jobs:
           context: .
           platforms: linux/amd64
           push: true
+          build-args: |
+            AGENTBOX_VERSION=v${{ steps.version.outputs.version }}
           tags: |
             ${{ env.REGISTRY_DOCKERHUB }}:${{ steps.version.outputs.version }}
             ${{ env.REGISTRY_DOCKERHUB }}:latest
