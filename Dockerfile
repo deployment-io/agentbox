@@ -4,11 +4,16 @@ FROM golang:1.24-bookworm AS builder
 WORKDIR /src
 COPY . .
 
+# AGENTBOX_VERSION stamps the release tag into the binary (logged at
+# startup so session logs attribute every run to an exact release).
+# The release workflow passes the tag; local builds default to "dev".
+ARG AGENTBOX_VERSION=dev
+
 # Once the module acquires external dependencies, split this into
 # `COPY go.mod go.sum ./ && RUN go mod download && COPY . .` so the
 # dep-download layer can cache independently of source changes.
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-    go build -trimpath -ldflags="-s -w" -o /out/agentbox ./cmd/agentbox
+    go build -trimpath -ldflags="-s -w -X main.version=${AGENTBOX_VERSION}" -o /out/agentbox ./cmd/agentbox
 
 
 # ---- Stage 2: Runtime ----

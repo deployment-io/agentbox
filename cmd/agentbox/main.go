@@ -28,7 +28,15 @@ import (
 	_ "github.com/deployment-io/agentbox/internal/vendoring/node"
 )
 
+// version is the agentbox release this binary was built from, stamped at
+// image build via -ldflags "-X main.version=<tag>" (see Dockerfile +
+// .github/workflows/release.yml). "dev" for local builds. Logged first
+// thing so every container run is attributable to an exact release —
+// without it, rollout gaps are invisible in the session logs.
+var version = "dev"
+
 func main() {
+	fmt.Fprintf(os.Stderr, "[agentbox] agentbox %s\n", version)
 	if len(os.Args) > 1 && os.Args[1] == "vendor" {
 		runVendor()
 		return
