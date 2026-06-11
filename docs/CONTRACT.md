@@ -19,7 +19,7 @@ logs, and read `/tmp/result.json` (or `$RESULT_PATH`) after exit.
 | Variable | Description |
 |---|---|
 | `ANTHROPIC_API_KEY` | `sk-ant-...` string against `api.anthropic.com`. Required when `AGENT_TYPE=claude-code`. |
-| `OPENAI_API_KEY` | OpenAI API key the Codex CLI authenticates with against `api.openai.com`. Required when `AGENT_TYPE=codex`. Without it codex falls back to interactive ChatGPT login (blocked by the proxy) and fails with 401s. |
+| `OPENAI_API_KEY` | OpenAI API key for Codex. Required when `AGENT_TYPE=codex`. The Codex CLI does NOT read this env var for request auth (verified on 0.136.0 — a valid key in the env alone still 401s); agentbox registers it at startup via `codex login --with-api-key`, which writes `auth.json`, the credential the CLI (including `app-server`) actually authenticates with. |
 | `CODEX_API_KEY` | Legacy alias for `OPENAI_API_KEY` — nothing reads it directly; agentbox maps it onto `OPENAI_API_KEY` at startup when only it is set. Prefer `OPENAI_API_KEY`. |
 
 ### Optional
