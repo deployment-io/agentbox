@@ -57,8 +57,15 @@ func (f *chunkForwarder) handleLine(line []byte) {
 	switch ev.Type {
 	case "assistant":
 		f.handleAssistant(ev.Message)
-	case "system", "user", "result":
-		// init / tool_result / end-of-turn result: not chat-visible here.
+	case "result":
+		// End of turn: the agent is now blocked on user input. The result
+		// text isn't chat-visible (it duplicates the last assistant
+		// message), but the boundary itself is forwarded — consumers gate
+		// their composer on it and group the turn's messages.
+		f.streamedThisMsg = false
+		_ = f.sink.ForwardTurnEnd()
+	case "system", "user":
+		// init / tool_result: not chat-visible here.
 	default:
 		// Best-effort token streaming (--include-partial-messages). The
 		// wrapper type is outside the documented contract, so match on the

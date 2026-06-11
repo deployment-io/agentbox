@@ -284,9 +284,13 @@ func (r *rpcReader) runTurn(out agent.InteractiveSink) error {
 				streamed = false
 			}
 		case "turn/completed":
+			_ = out.ForwardTurnEnd()
 			return nil
 		case "turn/failed":
+			// Still a turn boundary: the agent goes back to waiting for
+			// input, so a consumer gating on the boundary must not hang.
 			fmt.Fprintln(r.log, "[codex] turn failed")
+			_ = out.ForwardTurnEnd()
 			return nil
 		case "error":
 			var p struct {
