@@ -15,10 +15,11 @@ import (
 
 // codexFakeIO delivers one user turn then EOF, and captures forwarded output.
 type codexFakeIO struct {
-	msgs   chan agent.UserMessage
-	chunks []string
-	finals []string
-	specs  []agent.SpecSnapshot
+	msgs     chan agent.UserMessage
+	chunks   []string
+	finals   []string
+	specs    []agent.SpecSnapshot
+	turnEnds int
 }
 
 func (f *codexFakeIO) NextUserMessage(ctx context.Context) (agent.UserMessage, error) {
@@ -43,6 +44,10 @@ func (f *codexFakeIO) ForwardFinal(m agent.AssistantMessage) error {
 }
 func (f *codexFakeIO) ForwardSpecUpdate(s agent.SpecSnapshot) error {
 	f.specs = append(f.specs, s)
+	return nil
+}
+func (f *codexFakeIO) ForwardTurnEnd() error {
+	f.turnEnds++
 	return nil
 }
 
@@ -174,5 +179,27 @@ func TestRunTurn_MultipleAgentMessages(t *testing.T) {
 	}
 	if len(sink.specs) != 1 || sink.specs[0].Goal != "G" {
 		t.Errorf("specs = %v, want one with goal G", sink.specs)
+	}
+	if sink.turnEnds != 1 {
+		t.Errorf("turnEnds = %d, want 1 (emitted at turn/completed, after the finals)", sink.turnEnds)
+	}
+}
+
+// TestRunTurn_FailedTurnStillEmitsTurnEnd pins the boundary on failure: a
+// consumer gating its composer on the turn boundary must not hang when the
+// turn fails instead of completing.
+func TestRunTurn_FailedTurnStillEmitsTurnEnd(t *testing.T) {
+	lines := strings.Join([]string{
+		notifLine("item/agentMessage/delta", map[string]any{"itemId": "a", "delta": "Working…"}),
+		notifLine("turn/failed", map[string]any{"turn": map[string]any{"id": "t", "status": "failed"}}),
+	}, "\n") + "\n"
+
+	sink := &codexFakeIO{}
+	r := newRPCReader(strings.NewReader(lines), io.Discard)
+	if err := r.runTurn(sink); err != nil {
+		t.Fatalf("runTurn: %v", err)
+	}
+	if sink.turnEnds != 1 {
+		t.Errorf("turnEnds = %d, want 1 on turn/failed", sink.turnEnds)
 	}
 }

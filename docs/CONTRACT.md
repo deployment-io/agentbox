@@ -65,7 +65,7 @@ not yet wired.
 | Path | Direction | Contents |
 |---|---|---|
 | `.agentbox-input/messages/<name>.json` | consumer → agentbox | one user turn `{"id","content","ts"}`; consumed (deleted) in filename order. |
-| `.agentbox-output/messages/<seq>.json` | agentbox → consumer | assistant output `{"seq","type":"chunk"\|"final","text"}`; zero-padded `seq` so lexical order is chronological. |
+| `.agentbox-output/messages/<seq>.json` | agentbox → consumer | assistant output `{"seq","type":"chunk"\|"final"\|"turn_end","text"}`; zero-padded `seq` so lexical order is chronological. A `turn_end` record (no `text`) follows the turn's last `final` — emitted when the agent finishes (or fails) a turn and is back to waiting for input, so the consumer can gate its composer on the boundary. |
 | `.agentbox-output/task-spec.json` | agentbox → consumer | latest extracted task-spec (overwritten): the structured fields plus `raw`. |
 | `.agentbox-output/heartbeat.json` | agentbox → consumer | liveness `{"ts","turns","input_tokens","output_tokens"}` (overwritten ~every 30s). |
 

@@ -9,9 +9,10 @@ import (
 )
 
 type captureSink struct {
-	chunks []string
-	finals []string
-	specs  []agent.SpecSnapshot
+	chunks   []string
+	finals   []string
+	specs    []agent.SpecSnapshot
+	turnEnds int
 }
 
 func (s *captureSink) ForwardChunk(c agent.AssistantChunk) error {
@@ -24,6 +25,10 @@ func (s *captureSink) ForwardFinal(m agent.AssistantMessage) error {
 }
 func (s *captureSink) ForwardSpecUpdate(sp agent.SpecSnapshot) error {
 	s.specs = append(s.specs, sp)
+	return nil
+}
+func (s *captureSink) ForwardTurnEnd() error {
+	s.turnEnds++
 	return nil
 }
 
@@ -110,5 +115,42 @@ func TestForwarder_IgnoresNonJSON(t *testing.T) {
 
 	if len(sink.finals) != 1 || sink.finals[0] != "real message" {
 		t.Errorf("non-JSON noise should be ignored; finals = %v", sink.finals)
+	}
+}
+
+func resultLine() string {
+	b, _ := json.Marshal(map[string]any{"type": "result", "result": "Hello"})
+	return string(b)
+}
+
+func TestForwarder_ResultEmitsTurnEnd(t *testing.T) {
+	sink := &captureSink{}
+	fwd := newChunkForwarder(sink)
+	fwd.handleLine([]byte(assistantLine("narration")))
+	fwd.handleLine([]byte(assistantLine("the answer")))
+	fwd.handleLine([]byte(resultLine()))
+
+	if sink.turnEnds != 1 {
+		t.Errorf("turnEnds = %d, want 1 (one per result event)", sink.turnEnds)
+	}
+	if len(sink.finals) != 2 {
+		t.Errorf("finals = %v, want both turn messages before the boundary", sink.finals)
+	}
+}
+
+func TestForwarder_ResultResetsPartialStreamState(t *testing.T) {
+	sink := &captureSink{}
+	fwd := newChunkForwarder(sink)
+	// Partial deltas with no completed "assistant" event before the turn ends
+	// (e.g. the completed event carried only a spec block). The result must
+	// reset the streamed flag, or the NEXT turn's completed message would be
+	// treated as already-streamed and its chunk dropped.
+	fwd.handleLine([]byte(partialLine("orphan")))
+	fwd.handleLine([]byte(resultLine()))
+	fwd.handleLine([]byte(assistantLine("next turn")))
+
+	want := []string{"orphan", "next turn"}
+	if strings.Join(sink.chunks, "|") != strings.Join(want, "|") {
+		t.Errorf("chunks = %v, want %v", sink.chunks, want)
 	}
 }

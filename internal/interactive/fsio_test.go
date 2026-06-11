@@ -81,6 +81,7 @@ func TestFSIO_OutputOrdering(t *testing.T) {
 	_ = f.ForwardChunk(agent.AssistantChunk{Text: "Hel"})
 	_ = f.ForwardChunk(agent.AssistantChunk{Text: "lo"})
 	_ = f.ForwardFinal(agent.AssistantMessage{Text: "Hello"})
+	_ = f.ForwardTurnEnd()
 
 	var names []string
 	entries, _ := os.ReadDir(f.outputDir)
@@ -90,8 +91,8 @@ func TestFSIO_OutputOrdering(t *testing.T) {
 		}
 	}
 	sort.Strings(names)
-	if len(names) != 3 {
-		t.Fatalf("expected 3 output files, got %d", len(names))
+	if len(names) != 4 {
+		t.Fatalf("expected 4 output files, got %d", len(names))
 	}
 
 	var recs []outputRecord
@@ -107,8 +108,11 @@ func TestFSIO_OutputOrdering(t *testing.T) {
 	if recs[2].Type != "final" || recs[2].Text != "Hello" {
 		t.Errorf("rec2 = %+v", recs[2])
 	}
-	if !(recs[0].Seq < recs[1].Seq && recs[1].Seq < recs[2].Seq) {
-		t.Errorf("seqs not increasing: %d %d %d", recs[0].Seq, recs[1].Seq, recs[2].Seq)
+	if recs[3].Type != "turn_end" || recs[3].Text != "" {
+		t.Errorf("rec3 = %+v, want a bare turn_end record after the final", recs[3])
+	}
+	if !(recs[0].Seq < recs[1].Seq && recs[1].Seq < recs[2].Seq && recs[2].Seq < recs[3].Seq) {
+		t.Errorf("seqs not increasing: %d %d %d %d", recs[0].Seq, recs[1].Seq, recs[2].Seq, recs[3].Seq)
 	}
 }
 

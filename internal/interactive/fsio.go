@@ -133,7 +133,7 @@ func (f *FSIO) takeOldestInput() (agent.UserMessage, bool, error) {
 
 type outputRecord struct {
 	Seq  int64  `json:"seq"`
-	Type string `json:"type"` // "chunk" | "final"
+	Type string `json:"type"` // "chunk" | "final" | "turn_end"
 	Text string `json:"text"`
 }
 
@@ -145,6 +145,12 @@ func (f *FSIO) ForwardChunk(c agent.AssistantChunk) error {
 // ForwardFinal writes the completed assistant message for a turn.
 func (f *FSIO) ForwardFinal(m agent.AssistantMessage) error {
 	return f.writeOutput(outputRecord{Type: "final", Text: m.Text})
+}
+
+// ForwardTurnEnd writes the turn-boundary record: the agent finished its
+// turn and is blocked waiting for the next user message.
+func (f *FSIO) ForwardTurnEnd() error {
+	return f.writeOutput(outputRecord{Type: "turn_end"})
 }
 
 func (f *FSIO) writeOutput(rec outputRecord) error {

@@ -78,6 +78,13 @@ type InteractiveSink interface {
 	// ForwardSpecUpdate delivers a task-spec extracted from an assistant
 	// message. Called only when the message carried a valid spec block.
 	ForwardSpecUpdate(spec SpecSnapshot) error
+
+	// ForwardTurnEnd signals that the agent finished its turn and is now
+	// blocked waiting for the next user message. Sent after the turn's last
+	// ForwardFinal (Claude Code's end-of-turn "result" event, Codex's
+	// "turn/completed"), and also when a turn fails — so a consumer gating
+	// input on the turn boundary never waits on a turn that won't complete.
+	ForwardTurnEnd() error
 }
 
 // InteractiveIO is the full duplex a session drives: a sink for output plus
