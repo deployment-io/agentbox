@@ -125,12 +125,15 @@ func TestBuildInteractiveArgs_AppServer(t *testing.T) {
 	}
 }
 
+// TestSandboxMode pins the sandbox to danger-full-access regardless of the
+// read-only flag: read-only / workspace-write enforce via bubblewrap, which
+// can't create its namespace inside the container, so commands fail before
+// running. The container + proxy are the sandbox.
 func TestSandboxMode(t *testing.T) {
-	if got := sandboxMode(&config.Config{ReadOnly: true}); got != "read-only" {
-		t.Errorf("read-only sandbox = %q, want read-only", got)
-	}
-	if got := sandboxMode(&config.Config{ReadOnly: false}); got != "workspace-write" {
-		t.Errorf("non-read-only sandbox = %q, want workspace-write", got)
+	for _, ro := range []bool{true, false} {
+		if got := sandboxMode(&config.Config{ReadOnly: ro}); got != "danger-full-access" {
+			t.Errorf("sandboxMode(ReadOnly=%v) = %q, want danger-full-access", ro, got)
+		}
 	}
 }
 

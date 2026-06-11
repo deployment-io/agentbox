@@ -28,12 +28,17 @@ func (d *Driver) BuildInteractiveArgs(cfg *config.Config) []string {
 	}
 }
 
-// sandboxMode maps the session's read-only flag to the Codex app-server
-// sandbox setting. Read-only investigation sessions (the Assistant default)
-// get "readOnly"; others get workspace-write.
-func sandboxMode(cfg *config.Config) string {
-	if cfg.ReadOnly {
-		return "read-only"
-	}
-	return "workspace-write"
+// sandboxMode is the Codex app-server sandbox for the session thread. It is
+// always danger-full-access: Codex's read-only and workspace-write modes
+// enforce isolation with bubblewrap, which cannot create its user namespace
+// inside the agentbox container — so every command fails before it runs
+// ("cannot create sandbox namespace"), which is why interactive sessions
+// could converse but never investigate. The agentbox container + network
+// proxy ARE the sandbox, the same model the batch `codex exec` path uses
+// (--sandbox danger-full-access). Read-only intent for planning sessions is
+// carried by the plan-mode prompt and the ephemeral, never-pushed clone;
+// filesystem-level read-only enforcement (if wanted) is a runner concern,
+// not codex's. cfg is retained for a future writable-session distinction.
+func sandboxMode(_ *config.Config) string {
+	return "danger-full-access"
 }

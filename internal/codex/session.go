@@ -20,9 +20,10 @@ import (
 // Per turn it sends the user's message and streams the agent's reply back
 // via sess.IO: item/agentMessage/delta → ForwardChunk, the completed agent
 // message + turn/completed → ForwardFinal + any task-spec. The session is
-// autonomous and read-only (approvalPolicy "never" + a read-only sandbox),
-// so the server never sends approval round-trips. Returns nil on a clean end
-// (user input exhausted or stdout EOF) and an error on a protocol failure.
+// autonomous (approvalPolicy "never" + danger-full-access sandbox — the
+// agentbox container is the real sandbox; see sandboxMode), so the server
+// never sends approval round-trips. Returns nil on a clean end (user input
+// exhausted or stdout EOF) and an error on a protocol failure.
 //
 // The exact method names / param shapes follow the App Server protocol docs
 // (developers.openai.com/codex/app-server); the interactive harness is used
