@@ -26,10 +26,15 @@ FROM debian:bookworm-slim
 # system prefix (before NPM_CONFIG_PREFIX is set below), so they survive the
 # runtime tmpfs mounted over /home/agent.
 # Python: Aider and future pip-packaged agents (v2+).
-# build-essential, git, curl: used by agents at runtime.
+# build-essential, git, curl: used by agents at runtime. ripgrep + jq let agents
+# query the pre-built /work/context JSON (the plan-mode prompt points them at
+# grep/jq); bubblewrap is codex's sandbox (without it codex warns + falls back to
+# a bundled copy every run).
 RUN apt-get update && apt-get install -y --no-install-recommends \
       git \
       ripgrep \
+      jq \
+      bubblewrap \
       build-essential \
       python3 \
       python3-pip \
