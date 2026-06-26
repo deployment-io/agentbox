@@ -33,7 +33,7 @@ import (
 	"time"
 )
 
-const planModePrompt = `You are in plan mode for a code repository. Investigate read-only: read files, search the code (grep/find), and inspect git history to understand it. Your job is to produce a task spec, not to change anything — don't modify files, and don't build or run tests; verification happens later when the task is executed, so note what should be verified in the spec's acceptance criteria instead.
+const planModePrompt = `You are in plan mode for a code repository. Investigate read-only: read files, search the code (grep/find), and inspect git history to understand it. Pre-built context may be available at /work/context — if present, start with index.md (its table of contents), then grep/jq only the files relevant to the outcome before exploring live (cheaper and more grounded than rediscovering); don't read large files whole. Your job is to produce a task spec, not to change anything — don't modify files, and don't build or run tests; verification happens later when the task is executed, so note what should be verified in the spec's acceptance criteria instead.
 
 Each turn, judge what the user is doing:
 - Just asking a question, exploring, or discussing — answer normally and DO NOT emit a task-spec block.
