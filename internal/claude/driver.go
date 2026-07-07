@@ -125,7 +125,30 @@ func (d *Driver) BuildArgs(cfg *config.Config) []string {
 	if cfg.Model != "" {
 		args = append(args, "--model", cfg.Model)
 	}
+	if cfg.MCPSocket != "" {
+		// Point Claude Code's MCP client at the runner's tool socket via the
+		// `agentbox mcp-bridge` stdio bridge. --dangerously-skip-permissions
+		// (set above) also auto-allows these tools, so the agent invokes them
+		// without a permission prompt.
+		args = append(args, "--mcp-config", mcpConfigJSON(cfg.MCPSocket))
+	}
 	return args
+}
+
+// mcpConfigJSON builds the inline --mcp-config value that registers the runner's
+// tool channel as a stdio MCP server: this same binary run as
+// `agentbox mcp-bridge <socket>`, which pipes JSON-RPC to the runner. Claude
+// Code accepts a JSON string here (not only a file path). os.Executable
+// resolves the bridge binary, falling back to the image's fixed path.
+func mcpConfigJSON(socket string) string {
+	self, err := os.Executable()
+	if err != nil || self == "" {
+		self = "/usr/local/bin/agentbox"
+	}
+	return fmt.Sprintf(
+		`{"mcpServers":{"deployment-io":{"command":%q,"args":["mcp-bridge",%q]}}}`,
+		self, socket,
+	)
 }
 
 func (d *Driver) DetectVersion() string {
