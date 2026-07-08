@@ -9,8 +9,11 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
+	"net"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/deployment-io/agentbox/internal/agent"
 	"github.com/deployment-io/agentbox/internal/config"
@@ -36,12 +39,53 @@ import (
 var version = "dev"
 
 func main() {
+	// mcp-bridge is spawned by the agent's MCP client and speaks JSON-RPC on
+	// stdout — handle it first, before the banner, so stdout stays pristine.
+	if len(os.Args) > 1 && os.Args[1] == "mcp-bridge" {
+		runMCPBridge()
+		return
+	}
 	fmt.Fprintf(os.Stderr, "[agentbox] agentbox %s\n", version)
 	if len(os.Args) > 1 && os.Args[1] == "vendor" {
 		runVendor()
 		return
 	}
 	runAgent()
+}
+
+// runMCPBridge is the `agentbox mcp-bridge <socket>` subcommand: a dumb
+// bidirectional pipe between this process's stdio and the runner's per-task MCP
+// tool socket. The agent's MCP client (e.g. Claude Code) spawns it as a stdio
+// MCP server; it forwards newline-delimited JSON-RPC to the runner, which owns
+// the protocol and executes tools with the runner's credentials. Stdout stays
+// pristine — only socket bytes go out. Credentials never enter this container;
+// this only relays intent to the privileged runner.
+func runMCPBridge() {
+	if len(os.Args) < 3 {
+		fmt.Fprintln(os.Stderr, "[agentbox] mcp-bridge: missing socket path")
+		os.Exit(2)
+	}
+	socket := os.Args[2]
+	// The runner creates the socket before the container starts, but retry
+	// briefly to absorb any startup skew before the agent's first tool call.
+	var conn net.Conn
+	var err error
+	for i := 0; i < 50; i++ {
+		if conn, err = net.Dial("unix", socket); err == nil {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[agentbox] mcp-bridge: dial %s: %v\n", socket, err)
+		os.Exit(1)
+	}
+	defer conn.Close()
+
+	done := make(chan struct{}, 2)
+	go func() { _, _ = io.Copy(conn, os.Stdin); done <- struct{}{} }()
+	go func() { _, _ = io.Copy(os.Stdout, conn); done <- struct{}{} }()
+	<-done // exit when either direction closes
 }
 
 // runAgent is the default mode: install the agent, run it against

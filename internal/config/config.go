@@ -67,6 +67,13 @@ type Config struct {
 	// passes the contents inline. Empty = none.
 	AppendSystemPrompt string
 
+	// MCPSocket is the container path of the runner's per-task MCP tool socket
+	// (MCP_TOOL_RPC_SOCKET). Set for the agent phase when the runner exposes
+	// runner-executed tools; empty = no tool channel. The claude driver points
+	// the agent's MCP client at it via --mcp-config + the `mcp-bridge`
+	// subcommand. Credentials stay in the runner; only intent crosses the socket.
+	MCPSocket string
+
 	// NoActivityTimeout is zero when the detector is disabled.
 	NoActivityTimeout time.Duration
 
@@ -101,6 +108,7 @@ func Load() (*Config, error) {
 		SessionID:            strings.TrimSpace(os.Getenv("SESSION_ID")),
 		MaxBudgetUSD:         strings.TrimSpace(os.Getenv("MAX_BUDGET_USD")),
 		ReadOnly:             parseBoolEnv("READ_ONLY"),
+		MCPSocket:            strings.TrimSpace(os.Getenv("MCP_TOOL_RPC_SOCKET")),
 	}
 
 	switch c.Mode {
