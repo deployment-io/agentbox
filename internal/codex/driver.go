@@ -6,6 +6,7 @@ package codex
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -154,8 +155,40 @@ func (d *Driver) BuildArgs(cfg *config.Config) []string {
 	if cfg.Model != "" {
 		args = append(args, "--model", cfg.Model)
 	}
+	if cfg.MCPSocket != "" {
+		// Register the runner's tool socket as a stdio MCP server — the same
+		// bridge the claude driver uses (`agentbox mcp-bridge <socket>`). Codex
+		// has no --mcp-config flag; MCP servers live under mcp_servers.<name> in
+		// its config, which we set with the same -c override mechanism used
+		// above (values parse as JSON). --dangerously-bypass-approvals-and-sandbox
+		// (set above) auto-allows the tools, so no approval prompt.
+		//
+		// NOTE: verify against the pinned codex — if -c overrides don't register
+		// MCP servers, write mcp_servers into ~/.codex/config.toml in Ensure.
+		self := agentboxSelfPath()
+		args = append(args,
+			"-c", "mcp_servers.deployment_io.command="+jsonValue(self),
+			"-c", "mcp_servers.deployment_io.args=["+jsonValue("mcp-bridge")+","+jsonValue(cfg.MCPSocket)+"]",
+		)
+	}
 	args = append(args, cfg.StepPrompt+"\n\n"+finalMessageInstruction)
 	return args
+}
+
+// agentboxSelfPath resolves this binary's path for the mcp-bridge command,
+// falling back to the image's fixed location.
+func agentboxSelfPath() string {
+	if self, err := os.Executable(); err == nil && self != "" {
+		return self
+	}
+	return "/usr/local/bin/agentbox"
+}
+
+// jsonValue renders v as a JSON literal for a `codex -c key=<value>` override
+// (codex parses the value as JSON, falling back to a bare string).
+func jsonValue(v string) string {
+	b, _ := json.Marshal(v)
+	return string(b)
 }
 
 func (d *Driver) DetectVersion() string {
