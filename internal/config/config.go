@@ -77,13 +77,22 @@ type Config struct {
 	// NoActivityTimeout is zero when the detector is disabled.
 	NoActivityTimeout time.Duration
 
-	// Exactly one of AnthropicDirect or Bedrock is populated.
+	// Exactly one of AnthropicDirect, Subscription, or Bedrock is populated.
 	AnthropicDirect *AnthropicDirectCreds
+	Subscription    *SubscriptionCreds
 	Bedrock         *BedrockCreds
 }
 
 type AnthropicDirectCreds struct {
 	APIKey string
+}
+
+// SubscriptionCreds is the Claude Code subscription (Pro/Max) OAuth path — a
+// token from `claude setup-token`, passed as CLAUDE_CODE_OAUTH_TOKEN. Genuine
+// Claude Code reads it from the inherited env; this only records that the path
+// was chosen. See the runner's maybeApplyClaudeSubscriptionAuth.
+type SubscriptionCreds struct {
+	OAuthToken string
 }
 
 type BedrockCreds struct {
@@ -215,18 +224,36 @@ func (c *Config) loadCodexCredentials() error {
 	return fmt.Errorf("OPENAI_API_KEY is required for codex (CODEX_API_KEY is accepted as a legacy alias)")
 }
 
-// loadClaudeCredentials validates the Anthropic Direct or Bedrock path
-// (exactly one must be set).
+// loadClaudeCredentials validates the Anthropic Direct, subscription OAuth, or
+// Bedrock path (exactly one must be set). Like the other loaders this is a
+// presence check — the agent CLI reads the actual credential from the
+// inherited env; agentbox just fails fast when none (or more than one) is set.
 func (c *Config) loadClaudeCredentials() error {
 	anthropicKey := strings.TrimSpace(os.Getenv("ANTHROPIC_API_KEY"))
+	oauthToken := strings.TrimSpace(os.Getenv("CLAUDE_CODE_OAUTH_TOKEN"))
 	bedrockFlag := os.Getenv("CLAUDE_CODE_USE_BEDROCK") == "1"
 
-	if anthropicKey != "" && bedrockFlag {
-		return fmt.Errorf("both ANTHROPIC_API_KEY and CLAUDE_CODE_USE_BEDROCK=1 are set; specify exactly one credential path")
+	set := 0
+	if anthropicKey != "" {
+		set++
+	}
+	if oauthToken != "" {
+		set++
+	}
+	if bedrockFlag {
+		set++
+	}
+	if set > 1 {
+		return fmt.Errorf("multiple Claude credential paths set; specify exactly one of ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN, or CLAUDE_CODE_USE_BEDROCK=1")
 	}
 
 	if anthropicKey != "" {
 		c.AnthropicDirect = &AnthropicDirectCreds{APIKey: anthropicKey}
+		return nil
+	}
+
+	if oauthToken != "" {
+		c.Subscription = &SubscriptionCreds{OAuthToken: oauthToken}
 		return nil
 	}
 
@@ -244,7 +271,7 @@ func (c *Config) loadClaudeCredentials() error {
 		return nil
 	}
 
-	return fmt.Errorf("no credentials provided: set ANTHROPIC_API_KEY or CLAUDE_CODE_USE_BEDROCK=1 plus AWS credentials")
+	return fmt.Errorf("no credentials provided: set ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN, or CLAUDE_CODE_USE_BEDROCK=1 plus AWS credentials")
 }
 
 func envOr(key, fallback string) string {

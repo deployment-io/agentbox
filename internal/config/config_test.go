@@ -22,6 +22,7 @@ func setEnv(t *testing.T, want map[string]string) {
 		"CLAUDE_CODE_VERSION",
 		"NO_ACTIVITY_TIMEOUT",
 		"ANTHROPIC_API_KEY",
+		"CLAUDE_CODE_OAUTH_TOKEN",
 		"OPENAI_API_KEY",
 		"CODEX_API_KEY",
 		"CLAUDE_CODE_USE_BEDROCK",
@@ -150,6 +151,50 @@ func TestLoad_AnthropicDirect(t *testing.T) {
 	}
 	if cfg.AgentType != "claude-code" {
 		t.Errorf("default AgentType = %q, want %q", cfg.AgentType, "claude-code")
+	}
+}
+
+func TestLoad_SubscriptionOAuth(t *testing.T) {
+	workDir := t.TempDir()
+	setEnv(t, map[string]string{
+		"STEP_PROMPT":             "do the thing",
+		"WORK_DIR":                workDir,
+		"CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat01-test",
+	})
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Subscription == nil {
+		t.Fatal("expected Subscription to be populated")
+	}
+	if cfg.Subscription.OAuthToken != "sk-ant-oat01-test" {
+		t.Errorf("OAuthToken = %q, want %q", cfg.Subscription.OAuthToken, "sk-ant-oat01-test")
+	}
+	if cfg.AnthropicDirect != nil {
+		t.Error("AnthropicDirect should be nil when the subscription OAuth path is set")
+	}
+	if cfg.Bedrock != nil {
+		t.Error("Bedrock should be nil when the subscription OAuth path is set")
+	}
+}
+
+func TestLoad_SubscriptionConflictsWithAPIKey(t *testing.T) {
+	workDir := t.TempDir()
+	setEnv(t, map[string]string{
+		"STEP_PROMPT":             "do the thing",
+		"WORK_DIR":                workDir,
+		"ANTHROPIC_API_KEY":       "sk-ant-test",
+		"CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat01-test",
+	})
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error when both API key and OAuth token are set")
+	}
+	if !strings.Contains(err.Error(), "exactly one") {
+		t.Errorf("error should mention the ambiguity: %v", err)
 	}
 }
 
