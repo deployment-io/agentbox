@@ -26,13 +26,12 @@ import (
 // no such flags). See agent.Run's limit watcher. opencode DOES report cost
 // (priced off models.dev), so CostUSD is populated, unlike codex.
 //
-// VERIFY AGAINST REAL OUTPUT: the event "type" discriminators and the nested
-// "part" field names below are derived from opencode's documented JSON stream
-// (text parts carry part.text; a step-finish event carries token usage + cost).
-// The exact spellings ("step_finish" vs "step.finish", the tokens/cache field
-// names, the tool-event shape) must be confirmed against a captured run — they
-// are isolated to the structs + processLine here, so confirmation is a localized
-// edit. A schema mismatch degrades to "fewer fields populated", never a crash.
+// Schema verified against a captured `opencode run --format json` (opencode
+// 1.17.9, 2026-07-19): the top-level discriminators are "step_finish" /
+// "tool_use" / "text" / "error"; token usage lives at
+// part.tokens.{input,output,cache.{read,write}} and cost at part.cost; text
+// arrives as one full part per message (not incremental deltas). A future schema
+// mismatch degrades to "fewer fields populated", never a crash.
 type jsonlParser struct {
 	mu           sync.Mutex
 	finalMessage string // latest assistant text; the final one carries the summary + trailers
@@ -102,9 +101,9 @@ func (p *jsonlParser) processLine(line []byte) {
 	switch ev.Type {
 	case "text":
 		p.handleText(ev.Part)
-	case "step_finish", "step.finish":
+	case "step_finish":
 		p.handleStepFinish(ev.Part)
-	case "tool", "tool_use":
+	case "tool_use":
 		p.handleTool(ev.Part)
 	case "error":
 		p.setError(ev.errorMessage())
@@ -148,14 +147,13 @@ type opencodeCache struct {
 	Write int `json:"write"`
 }
 
-// opencodeToolState carries a tool call's input args. Best-effort: for
-// edit/write tools the edited path is typically state.input.filePath. The
-// files_changed list is display-only (the runner commits from the actual git
-// diff), so an imperfect match just yields an empty list, not a broken run.
+// opencodeToolState carries a tool call's input args. write/edit put the target
+// in state.input.filePath; apply_patch carries no filePath — its target paths are
+// embedded in state.input.patchText and parsed by applyPatchPaths.
 type opencodeToolState struct {
 	Input struct {
-		FilePath string `json:"filePath"`
-		Path     string `json:"path"`
+		FilePath  string `json:"filePath"`
+		PatchText string `json:"patchText"`
 	} `json:"input"`
 }
 
@@ -176,9 +174,9 @@ func (p *jsonlParser) handleText(raw json.RawMessage) {
 	}
 	p.mu.Lock()
 	// Latest assistant text wins; the final one carries the changes summary plus
-	// the <verify> / <pr_title> trailers. VERIFY: if opencode emits text as
-	// incremental deltas rather than one full part per message, switch this to
-	// per-part-id accumulation.
+	// the <verify> / <pr_title> trailers. Confirmed against a real run: opencode
+	// emits one full text part per message (not incremental deltas), so the final
+	// message's text is complete.
 	p.finalMessage = part.Text
 	if part.ModelID != "" {
 		p.model = part.ModelID
@@ -210,21 +208,58 @@ func (p *jsonlParser) handleStepFinish(raw json.RawMessage) {
 	p.mu.Unlock()
 }
 
+// handleTool records files a MUTATING tool changed. Only write/edit/apply_patch
+// touch the working tree; read/grep/glob/bash/etc. are ignored so files_changed
+// reflects real edits, not every file the agent inspected — an unbounded set on a
+// large repo. files_changed is display-only (the runner commits from the git
+// diff), so under-reporting is safe, whereas over-reporting bloats result.json
+// and the Job.Output it flows into. Hence the mutating-tool allowlist. Confirmed
+// tool names + path fields against opencode source (write/edit → filePath;
+// apply_patch → paths inside patchText).
 func (p *jsonlParser) handleTool(raw json.RawMessage) {
 	var part opencodePart
 	if err := json.Unmarshal(raw, &part); err != nil || part.State == nil {
 		return
 	}
-	path := part.State.Input.FilePath
-	if path == "" {
-		path = part.State.Input.Path
+	var paths []string
+	switch part.Tool {
+	case "write", "edit":
+		if fp := part.State.Input.FilePath; fp != "" {
+			paths = []string{fp}
+		}
+	case "apply_patch":
+		paths = applyPatchPaths(part.State.Input.PatchText)
+	default:
+		return // non-mutating (read/grep/glob/bash/webfetch/…) — don't track
 	}
-	if path == "" {
+	if len(paths) == 0 {
 		return
 	}
 	p.mu.Lock()
-	p.filesChanged[path] = struct{}{}
+	for _, fp := range paths {
+		p.filesChanged[fp] = struct{}{}
+	}
 	p.mu.Unlock()
+}
+
+// applyPatchFileRe matches the per-file headers in an apply_patch patchText body:
+// "*** Add File: <path>", "*** Update File: <path>", "*** Delete File: <path>".
+var applyPatchFileRe = regexp.MustCompile(`(?m)^\*\*\* (?:Add|Update|Delete) File: (.+)$`)
+
+// applyPatchPaths extracts target paths from an apply_patch patchText. That tool
+// has no filePath arg. Best-effort: if the patch format shifts we under-report,
+// which handleTool treats as safe. Returns nil when nothing matches.
+func applyPatchPaths(patchText string) []string {
+	if patchText == "" {
+		return nil
+	}
+	var out []string
+	for _, m := range applyPatchFileRe.FindAllStringSubmatch(patchText, -1) {
+		if pth := strings.TrimSpace(m[1]); pth != "" {
+			out = append(out, pth)
+		}
+	}
+	return out
 }
 
 func (p *jsonlParser) setError(msg string) {

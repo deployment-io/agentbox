@@ -3,6 +3,7 @@ package opencode
 import (
 	"math"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -16,8 +17,13 @@ import (
 func TestParser_HappyPath(t *testing.T) {
 	stream := strings.Join([]string{
 		`{"type":"step_finish","part":{"tokens":{"input":1000,"output":50,"cache":{"read":200,"write":20}},"cost":0.01,"modelID":"anthropic/claude-sonnet-4-6"}}`,
-		`{"type":"tool","part":{"tool":"edit","state":{"input":{"filePath":"main.go"}}}}`,
-		`{"type":"tool","part":{"tool":"write","state":{"input":{"filePath":"README.md"}}}}`,
+		`{"type":"tool_use","part":{"tool":"edit","state":{"input":{"filePath":"main.go"}}}}`,
+		`{"type":"tool_use","part":{"tool":"write","state":{"input":{"filePath":"README.md"}}}}`,
+		// read + grep must NOT land in files_changed (they only inspect) — this is
+		// the over-reporting/blowup guard: on a real repo the agent reads/searches
+		// far more files than it edits.
+		`{"type":"tool_use","part":{"tool":"read","state":{"input":{"filePath":"only_inspected.go"}}}}`,
+		`{"type":"tool_use","part":{"tool":"grep","state":{"input":{"path":"/work/src"}}}}`,
 		`{"type":"text","part":{"text":"Did the thing.\n\n<verify>{\"ran\":true,\"passed\":true,\"command\":\"go build ./...\"}</verify>\n\n<pr_title>Add the thing</pr_title>","modelID":"anthropic/claude-sonnet-4-6"}}`,
 		`{"type":"step_finish","part":{"tokens":{"input":2000,"output":80,"cache":{"read":0,"write":0}},"cost":0.02}}`,
 	}, "\n")
@@ -61,6 +67,39 @@ func TestParser_HappyPath(t *testing.T) {
 	}
 	if st.IsError {
 		t.Error("IsError should be false on success")
+	}
+}
+
+// TestParser_ApplyPatchFilesTracked verifies apply_patch (which has no filePath
+// arg) contributes its target files to files_changed, parsed from the patch body.
+func TestParser_ApplyPatchFilesTracked(t *testing.T) {
+	patch := "*** Begin Patch\n" +
+		"*** Add File: pkg/new.go\n+package pkg\n" +
+		"*** Update File: pkg/old.go\n@@\n-a\n+b\n" +
+		"*** Delete File: pkg/gone.go\n" +
+		"*** End Patch"
+	line := `{"type":"tool_use","part":{"tool":"apply_patch","state":{"input":{"patchText":` + strconv.Quote(patch) + `}}}}`
+	p := newJSONLParser()
+	p.processLine([]byte(line))
+	if want := []string{"pkg/gone.go", "pkg/new.go", "pkg/old.go"}; !slices.Equal(p.State().FilesChanged, want) {
+		t.Errorf("FilesChanged = %v, want %v", p.State().FilesChanged, want)
+	}
+}
+
+// TestParser_NonMutatingToolsNotTracked pins the over-reporting guard directly:
+// read/grep/glob/bash never contribute to files_changed even when they carry a
+// path, so the list can't balloon with everything the agent inspected.
+func TestParser_NonMutatingToolsNotTracked(t *testing.T) {
+	stream := strings.Join([]string{
+		`{"type":"tool_use","part":{"tool":"read","state":{"input":{"filePath":"a.go"}}}}`,
+		`{"type":"tool_use","part":{"tool":"grep","state":{"input":{"path":"/work"}}}}`,
+		`{"type":"tool_use","part":{"tool":"glob","state":{"input":{"path":"/work/src"}}}}`,
+		`{"type":"tool_use","part":{"tool":"bash","state":{"input":{}}}}`,
+	}, "\n")
+	p := newJSONLParser()
+	p.Consume(strings.NewReader(stream))
+	if got := p.State().FilesChanged; len(got) != 0 {
+		t.Errorf("FilesChanged = %v, want empty (non-mutating tools must not be tracked)", got)
 	}
 }
 
