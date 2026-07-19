@@ -20,8 +20,9 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
 FROM debian:bookworm-slim
 
 # Language runtimes and build tools needed by supported agents.
-# Node 22 + yarn + pnpm: Claude Code and Codex are both npm-packaged
-# (@openai/codex requires Node >= 22), plus package-manager-agnostic JS/TS
+# Node 22 + yarn + pnpm: Claude Code, Codex, and opencode are all npm-packaged
+# (@openai/codex requires Node >= 22; opencode ships via the opencode-ai wrapper,
+# which fetches its binary on install), plus package-manager-agnostic JS/TS
 # dependency vendoring + verify (npm / yarn / pnpm). These install to the
 # system prefix (before NPM_CONFIG_PREFIX is set below), so they survive the
 # runtime tmpfs mounted over /home/agent.
@@ -104,6 +105,12 @@ ENV CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION}
 # CODEX_VERSION=X.Y.Z) as Codex releases ship.
 ARG CODEX_VERSION=0.136.0
 ENV CODEX_VERSION=${CODEX_VERSION}
+# Pinned opencode-ai (npm) version installed by the opencode Driver.Ensure on
+# first container run. opencode is provider-agnostic; the model's provider
+# prefix selects which API host the allowlist opens. Bump deliberately (or
+# override with --build-arg OPENCODE_VERSION=X.Y.Z).
+ARG OPENCODE_VERSION=1.17.9
+ENV OPENCODE_VERSION=${OPENCODE_VERSION}
 
 LABEL org.opencontainers.image.title="agentbox"
 LABEL org.opencontainers.image.description="Open-source agent orchestrator"
@@ -111,6 +118,7 @@ LABEL org.opencontainers.image.source="https://github.com/deployment-io/agentbox
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 LABEL com.anthropic.claude-code.version="${CLAUDE_CODE_VERSION}"
 LABEL com.openai.codex.version="${CODEX_VERSION}"
+LABEL ai.opencode.version="${OPENCODE_VERSION}"
 
 COPY --from=builder /out/agentbox /usr/local/bin/agentbox
 
