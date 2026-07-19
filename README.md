@@ -95,9 +95,10 @@ Full spec: [docs/CONTRACT.md](docs/CONTRACT.md). Summary:
 |---|---|---|
 | `WORK_DIR` | `/work` | Path where the repo is bind-mounted. |
 | `RESULT_PATH` | `/tmp/result.json` | Where to write the structured result. |
-| `AGENT_TYPE` | `claude-code` | Which agent to install and run. |
+| `AGENT_TYPE` | `claude-code` | Which agent to install and run: `claude-code`, `codex`, or `opencode`. |
 | `CLAUDE_CODE_VERSION` | Pinned in image | Overridable Claude Code version. |
-| `MODEL` | Agent default | e.g., `opus`, `haiku`, or a pinned version. |
+| `OPENCODE_VERSION` | Pinned in image | Overridable `opencode-ai` version (when `AGENT_TYPE=opencode`). |
+| `MODEL` | Agent default | e.g. `opus`/`haiku` (claude-code), `gpt-5.5` (codex), or a `provider/model` id like `anthropic/claude-sonnet-4-6` (opencode). |
 | `MAX_TURNS` | Uncapped | Hard cap on agent turns. |
 | `NO_ACTIVITY_TIMEOUT` | `10m` | Kill the subprocess if stdout is silent this long. `0` disables. |
 | `PREVIOUS_STEPS_SUMMARY` | — | Free-form context of prior steps for multi-step workflows. |
@@ -146,6 +147,12 @@ Get a key at [platform.claude.com](https://platform.claude.com).
 
 **v1:** Claude Code and Codex (OpenAI). Select via `AGENT_TYPE`
 (`claude-code` | `codex`).
+
+**Prototype:** opencode (`AGENT_TYPE=opencode`) — the provider-agnostic
+agent, targeting Anthropic, OpenAI, and other providers via a
+`provider/model` id (e.g. `anthropic/claude-sonnet-4-6`). Batch mode
+only in v1; the `--format json` parser schema is being verified against
+real runs.
 
 **Planned:** other agent runtimes (Aider, …) register through the same
 `Driver` interface and dispatch on `AGENT_TYPE`. See

@@ -21,6 +21,7 @@ logs, and read `/tmp/result.json` (or `$RESULT_PATH`) after exit.
 | `ANTHROPIC_API_KEY` | `sk-ant-...` string against `api.anthropic.com`. Required when `AGENT_TYPE=claude-code`. |
 | `OPENAI_API_KEY` | OpenAI API key for Codex. Required when `AGENT_TYPE=codex`. The Codex CLI does NOT read this env var for request auth (verified on 0.136.0 — a valid key in the env alone still 401s); agentbox registers it at startup via `codex login --with-api-key`, which writes `auth.json`, the credential the CLI (including `app-server`) actually authenticates with. |
 | `CODEX_API_KEY` | Legacy alias for `OPENAI_API_KEY` — nothing reads it directly; agentbox maps it onto `OPENAI_API_KEY` at startup when only it is set. Prefer `OPENAI_API_KEY`. |
+| _(opencode, per-provider)_ | opencode is multi-provider — it authenticates with the API key for the provider named in the `MODEL` prefix. When `AGENT_TYPE=opencode`, provide the key matching the selected model's provider: `anthropic/…` → `ANTHROPIC_API_KEY`, `openai/…` → `OPENAI_API_KEY`, `openrouter/…` → `OPENROUTER_API_KEY`, `google/…` → `GEMINI_API_KEY`, plus `groq`/`xai`/`deepseek`/`mistral`. Unknown providers are lenient (opencode autodetects any provider key in the env and 401s at runtime if none matches). |
 
 ### Optional
 
@@ -29,10 +30,11 @@ logs, and read `/tmp/result.json` (or `$RESULT_PATH`) after exit.
 | `PREVIOUS_STEPS_SUMMARY` | Human-readable context of prior steps in a multi-step consumer scenario. agentbox passes it verbatim into the agent's prompt. |
 | `MAX_TURNS` | Hard cap on agent turns. For `claude-code`, passed to `--max-turns`; for `codex` (no native flag) agentbox enforces it from the JSON event stream. Default: uncapped (trust wall-clock / no-activity detector). |
 | `TOKEN_BUDGET` | Hard cap on cumulative input+output tokens, enforced agentbox-side from the event stream for agents without a native budget flag (e.g. `codex`). Default: `0` (uncapped). |
-| `MODEL` | Override the agent's model. For `claude-code` e.g. `claude-sonnet-4-6`; for `codex` e.g. `gpt-5.5`. Default: the agent's internal default. |
-| `AGENT_TYPE` | Which agent to install and run: `claude-code` (default) or `codex`. Unsupported values are rejected at startup. |
+| `MODEL` | Override the agent's model. For `claude-code` e.g. `claude-sonnet-4-6`; for `codex` e.g. `gpt-5.5`; for `opencode` a provider-prefixed id e.g. `anthropic/claude-sonnet-4-6` or `openai/gpt-5`. Default: the agent's internal default. |
+| `AGENT_TYPE` | Which agent to install and run: `claude-code` (default), `codex`, or `opencode`. Unsupported values are rejected at startup. |
 | `CLAUDE_CODE_VERSION` | Pinned Claude Code version installed on first container run. Baked into the image as an ENV default; overridable at runtime for debugging. Ignored when `AGENT_TYPE` is not `claude-code`. |
 | `CODEX_VERSION` | Pinned `@openai/codex` version installed on first container run (empty = latest). Ignored when `AGENT_TYPE` is not `codex`. |
+| `OPENCODE_VERSION` | Pinned `opencode-ai` (npm) version installed on first container run (empty = latest). Baked into the image as an ENV default; overridable at runtime. Ignored when `AGENT_TYPE` is not `opencode`. |
 | `NO_ACTIVITY_TIMEOUT` | Go duration string (e.g. `10m`, `90s`). If no agent output arrives within this window, agentbox kills the subprocess and exits with status `timeout` (exit code 4). Default: `10m`. Set to `0` to disable. |
 | `RESULT_PATH` | Override where `/result.json` is written. Default: `/tmp/result.json`. |
 | `ADDITIONAL_ALLOWED_HOSTS` | Comma-separated list of additional hostnames the agent can reach (e.g. `nexus.corp.local,api.linear.app`). Unioned with the active Driver's built-in allowlist (`api.anthropic.com,registry.npmjs.org` for `claude-code`). Empty / unset = only Driver-declared hosts are reachable. See [Network Restrictions](#network-restrictions). |
@@ -42,10 +44,11 @@ logs, and read `/tmp/result.json` (or `$RESULT_PATH`) after exit.
 
 A long-lived, bidirectional session (repo-aware chat) instead of one-shot
 batch, selected with `AGENT_MODE=interactive`. `STEP_PROMPT` is not required
-in this mode. Both agents are supported (via `AGENT_TYPE`), each over its own
-wire protocol: **claude-code** uses stream-json on stdin/stdout; **codex**
-uses the App Server JSON-RPC (`codex app-server`). The driver hides the
-difference — the filesystem I/O below is identical for both.
+in this mode. claude-code and codex are supported (via `AGENT_TYPE`), each over
+its own wire protocol: **claude-code** uses stream-json on stdin/stdout;
+**codex** uses the App Server JSON-RPC (`codex app-server`). The driver hides
+the difference — the filesystem I/O below is identical for both. **opencode**
+is batch-only in v1 (no interactive wire yet); use `AGENT_MODE=batch`.
 
 | Variable | Description |
 |---|---|
