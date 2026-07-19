@@ -173,6 +173,8 @@ func agentVersionForType(agentType string) string {
 		return os.Getenv("CLAUDE_CODE_VERSION")
 	case "codex":
 		return os.Getenv("CODEX_VERSION")
+	case "opencode":
+		return os.Getenv("OPENCODE_VERSION")
 	}
 	return ""
 }
@@ -198,8 +200,11 @@ func parseNoActivityTimeout(v string) (time.Duration, error) {
 // from the inherited process env (buildEnv forwards os.Environ); this is a
 // presence check, not a hand-off.
 func (c *Config) loadCredentials() error {
-	if c.AgentType == "codex" {
+	switch c.AgentType {
+	case "codex":
 		return c.loadCodexCredentials()
+	case "opencode":
+		return c.loadOpencodeCredentials()
 	}
 	return c.loadClaudeCredentials()
 }
@@ -222,6 +227,56 @@ func (c *Config) loadCodexCredentials() error {
 		return nil
 	}
 	return fmt.Errorf("OPENAI_API_KEY is required for codex (CODEX_API_KEY is accepted as a legacy alias)")
+}
+
+// loadOpencodeCredentials validates the API key for the provider implied by the
+// selected model. opencode is multi-provider: the model is a "provider/model"
+// id (e.g. "anthropic/claude-sonnet-4-6"), so the key it needs depends on the
+// provider prefix. For a known provider the matching key must be present
+// (fail-fast, mirroring the codex/claude checks). For an unknown or prefix-less
+// model this is lenient — opencode autodetects whatever provider key is in the
+// env and 401s at runtime if none matches (the parser flags the auth failure →
+// exit 2). The agent CLI reads the key from the inherited env; this is a
+// presence check, not a hand-off.
+func (c *Config) loadOpencodeCredentials() error {
+	provider, _, _ := strings.Cut(c.Model, "/")
+	envKey := opencodeProviderEnvKey(provider)
+	if envKey == "" {
+		return nil
+	}
+	if strings.TrimSpace(os.Getenv(envKey)) == "" {
+		return fmt.Errorf("%s is required for opencode model %q", envKey, c.Model)
+	}
+	return nil
+}
+
+// opencodeProviderEnvKey maps an opencode provider id to the env var holding its
+// API key, for the common providers. Returns "" for providers not in the table
+// (the lenient path). The names follow opencode's provider conventions and
+// should be confirmed per provider; GEMINI_API_KEY in particular has also been
+// GOOGLE_GENERATIVE_AI_API_KEY historically. Kept roughly aligned with
+// providerHostFromModel in internal/opencode (deliberately not shared — config
+// is imported by drivers, so importing the driver here would cycle).
+func opencodeProviderEnvKey(provider string) string {
+	switch provider {
+	case "anthropic":
+		return "ANTHROPIC_API_KEY"
+	case "openai":
+		return "OPENAI_API_KEY"
+	case "openrouter":
+		return "OPENROUTER_API_KEY"
+	case "google":
+		return "GEMINI_API_KEY"
+	case "groq":
+		return "GROQ_API_KEY"
+	case "xai":
+		return "XAI_API_KEY"
+	case "deepseek":
+		return "DEEPSEEK_API_KEY"
+	case "mistral":
+		return "MISTRAL_API_KEY"
+	}
+	return ""
 }
 
 // loadClaudeCredentials validates the Anthropic Direct, subscription OAuth, or
