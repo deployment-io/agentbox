@@ -29,9 +29,8 @@ func anchorPromptToRepos(prompt, workDir string) string {
 	for _, r := range repos {
 		b.WriteString("- " + r + "\n")
 	}
-	b.WriteString("Make ALL file changes inside these repository directories. ")
-	b.WriteString("Files created or modified elsewhere under " + workDir + " (including " + workDir + " itself) are NOT part of any repository and will be discarded — they are not committed and appear in no pull request. ")
-	b.WriteString("When a file is described as being at the \"root\" or \"top level\", it means the root of the relevant repository above, not " + workDir + ".\n\n")
+	b.WriteString("Make ALL file changes inside these repository directories — anything written elsewhere under " + workDir + " is discarded (not committed, no PR). ")
+	b.WriteString("\"Root\" and \"top level\" mean the repository root above, not " + workDir + ".\n\n")
 	b.WriteString(prompt)
 	return b.String()
 }

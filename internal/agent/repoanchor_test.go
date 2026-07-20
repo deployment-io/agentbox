@@ -45,7 +45,7 @@ func TestAnchorPromptToRepos_PrependsRepoPathAndKeepsPrompt(t *testing.T) {
 	if !strings.HasSuffix(out, "Add a LICENSE file.") {
 		t.Errorf("original prompt must be preserved at the end:\n%s", out)
 	}
-	if !strings.Contains(out, "will be discarded") {
+	if !strings.Contains(out, "is discarded") {
 		t.Errorf("anchor should warn that out-of-repo writes are discarded:\n%s", out)
 	}
 }
