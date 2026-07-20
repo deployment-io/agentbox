@@ -61,6 +61,11 @@ const (
 func Run(ctx context.Context, cfg *config.Config, driver Driver) (outcome result.Outcome) {
 	agentVersion := driver.DetectVersion()
 
+	// Steer the agent to write inside the checked-out repo subdirs rather than
+	// the /work root (its cwd). Agent-agnostic; every batch driver folds
+	// cfg.StepPrompt into its args. No-op when there are no repositories.
+	cfg.StepPrompt = anchorPromptToRepos(cfg.StepPrompt, cfg.WorkDir)
+
 	cmd := exec.Command(driver.Binary(), driver.BuildArgs(cfg)...)
 	cmd.Dir = cfg.WorkDir
 	cmd.Env = buildEnv()
