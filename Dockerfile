@@ -98,18 +98,18 @@ ENV DISABLE_AUTOUPDATER=1
 # Agent version pins. Overridable at build time via --build-arg or at
 # runtime via docker run -e. The Go binary reads these on startup and
 # installs the selected agent.
-ARG CLAUDE_CODE_VERSION=2.1.141
+ARG CLAUDE_CODE_VERSION=2.1.226
 ENV CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION}
 # Pinned @openai/codex version installed by the Codex Driver.Ensure on first
 # container run. Bump deliberately (or override with --build-arg
 # CODEX_VERSION=X.Y.Z) as Codex releases ship.
-ARG CODEX_VERSION=0.136.0
+ARG CODEX_VERSION=0.147.0
 ENV CODEX_VERSION=${CODEX_VERSION}
 # Pinned opencode-ai (npm) version installed by the opencode Driver.Ensure on
 # first container run. opencode is provider-agnostic; the model's provider
 # prefix selects which API host the allowlist opens. Bump deliberately (or
 # override with --build-arg OPENCODE_VERSION=X.Y.Z).
-ARG OPENCODE_VERSION=1.17.9
+ARG OPENCODE_VERSION=1.18.16
 ENV OPENCODE_VERSION=${OPENCODE_VERSION}
 
 LABEL org.opencontainers.image.title="agentbox"
