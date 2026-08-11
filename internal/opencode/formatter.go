@@ -157,7 +157,15 @@ func formatOpencodeJSONLine(line []byte) (string, bool) {
 		}
 		return "", true
 	case "error":
-		return "✗ " + oneLine(ev.errorMessage(), textExcerptLen), true
+		// The DISPLAY fallback lives here, not in errorMessage. That function
+		// returns "" when it has no detail on purpose — as a failure reason a
+		// placeholder is worse than nothing, because it suppresses the stderr
+		// tail. A log line has no such consequence and must not render as a
+		// bare "✗".
+		if detail := ev.errorMessage(); detail != "" {
+			return "✗ " + oneLine(detail, textExcerptLen), true
+		}
+		return "✗ opencode reported an error", true
 	}
 	return "", true // unknown event types: drop quietly
 }
