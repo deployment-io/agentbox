@@ -94,8 +94,23 @@ func (d *Driver) AllowedHosts() []string {
 		// releases — best-effort; confirm on first run and trim if unused.
 		"github.com",
 		"objects.githubusercontent.com",
-		// opencode's model + pricing registry, fetched at runtime.
+		// opencode's model + pricing registry, fetched at runtime. BOTH hosts,
+		// because which one is used depends on the opencode version:
+		//
+		//	models.dev           older releases
+		//	models.opencode.ai   1.18.x — opencode's own hosted copy
+		//
+		// A live 1.18.16 run failed with `denied:models.opencode.ai` while
+		// models.dev sat in this list unused. opencode cannot resolve a model
+		// id without the registry, so losing it fails EVERY opencode run
+		// regardless of provider — and the version that changes it is pinned in
+		// the Dockerfile, so a version bump alone can break this.
+		//
+		// Keeping both costs nothing: an unused allowlist entry opens no
+		// connection. Do not "tidy" one away without checking the pinned
+		// version — that is exactly how this broke.
 		"models.dev",
+		"models.opencode.ai",
 	}
 	if h := providerHostFromModel(os.Getenv("MODEL")); h != "" {
 		hosts = append(hosts, h)
