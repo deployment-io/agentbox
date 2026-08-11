@@ -157,11 +157,30 @@ type opencodeToolState struct {
 	} `json:"input"`
 }
 
+// errorMessage renders an error event's detail, or "" when it carries none.
+//
+// NAME MATTERS AS MUCH AS MESSAGE, and used to be discarded. opencode's
+// distinctive failures arrive as a name with little or no message —
+// ProviderModelNotFoundError being the one that matters most here, since it is
+// what an unroutable model id produces. Dropping it left nothing to act on.
+//
+// Returning "" rather than a placeholder is deliberate. A generic reason is
+// WORSE than none: failureMessage prefers FailureReason over every other
+// signal, so a placeholder pre-empted the stderr tail that might have explained
+// the failure — and, being self-describing, produced "opencode opencode
+// reported an error". Empty lets the fallbacks run.
 func (e opencodeEvent) errorMessage() string {
-	if e.Error != nil && e.Error.Message != "" {
-		return e.Error.Message
+	if e.Error == nil {
+		return ""
 	}
-	return "opencode reported an error"
+	switch {
+	case e.Error.Name != "" && e.Error.Message != "":
+		return e.Error.Name + ": " + e.Error.Message
+	case e.Error.Message != "":
+		return e.Error.Message
+	default:
+		return e.Error.Name
+	}
 }
 
 func (p *jsonlParser) handleText(raw json.RawMessage) {
