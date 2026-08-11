@@ -122,6 +122,7 @@ const liveBedrockAccessDenied = `{"error":{"name":"APIError","data":{` +
 // times running while the diagnosis sat one level down.
 func TestErrorMessage_ReadsTheNestedProviderMessage(t *testing.T) {
 	t.Setenv("AWS_REGION", "eu-west-1")
+	t.Setenv("MODEL", "amazon-bedrock/eu.anthropic.claude-sonnet-5")
 	var ev opencodeEvent
 	if err := json.Unmarshal([]byte(liveBedrockAccessDenied), &ev); err != nil {
 		t.Fatalf("unmarshal: %v", err)
@@ -149,6 +150,7 @@ func TestErrorMessage_ReadsTheNestedProviderMessage(t *testing.T) {
 // someone to the wrong console page — the same conflation that made the
 // runner's first fail-fast draft blame model access for missing credentials.
 func TestBedrockAccessHint_OnlyForTheAccessSentence(t *testing.T) {
+	t.Setenv("MODEL", "amazon-bedrock/eu.anthropic.claude-sonnet-5")
 	cases := []struct {
 		name   string
 		detail string
@@ -171,8 +173,33 @@ func TestBedrockAccessHint_OnlyForTheAccessSentence(t *testing.T) {
 // Without AWS_REGION the message still has to read sensibly.
 func TestBedrockAccessHint_DegradesWithoutRegion(t *testing.T) {
 	t.Setenv("AWS_REGION", "")
+	t.Setenv("MODEL", "amazon-bedrock/eu.anthropic.claude-sonnet-5")
 	got := bedrockAccessHint("m is not available for this account.", 403)
 	if !strings.Contains(got, "this region") || strings.Contains(got, "in  ,") {
 		t.Errorf("unset region reads badly: %q", got)
+	}
+}
+
+// ⚠️ The advice is Bedrock-specific, so the PROVIDER gates it. opencode is
+// multi-provider: another provider answering 403 with similar wording would
+// otherwise be sent to the AWS console for a model AWS never served — worse
+// than no hint, because it reads as authoritative.
+func TestBedrockAccessHint_OnlyForBedrockModels(t *testing.T) {
+	const detail = "some-model is not available for this account."
+	for _, model := range []string{
+		"anthropic/claude-sonnet-4-6",
+		"openai/gpt-5.5",
+		"claude-sonnet-4-6", // no provider prefix at all
+		"",
+	} {
+		t.Setenv("MODEL", model)
+		if got := bedrockAccessHint(detail, 403); got != "" {
+			t.Errorf("MODEL=%q produced Bedrock advice: %q", model, got)
+		}
+	}
+	// And the positive control, so this cannot pass by gating everything out.
+	t.Setenv("MODEL", "amazon-bedrock/eu.anthropic.claude-sonnet-5")
+	if bedrockAccessHint(detail, 403) == "" {
+		t.Error("a Bedrock model got no hint; the gate is too tight")
 	}
 }
