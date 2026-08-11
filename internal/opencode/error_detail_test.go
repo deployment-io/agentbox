@@ -2,6 +2,7 @@ package opencode
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -41,5 +42,69 @@ func TestErrorMessage_KeepsTheName(t *testing.T) {
 		if got := ev.errorMessage(); got != c.want {
 			t.Errorf("%s: errorMessage() = %q, want %q", c.name, got, c.want)
 		}
+	}
+}
+
+// The case three releases of field-picking could not reach: a name with the
+// detail somewhere else. "APIError" alone told us nothing across two live
+// Bedrock failures while the useful part sat in fields the struct never
+// decoded.
+func TestErrorMessage_FallsBackToTheRawPayload(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{
+			// The shape that defeated us. Whatever opencode nests under data
+			// now reaches a human.
+			"name plus unknown fields",
+			`{"error":{"name":"APIError","data":{"statusCode":403,"responseBody":"AccessDeniedException"}}}`,
+			`{"name":"APIError","data":{"statusCode":403,"responseBody":"AccessDeniedException"}}`,
+		},
+		{
+			// Nothing beyond the name — raw JSON would be a noisier way of
+			// writing the same word.
+			"name only stays clean",
+			`{"error":{"name":"ProviderModelNotFoundError"}}`,
+			"ProviderModelNotFoundError",
+		},
+		{
+			// Null extras are not extras.
+			"name with null fields stays clean",
+			`{"error":{"name":"APIError","data":null}}`,
+			"APIError",
+		},
+		{
+			// A message wins outright — a sentence beats a JSON dump.
+			"message wins over extras",
+			`{"error":{"name":"APIError","message":"model not enabled","data":{"x":1}}}`,
+			"APIError: model not enabled",
+		},
+	}
+	for _, c := range cases {
+		var ev opencodeEvent
+		if err := json.Unmarshal([]byte(c.raw), &ev); err != nil {
+			t.Fatalf("%s: unmarshal: %v", c.name, err)
+		}
+		if got := ev.errorMessage(); got != c.want {
+			t.Errorf("%s:\n got  %s\n want %s", c.name, got, c.want)
+		}
+	}
+}
+
+// A provider can echo a whole request body back; this lands in a Job document.
+func TestErrorMessage_RawPayloadIsCapped(t *testing.T) {
+	big := `{"error":{"name":"APIError","data":"` + strings.Repeat("x", 5000) + `"}}`
+	var ev opencodeEvent
+	if err := json.Unmarshal([]byte(big), &ev); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	got := ev.errorMessage()
+	if len([]rune(got)) > 401 {
+		t.Errorf("error string is %d runes; it must be capped", len([]rune(got)))
+	}
+	if !strings.Contains(got, "APIError") {
+		t.Errorf("cap dropped the head of the payload, which is where the useful fields are: %q", got)
 	}
 }
