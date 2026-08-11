@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -114,9 +115,20 @@ func (p *jsonlParser) processLine(line []byte) {
 // the event-specific payload (text, step usage, tool call); Error is set on
 // error events.
 type opencodeEvent struct {
-	Type  string          `json:"type"`
-	Part  json.RawMessage `json:"part"`
-	Error *opencodeError  `json:"error"`
+	Type string          `json:"type"`
+	Part json.RawMessage `json:"part"`
+	// Error is kept RAW rather than decoded into a struct.
+	//
+	// Decoding it cost three releases of guesswork. The struct read `message`
+	// and `name`, so an event carrying its detail anywhere else lost it —
+	// which is exactly what `APIError` does: the name alone says nothing about
+	// what failed, and a live Bedrock run produced precisely that, twice, with
+	// no way to tell whether it was model access, credentials or routing.
+	//
+	// Cherry-picking fields cannot be made right by adding more fields, because
+	// the shape is opencode's to change. Keeping the bytes means whatever it
+	// sends survives to a human.
+	Error json.RawMessage `json:"error"`
 }
 
 type opencodeError struct {
@@ -159,28 +171,74 @@ type opencodeToolState struct {
 
 // errorMessage renders an error event's detail, or "" when it carries none.
 //
-// NAME MATTERS AS MUCH AS MESSAGE, and used to be discarded. opencode's
-// distinctive failures arrive as a name with little or no message —
-// ProviderModelNotFoundError being the one that matters most here, since it is
-// what an unroutable model id produces. Dropping it left nothing to act on.
+// PREFERS A HUMAN SENTENCE, FALLS BACK TO THE RAW PAYLOAD. name+message when
+// both are present, message alone when that is all there is — and when the
+// event carries a name but no message, the whole JSON object, because a bare
+// name is not a diagnosis. "APIError" told us nothing across two live Bedrock
+// failures while the useful part sat unread in fields this never decoded.
 //
-// Returning "" rather than a placeholder is deliberate. A generic reason is
+// Returning "" for a genuinely empty error is deliberate. A generic reason is
 // WORSE than none: failureMessage prefers FailureReason over every other
-// signal, so a placeholder pre-empted the stderr tail that might have explained
+// signal, so a placeholder pre-empts the stderr tail that might have explained
 // the failure — and, being self-describing, produced "opencode opencode
 // reported an error". Empty lets the fallbacks run.
 func (e opencodeEvent) errorMessage() string {
-	if e.Error == nil {
+	if len(e.Error) == 0 {
 		return ""
 	}
+	var oe opencodeError
+	_ = json.Unmarshal(e.Error, &oe) // a non-object error still has its raw form
 	switch {
-	case e.Error.Name != "" && e.Error.Message != "":
-		return e.Error.Name + ": " + e.Error.Message
-	case e.Error.Message != "":
-		return e.Error.Message
-	default:
-		return e.Error.Name
+	case oe.Name != "" && oe.Message != "":
+		return oe.Name + ": " + oe.Message
+	case oe.Message != "":
+		return oe.Message
 	}
+	// No message. Fall back to the raw object ONLY when it holds more than the
+	// two fields already read — otherwise `{"name":"X"}` is just a noisier way
+	// of writing X. The point is to surface detail we would otherwise drop, not
+	// to print JSON for its own sake.
+	if hasFieldsBeyond(e.Error, "name", "message") {
+		if raw := compactJSON(e.Error); raw != "" {
+			return raw
+		}
+	}
+	return oe.Name
+}
+
+// hasFieldsBeyond reports whether a JSON object carries keys other than the
+// named ones. A non-object (string, array) counts as extra: it holds something
+// the struct decode could not have reached.
+func hasFieldsBeyond(raw json.RawMessage, known ...string) bool {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return len(bytes.TrimSpace(raw)) > 0
+	}
+	for k, v := range obj {
+		if len(bytes.TrimSpace(v)) == 0 || string(bytes.TrimSpace(v)) == "null" {
+			continue
+		}
+		if !slices.Contains(known, k) {
+			return true
+		}
+	}
+	return false
+}
+
+// compactJSON renders raw JSON on one line, capped, for embedding in an error
+// string. Capped because this lands in a Job document and a provider can echo a
+// whole request body back; the head is where the useful fields are.
+func compactJSON(raw json.RawMessage) string {
+	var buf bytes.Buffer
+	if err := json.Compact(&buf, raw); err != nil {
+		return strings.TrimSpace(string(raw))
+	}
+	const maxRunes = 400
+	out := []rune(buf.String())
+	if len(out) > maxRunes {
+		return string(out[:maxRunes]) + "…"
+	}
+	return string(out)
 }
 
 func (p *jsonlParser) handleText(raw json.RawMessage) {
