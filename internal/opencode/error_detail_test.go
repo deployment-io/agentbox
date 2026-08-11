@@ -108,3 +108,71 @@ func TestErrorMessage_RawPayloadIsCapped(t *testing.T) {
 		t.Errorf("cap dropped the head of the payload, which is where the useful fields are: %q", got)
 	}
 }
+
+// The real payload from a live Bedrock run, trimmed only of response headers.
+// Everything asserted below is verbatim from AWS.
+const liveBedrockAccessDenied = `{"error":{"name":"APIError","data":{` +
+	`"message":"undefined: anthropic.claude-sonnet-5 is not available for this account. ` +
+	`You can explore other available models on Amazon Bedrock. For additional access options, ` +
+	`contact AWS Sales at https://aws.amazon.com/contact-us/sales-support/",` +
+	`"statusCode":403,"isRetryable":false}}}`
+
+// The sentence lives under data.message, with the TOP-LEVEL message empty —
+// which is why reading only {message, name} reported a bare "APIError" three
+// times running while the diagnosis sat one level down.
+func TestErrorMessage_ReadsTheNestedProviderMessage(t *testing.T) {
+	t.Setenv("AWS_REGION", "eu-west-1")
+	var ev opencodeEvent
+	if err := json.Unmarshal([]byte(liveBedrockAccessDenied), &ev); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	got := ev.errorMessage()
+
+	// AWS names the model; that must survive.
+	if !strings.Contains(got, "anthropic.claude-sonnet-5") {
+		t.Errorf("lost the model id: %q", got)
+	}
+	// The SDK's "undefined:" prefix is noise and must not.
+	if strings.Contains(got, "undefined:") {
+		t.Errorf("kept the SDK's undefined prefix: %q", got)
+	}
+	// And the remedy AWS does not mention.
+	for _, want := range []string{"Bedrock console", "eu-west-1", "direct provider"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q from an actionable message: %q", want, got)
+		}
+	}
+}
+
+// ⚠️ 403 alone must NOT trigger the hint. A bad signature or a denied IAM
+// action is also 403, and rewriting those as "enable model access" sends
+// someone to the wrong console page — the same conflation that made the
+// runner's first fail-fast draft blame model access for missing credentials.
+func TestBedrockAccessHint_OnlyForTheAccessSentence(t *testing.T) {
+	cases := []struct {
+		name   string
+		detail string
+		status int
+		want   bool
+	}{
+		{"the real one", "anthropic.claude-sonnet-5 is not available for this account.", 403, true},
+		{"other 403", "The security token included in the request is invalid", 403, false},
+		{"signature failure", "Signature expired", 403, false},
+		{"right words, wrong status", "x is not available for this account", 500, false},
+		{"empty", "", 403, false},
+	}
+	for _, c := range cases {
+		if got := bedrockAccessHint(c.detail, c.status) != ""; got != c.want {
+			t.Errorf("%s: hint=%v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// Without AWS_REGION the message still has to read sensibly.
+func TestBedrockAccessHint_DegradesWithoutRegion(t *testing.T) {
+	t.Setenv("AWS_REGION", "")
+	got := bedrockAccessHint("m is not available for this account.", 403)
+	if !strings.Contains(got, "this region") || strings.Contains(got, "in  ,") {
+		t.Errorf("unset region reads badly: %q", got)
+	}
+}
