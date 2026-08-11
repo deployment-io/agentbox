@@ -373,6 +373,14 @@ func failureMessage(err error, state ParsedState, stderrText, binary string) str
 		// (e.g. error_during_execution) so the subtype isn't lost.
 		return fmt.Sprintf("%s reported error: %s", binary, state.ErrorSubtype)
 	case state.IsError:
+		// The agent said it failed and said nothing else. On its own this is a
+		// dead end — "opencode reported error" names no cause — so the stderr
+		// tail is appended when there is one. It is the only remaining signal,
+		// and a live opencode run reached exactly this branch with the
+		// explanation sitting in stderr, unread.
+		if tail := stderrTail(stderrText); tail != "" {
+			return binary + " reported error — " + tail
+		}
 		return binary + " reported error"
 	case err != nil && isExitError(err):
 		// No result event at all: the agent died before reporting (crash,
