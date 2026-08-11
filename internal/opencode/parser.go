@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"os"
 	"regexp"
 	"slices"
 	"sort"
@@ -134,6 +135,60 @@ type opencodeEvent struct {
 type opencodeError struct {
 	Message string `json:"message"`
 	Name    string `json:"name"`
+	// Data is where the provider's own words actually land. opencode wraps an
+	// AI-SDK error, and a live Bedrock 403 arrived with the top-level message
+	// EMPTY and the sentence nested here — which is why reading only the two
+	// fields above reported a bare "APIError" three times running.
+	Data opencodeErrorData `json:"data"`
+}
+
+type opencodeErrorData struct {
+	Message    string `json:"message"`
+	StatusCode int    `json:"statusCode"`
+}
+
+// bedrockProviderID is opencode's own name for Bedrock — the prefix of a
+// "provider/model" id, as it appears in the MODEL env var. It matches the
+// catalogue's Provider.OpencodeName() on the runner side; the two must agree,
+// but nothing here can import that package.
+const bedrockProviderID = "amazon-bedrock"
+
+// bedrockAccessHint turns "this model is not available for this account" into
+// an instruction, or returns "" when the error is something else.
+//
+// The raw sentence names the problem and not the fix. AWS suggests contacting
+// sales; the actual remedy is usually two clicks in the Bedrock console, and
+// failing that a direct provider — neither of which the message mentions.
+//
+// THREE conditions, and each removes a way of pointing someone at the wrong
+// page:
+//
+//	the provider IS Bedrock  — opencode is multi-provider, and this advice is
+//	                           Bedrock-specific. Another provider answering 403
+//	                           with similar wording would otherwise be sent to
+//	                           the AWS console for a model AWS never served.
+//	the status IS 403        — the sentence alone could appear in a body echoed
+//	                           back by an unrelated failure.
+//	the SENTENCE matches     — 403 also covers a bad signature and denied IAM
+//	                           actions, which need a different fix entirely.
+//
+// The last two are the same conflation that made the runner's first fail-fast
+// draft blame model access for missing credentials.
+func bedrockAccessHint(detail string, statusCode int) string {
+	if provider, _, _ := strings.Cut(os.Getenv("MODEL"), "/"); provider != bedrockProviderID {
+		return ""
+	}
+	if statusCode != 403 || !strings.Contains(detail, "is not available for this account") {
+		return ""
+	}
+	region := os.Getenv("AWS_REGION")
+	where := "this region"
+	if region != "" {
+		where = region
+	}
+	return detail +
+		" — enable model access for it in the Bedrock console in " + where +
+		", or configure a direct provider for this model."
 }
 
 // opencodePart is the union of the part shapes we read across event types. JSON
@@ -188,11 +243,24 @@ func (e opencodeEvent) errorMessage() string {
 	}
 	var oe opencodeError
 	_ = json.Unmarshal(e.Error, &oe) // a non-object error still has its raw form
+
+	// The real sentence is usually NESTED, under data.message — which is why
+	// reading only the top-level {message, name} produced a bare "APIError"
+	// across three live Bedrock failures. The provider's own words are there.
+	detail := oe.Message
+	if detail == "" {
+		detail = strings.TrimSpace(strings.TrimPrefix(oe.Data.Message, "undefined:"))
+	}
+	// A provider saying "you cannot use this model" is worth turning into an
+	// instruction, since the raw sentence names the problem but not the fix.
+	if hint := bedrockAccessHint(detail, oe.Data.StatusCode); hint != "" {
+		return hint
+	}
 	switch {
-	case oe.Name != "" && oe.Message != "":
-		return oe.Name + ": " + oe.Message
-	case oe.Message != "":
-		return oe.Message
+	case oe.Name != "" && detail != "":
+		return oe.Name + ": " + detail
+	case detail != "":
+		return detail
 	}
 	// No message. Fall back to the raw object ONLY when it holds more than the
 	// two fields already read — otherwise `{"name":"X"}` is just a noisier way
