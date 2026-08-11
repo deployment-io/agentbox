@@ -95,6 +95,26 @@ func TestAllowedHosts_StaticInfra(t *testing.T) {
 	}
 }
 
+// BOTH registry hosts must be allowed, because which one opencode fetches
+// depends on its version — models.dev on older releases, models.opencode.ai on
+// 1.18.x.
+//
+// A live 1.18.16 run failed with `denied:models.opencode.ai` while models.dev
+// sat in the list unused. This is not a partial degradation: opencode cannot
+// resolve a model id without the registry, so a missing host fails EVERY
+// opencode run whatever the provider. And the version that decides which host
+// is used is pinned in the Dockerfile, so a version bump alone can break it —
+// which is why both are pinned here rather than tracking "the current one".
+func TestAllowedHosts_BothRegistryHostsAllowed(t *testing.T) {
+	t.Setenv("MODEL", "")
+	hosts := (&Driver{}).AllowedHosts()
+	for _, h := range []string{"models.dev", "models.opencode.ai"} {
+		if !slices.Contains(hosts, h) {
+			t.Errorf("AllowedHosts is missing registry host %q — opencode cannot resolve any model without it; got %v", h, hosts)
+		}
+	}
+}
+
 // TestAllowedHosts_ProviderDerivedFromModel pins the distinctive opencode
 // behavior: the API host is derived from the model's provider prefix, since
 // opencode is multi-provider and the allowlist can't be a constant.
