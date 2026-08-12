@@ -666,3 +666,40 @@ func TestLoad_AppendSystemPromptFileMissing(t *testing.T) {
 		t.Errorf("error should mention the var: %v", err)
 	}
 }
+
+// ⚠️ THE CREDENTIAL TABLE AND THE HOST TABLE MUST COVER THE SAME PROVIDERS.
+//
+// opencodeProviderEnvKey lives here and providerHostFromModel lives in
+// internal/opencode, deliberately unshared to avoid an import cycle. Drift is
+// silent and breaks differently each way: a provider with a credential entry
+// but no host gets its egress denied by the proxy; one with a host but no
+// credential entry skips the fail-fast check and 401s mid-run instead.
+//
+// Neither package can see the other's unexported table, so each pins the set
+// it knows. Counterpart: TestProviderHosts_CoverTheExpectedSet.
+func TestOpencodeProviderEnvKey_CoversTheExpectedSet(t *testing.T) {
+	// Keep in step with providerHostFromModel in internal/opencode.
+	want := map[string]string{
+		"anthropic":  "ANTHROPIC_API_KEY",
+		"openai":     "OPENAI_API_KEY",
+		"openrouter": "OPENROUTER_API_KEY",
+		// opencode's provider id, not our catalogue key ("novita").
+		"novita-ai": "NOVITA_API_KEY",
+		"google":    "GEMINI_API_KEY",
+		"groq":      "GROQ_API_KEY",
+		"xai":       "XAI_API_KEY",
+		"deepseek":  "DEEPSEEK_API_KEY",
+		"mistral":   "MISTRAL_API_KEY",
+	}
+	for provider, key := range want {
+		if got := opencodeProviderEnvKey(provider); got != key {
+			t.Errorf("opencodeProviderEnvKey(%q) = %q, want %q", provider, got, key)
+		}
+	}
+	// Unknown providers stay lenient: opencode autodetects whatever key is in
+	// the env and 401s at runtime, which beats refusing a provider we simply
+	// have not tabulated.
+	if got := opencodeProviderEnvKey("some-future-provider"); got != "" {
+		t.Errorf("unknown provider returned %q; the lenient path must be preserved", got)
+	}
+}

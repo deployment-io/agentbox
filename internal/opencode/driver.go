@@ -136,6 +136,12 @@ func providerHostFromModel(model string) string {
 		return "api.openai.com"
 	case "openrouter":
 		return "openrouter.ai"
+	// "novita-ai", not "novita" — this switches on opencode's own provider id,
+	// the key in models.opencode.ai, which is what appears before the slash in
+	// MODEL. Our catalogue's provider key is "novita"; the two are different
+	// strings for the same thing and only this one belongs here.
+	case "novita-ai":
+		return "api.novita.ai"
 	case "google":
 		return "generativelanguage.googleapis.com"
 	case "groq":
