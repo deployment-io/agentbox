@@ -123,6 +123,10 @@ func TestAllowedHosts_ProviderDerivedFromModel(t *testing.T) {
 		"anthropic/claude-sonnet-4-6": "api.anthropic.com",
 		"openai/gpt-5.5":              "api.openai.com",
 		"openrouter/meta/llama":       "openrouter.ai",
+		// The provider id is "novita-ai", opencode's own key — not our
+		// catalogue's "novita". Two names for one thing, and only this one
+		// appears in MODEL.
+		"novita-ai/qwen/qwen3-coder-next": "api.novita.ai",
 	}
 	for model, host := range cases {
 		t.Run(model, func(t *testing.T) {
@@ -161,4 +165,40 @@ func assertFollowedBy(t *testing.T, args []string, flag, val string) {
 		}
 	}
 	t.Errorf("flag %q not found in args %v", flag, args)
+}
+
+// ⚠️ THE HOST TABLE AND THE CREDENTIAL TABLE MUST COVER THE SAME PROVIDERS.
+//
+// providerHostFromModel lives here and opencodeProviderEnvKey lives in
+// internal/config, deliberately unshared to avoid an import cycle. That makes
+// drift easy and silent in two different directions: a provider with a
+// credential entry but no host gets its egress denied by the proxy, and one
+// with a host but no credential entry skips the fail-fast check and 401s
+// mid-run.
+//
+// Neither package can see the other's unexported table, so each pins the set
+// it knows and this comment names the counterpart to update.
+func TestProviderHosts_CoverTheExpectedSet(t *testing.T) {
+	// Keep in step with opencodeProviderEnvKey in internal/config.
+	want := map[string]string{
+		"anthropic":  "api.anthropic.com",
+		"openai":     "api.openai.com",
+		"openrouter": "openrouter.ai",
+		"novita-ai":  "api.novita.ai",
+		"google":     "generativelanguage.googleapis.com",
+		"groq":       "api.groq.com",
+		"xai":        "api.x.ai",
+		"deepseek":   "api.deepseek.com",
+		"mistral":    "api.mistral.ai",
+	}
+	for provider, host := range want {
+		if got := providerHostFromModel(provider + "/some-model"); got != host {
+			t.Errorf("providerHostFromModel(%q) = %q, want %q", provider, got, host)
+		}
+	}
+	// An unknown provider contributes no host — the lenient path, covered by
+	// ADDITIONAL_ALLOWED_HOSTS rather than by guessing.
+	if got := providerHostFromModel("some-future-provider/m"); got != "" {
+		t.Errorf("unknown provider returned host %q; it must stay lenient", got)
+	}
 }

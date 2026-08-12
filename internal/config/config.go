@@ -265,6 +265,13 @@ func opencodeProviderEnvKey(provider string) string {
 		return "OPENAI_API_KEY"
 	case "openrouter":
 		return "OPENROUTER_API_KEY"
+	// Keyed on opencode's provider id ("novita-ai"), not our catalogue key
+	// ("novita"). Must stay in step with providerHostFromModel in
+	// internal/opencode — the two tables are deliberately not shared to avoid
+	// an import cycle, so a provider added to one and not the other either
+	// fails the credential check or gets its egress denied.
+	case "novita-ai":
+		return "NOVITA_API_KEY"
 	case "google":
 		return "GEMINI_API_KEY"
 	case "groq":
