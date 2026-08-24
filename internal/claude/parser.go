@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"regexp"
 	"sort"
 	"strings"
@@ -305,13 +306,74 @@ func (p *streamParser) isAuthFailureLocked() bool {
 // the fallback path, which surfaces the agent's stderr — more useful
 // than a generic restatement of the subtype. Caller must hold p.mu.
 func (p *streamParser) failureReasonLocked() string {
-	if !p.isError || p.errorSubtype != "error_max_turns" {
+	if !p.isError {
+		return ""
+	}
+	// A Bedrock model-access denial is the other failure whose remedy the
+	// message can name — and the one where Claude Code's own words send the
+	// reader in TWO wrong directions at once, so it earns the same treatment
+	// as max_turns. See bedrockAccessReason.
+	if reason := bedrockAccessReason(p.changesSummary); reason != "" {
+		return reason
+	}
+	if p.errorSubtype != "error_max_turns" {
 		return ""
 	}
 	if p.turns > 0 {
 		return fmt.Sprintf("reached its turn limit after %d turns; raise max_turns to allow more steps", p.turns)
 	}
 	return "reached its turn limit; raise max_turns to allow more steps"
+}
+
+// bedrockAccessReason turns a Bedrock model-access denial into an instruction,
+// or returns "" when the failure is anything else.
+//
+// The mirror of opencode's bedrockAccessHint, needed here because the default
+// agent's version of this error misleads twice over. A live run produced:
+//
+//	Failed to authenticate. API Error: 403 anthropic.claude-opus-5 is not
+//	available for this account. ... contact AWS Sales ...
+//
+// Authentication had SUCCEEDED — the runner assumed the Bedrock role and
+// vended working credentials; only the per-model access grant was missing. And
+// "contact AWS Sales" is the remedy for provisioned-throughput arrangements,
+// not for the model-access console page that actually fixes this. Someone
+// following the message as written checks their credentials, then emails AWS.
+//
+// Same three gates as the opencode hint, for the same reasons — each removes a
+// way of pointing someone at the wrong console page:
+//
+//	Bedrock mode IS on    — the advice is Bedrock-specific. Anthropic Direct
+//	                        answering 403 with similar wording must not send
+//	                        anyone to the AWS console.
+//	"403" IS in the text  — the sentence alone could be an echo inside an
+//	                        unrelated failure. Claude Code renders the status
+//	                        into prose ("API Error: 403 ..."), so unlike
+//	                        opencode there is no structured field to read;
+//	                        if that rendering ever changes, the hint silently
+//	                        stops firing, which degrades to today's behaviour.
+//	the SENTENCE matches  — 403 also covers denied IAM actions and bad
+//	                        signatures, which need a different fix entirely.
+//
+// The misleading "Failed to authenticate." prefix is stripped rather than
+// corrected in place: the words after it are AWS's own and worth keeping, but
+// leading with a false diagnosis buries the real one.
+func bedrockAccessReason(summary string) string {
+	if os.Getenv("CLAUDE_CODE_USE_BEDROCK") != "1" {
+		return ""
+	}
+	if !strings.Contains(summary, "403") || !strings.Contains(summary, "is not available for this account") {
+		return ""
+	}
+	detail := strings.TrimSpace(strings.TrimPrefix(summary, "Failed to authenticate."))
+	region := os.Getenv("AWS_REGION")
+	where := "this region"
+	if region != "" {
+		where = region
+	}
+	return "cannot use this model on Bedrock: " + detail +
+		" — enable model access for it in the Bedrock console in " + where +
+		", or configure a direct provider for this model."
 }
 
 // errorSubtypeLocked returns the raw result-event subtype when the run
