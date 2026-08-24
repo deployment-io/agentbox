@@ -1,6 +1,7 @@
 package claude
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -308,6 +309,89 @@ func TestStreamParser_FailureReason(t *testing.T) {
 				t.Errorf("FailureReason = %q, want substring %q", got, tt.wantContains)
 			}
 		})
+	}
+}
+
+// The denial a live Opus 5 run produced, verbatim in shape: a 403 model-access
+// error wearing an authentication costume, closed by AWS's suggestion to
+// contact sales. Every case below is a variation on this string.
+const bedrockDenialSummary = `Failed to authenticate. API Error: 403 anthropic.claude-opus-5 is not available for this account. You can explore other available models on Amazon Bedrock. For additional access options, contact AWS Sales at https://aws.amazon.com/contact-us/sales-support/`
+
+func bedrockDenialEvent(summary string) string {
+	b, _ := json.Marshal(summary)
+	return `{"type":"result","result":` + string(b) + `,"is_error":true,"subtype":"error_during_execution"}`
+}
+
+// A Bedrock model-access denial must come out as an instruction, because Claude
+// Code's own words mislead twice: "Failed to authenticate" (authentication
+// succeeded — the model grant was missing) and "contact AWS Sales" (the fix is
+// the model-access console page). This is the DEFAULT agent, so this is the
+// error a new Bedrock org is most likely to meet first.
+func TestStreamParser_BedrockAccessDenialBecomesAnInstruction(t *testing.T) {
+	t.Setenv("CLAUDE_CODE_USE_BEDROCK", "1")
+	t.Setenv("AWS_REGION", "eu-west-1")
+
+	p := newStreamParser()
+	p.Consume(strings.NewReader(bedrockDenialEvent(bedrockDenialSummary)))
+	got := p.State().FailureReason
+
+	for _, want := range []string{
+		"is not available for this account", // AWS's own diagnosis survives
+		"enable model access",               // the actual remedy
+		"eu-west-1",                         // in the right region
+		"direct provider",                   // and the alternative
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("FailureReason = %q, missing %q", got, want)
+		}
+	}
+	// The false diagnosis must not LEAD. It sent a real debugging session to
+	// check credentials that were working fine.
+	if strings.HasPrefix(got, "Failed to authenticate") {
+		t.Errorf("FailureReason = %q; still leads with the authentication misdiagnosis", got)
+	}
+}
+
+// Each gate on its own must suppress the hint — every one of these is a real
+// way of sending someone to the wrong console page.
+func TestStreamParser_BedrockAccessHintGates(t *testing.T) {
+	tests := []struct {
+		name    string
+		bedrock string
+		summary string
+	}{
+		// Anthropic Direct can phrase a 403 similarly; the AWS console cannot
+		// fix a model AWS never served.
+		{"not in bedrock mode", "", bedrockDenialSummary},
+		// The sentence without a 403 could be an echo inside an unrelated
+		// failure — a tool result, a quoted log line.
+		{"sentence without a 403", "1", "the model is not available for this account (see logs)"},
+		// 403 without the sentence is IAM or a bad signature, which "enable
+		// model access" does not fix.
+		{"403 without the sentence", "1", "Failed to authenticate. API Error: 403 AccessDeniedException: not authorized to perform bedrock:InvokeModel"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("CLAUDE_CODE_USE_BEDROCK", tt.bedrock)
+			t.Setenv("AWS_REGION", "eu-west-1")
+			p := newStreamParser()
+			p.Consume(strings.NewReader(bedrockDenialEvent(tt.summary)))
+			if got := p.State().FailureReason; strings.Contains(got, "enable model access") {
+				t.Errorf("FailureReason = %q; the hint fired without its gates", got)
+			}
+		})
+	}
+}
+
+// No region in the env still produces usable advice rather than a hole in the
+// sentence.
+func TestStreamParser_BedrockAccessHintWithoutRegion(t *testing.T) {
+	t.Setenv("CLAUDE_CODE_USE_BEDROCK", "1")
+	t.Setenv("AWS_REGION", "")
+	p := newStreamParser()
+	p.Consume(strings.NewReader(bedrockDenialEvent(bedrockDenialSummary)))
+	if got := p.State().FailureReason; !strings.Contains(got, "this region") {
+		t.Errorf("FailureReason = %q, want the region placeholder %q", got, "this region")
 	}
 }
 
