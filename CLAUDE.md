@@ -191,7 +191,7 @@ The image is multi-stage:
 
 1. **Builder** (`golang:1.24-bookworm`): compiles
    `cmd/agentbox/main.go` as a statically linked `linux/amd64` binary.
-2. **Runtime** (`debian:bookworm-slim`): contains Node 20, Python 3,
+2. **Runtime** (`debian:bookworm-slim`): contains Node 22, Python 3,
    pip, git, build-essential, and the compiled agentbox binary.
    Language runtimes are pre-installed at image build; agent-specific
    packages (Claude Code, Aider, etc.) are installed at container
@@ -200,6 +200,14 @@ The image is multi-stage:
 Non-root user `agent` (UID 1000) is the runtime user, with
 pre-configured `NPM_CONFIG_PREFIX` and `PATH` entries for user-level
 npm/pip installs.
+
+Yarn is provided by `corepack enable yarn`, **not** `npm install -g
+yarn`: the shim runs the Yarn version a repo's `packageManager` field
+pins, which is what lets a Yarn Berry (2+) repo vendor at all. Adding
+`yarn` back to the global npm install would shadow the shim on PATH and
+put every Berry repo back on Classic. `COREPACK_HOME` must stay outside
+`/home/agent` (tmpfs at runtime) or the pre-activated Classic default is
+lost on every run.
 
 Agent versions are pinned as build-time ARGs and exposed as ENVs:
 

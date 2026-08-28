@@ -20,12 +20,14 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
 FROM debian:bookworm-slim
 
 # Language runtimes and build tools needed by supported agents.
-# Node 22 + yarn + pnpm: Claude Code, Codex, and opencode are all npm-packaged
+# Node 22 + pnpm: Claude Code, Codex, and opencode are all npm-packaged
 # (@openai/codex requires Node >= 22; opencode ships via the opencode-ai wrapper,
 # which fetches its binary on install), plus package-manager-agnostic JS/TS
 # dependency vendoring + verify (npm / yarn / pnpm). These install to the
 # system prefix (before NPM_CONFIG_PREFIX is set below), so they survive the
-# runtime tmpfs mounted over /home/agent.
+# runtime tmpfs mounted over /home/agent. yarn is deliberately NOT installed
+# here — it comes from corepack further down, and an npm-installed yarn on
+# the same PATH would shadow corepack's shim.
 # Python: Aider and future pip-packaged agents (v2+).
 # build-essential, git, curl: used by agents at runtime. ripgrep + jq let agents
 # query the pre-built /work/context JSON (the plan-mode prompt points them at
@@ -44,7 +46,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates \
     && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
-    && npm install -g yarn pnpm \
+    && npm install -g pnpm \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
@@ -69,6 +71,38 @@ ENV GOTOOLCHAIN=local
 RUN useradd -m -u 1000 agent \
     && mkdir -p /work /scratch /cache /home/agent/.npm-global \
     && chown -R agent:agent /work /scratch /cache /home/agent/.npm-global
+
+# Yarn comes from corepack (bundled with Node 22), not `npm install -g yarn`.
+# The shim reads the repo's package.json packageManager field and runs exactly
+# that Yarn — the only way a Yarn Berry (2+) repo vendors correctly, since
+# Classic 1.x cannot parse a Berry lockfile and aborts under
+# --frozen-lockfile rather than regenerating. Only the yarn shim is enabled:
+# `corepack enable` with no argument would also replace npm and pnpm, and a
+# corepack npm shim refuses to run in a repo whose packageManager names yarn —
+# which would break the agent installs that run `npm install -g` from /work.
+#
+# COREPACK_HOME must sit outside /home/agent, which the runner mounts a tmpfs
+# over: the pre-warmed default below would vanish and every Classic repo would
+# re-download yarn on each run. It is chowned to the runtime user so corepack
+# can still write a repo's pinned version into it during the vendor phase.
+# ENABLE_DOWNLOAD_PROMPT=0 — corepack otherwise asks for confirmation before
+# fetching a version it hasn't cached, which nothing can answer in a
+# non-interactive container. ENABLE_AUTO_PIN=0 — keeps corepack from writing a
+# packageManager field into the repo's package.json, which would surface as an
+# unrelated modification in the agent's commit.
+#
+# YARN_CLASSIC_VERSION is the version a repo with no packageManager field
+# resolves to: the last Yarn 1 release, i.e. what `npm install -g yarn`
+# installed before this. Pre-activating it keeps those repos byte-identical to
+# today's behaviour and off the network for the yarn binary itself.
+ARG YARN_CLASSIC_VERSION=1.22.22
+ENV COREPACK_HOME=/opt/corepack
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+ENV COREPACK_ENABLE_AUTO_PIN=0
+RUN mkdir -p "${COREPACK_HOME}" \
+    && corepack enable --install-directory /usr/local/bin yarn \
+    && corepack prepare "yarn@${YARN_CLASSIC_VERSION}" --activate \
+    && chown -R agent:agent "${COREPACK_HOME}"
 
 ENV NPM_CONFIG_PREFIX=/home/agent/.npm-global
 ENV NPM_CONFIG_UPDATE_NOTIFIER=false
