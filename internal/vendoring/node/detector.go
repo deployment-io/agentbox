@@ -105,11 +105,22 @@ func installCommand(repoDir string) (string, []string) {
 //     a package.json packageManager pin resolves to that Yarn and a repo
 //     with no pin gets the Classic 1.x default pre-warmed into the image —
 //     byte-for-byte today's behaviour for Classic repos.
-//   - The flags. Berry dropped --frozen-lockfile in favour of --immutable,
-//     and rejects the flag it doesn't know, so the flag has to follow the
-//     version that is actually about to run — not the lockfile format. A
+//
+//   - The flags. Berry dropped --frozen-lockfile in favour of --immutable, so
+//     the flag has to follow the version that is actually about to run — not
+//     the lockfile format, and not merely whether a release is vendored. A
 //     repo mid-migration (Classic lockfile, packageManager pinned to
 //     yarn@4) runs Berry, so it gets --immutable.
+//
+//     Getting this wrong is silent in the dangerous direction. Berry still
+//     accepts --frozen-lockfile (it warns YN0050 and honours it), but Classic
+//     does not reject --immutable — it ignores the unknown flag and installs
+//     UNFROZEN, rewriting yarn.lock. The runner stages the repo with
+//     AddGlob("."), so that rewrite rides into the Task's commit as an
+//     unrelated change, with the lockfile check the flag exists to perform
+//     never having run. Hence --immutable only on a confirmed Berry, and
+//     --frozen-lockfile — the flag both majors honour — whenever the version
+//     can't be established.
 //
 // Note what is deliberately NOT a signal here: a Berry lockfile on its own.
 // Nothing in the image can act on it — with no pin and no vendored release
@@ -118,13 +129,51 @@ func installCommand(repoDir string) (string, []string) {
 func yarnCommand(repoDir string) (string, []string) {
 	release := vendoredYarnRelease(repoDir)
 	args := []string{"install", "--frozen-lockfile"}
-	if release != "" || declaredYarnMajor(repoDir) >= 2 {
+	if resolvedYarnMajor(repoDir, release) >= 2 {
 		args = []string{"install", "--immutable"}
 	}
 	if release != "" {
 		return "node", append([]string{release}, args...)
 	}
 	return "yarn", args
+}
+
+// resolvedYarnMajor reports the major version of the Yarn that will actually
+// run for repoDir, given the release vendoredYarnRelease picked (possibly "").
+//
+// A vendored release decides it alone: that file IS the binary about to be
+// exec'd, so a packageManager pin naming some other major is not what runs and
+// must not pick the flags. `yarn policies set-version` on Yarn 1 vendors a
+// Classic release exactly this way, which is why "a release is present" cannot
+// stand in for "this repo is Berry".
+//
+// 0 means undetermined — no release, no pin, or a release whose filename
+// carries no version — and callers treat that as corepack's Classic default.
+func resolvedYarnMajor(repoDir, release string) int {
+	if release != "" {
+		return releaseMajor(release)
+	}
+	return declaredYarnMajor(repoDir)
+}
+
+// releaseMajor returns the Yarn major named by a vendored release's filename
+// — yarn-4.9.4.cjs -> 4, yarn-1.22.19.js -> 1 — or 0 when the name doesn't
+// carry one. `yarn set version` and `yarn policies set-version` both write
+// this yarn-<version>.<ext> shape; anything else is treated as unknown rather
+// than guessed at, which costs only the deprecated-but-honoured flag.
+func releaseMajor(path string) int {
+	name := filepath.Base(path)
+	name = strings.TrimSuffix(name, filepath.Ext(name))
+	rest, ok := strings.CutPrefix(name, "yarn-")
+	if !ok {
+		return 0
+	}
+	major, _, _ := strings.Cut(rest, ".")
+	n, err := strconv.Atoi(major)
+	if err != nil {
+		return 0
+	}
+	return n
 }
 
 // vendoredYarnRelease returns the path of the Yarn release repoDir ships
@@ -209,28 +258,41 @@ func yarnLockIsBerry(repoDir string) bool {
 	return false
 }
 
-// yarnToolchainWarning returns a one-line diagnostic for the one Yarn shape
-// the image cannot resolve on the repo's behalf: a Berry lockfile with
-// neither a packageManager pin nor a vendored release. corepack has nothing
-// to key off, so it runs its Classic default, which can't parse the lockfile
-// and aborts under --frozen-lockfile. The install is left to fail exactly as
-// it does today — but preceded by a line naming the cause and the one-command
-// repo-side fix, instead of Classic's bare "your lockfile needs to be
-// updated". Empty when there is nothing to say, which is the normal case:
-// `yarn set version` writes a packageManager pin (Berry 3.1+) or vendors a
-// release (2.x/3.x), so a Berry repo has to have been hand-stripped to land
-// here.
+// yarnToolchainWarning returns a one-line diagnostic for the Yarn shape the
+// image cannot resolve on the repo's behalf: a Berry lockfile that resolves to
+// Yarn Classic anyway. The install is left to fail exactly as it does today —
+// Classic cannot parse a Berry lockfile and aborts — but preceded by a line
+// naming the cause and the repo-side fix, instead of Classic's bare "your
+// lockfile needs to be updated".
+//
+// Two ways in, and the second is the one that bit deployment-io/website-svc:
+//
+//   - Nothing pinned at all. corepack has no packageManager field to key off,
+//     so it runs its Classic default.
+//   - A vendored CLASSIC release. `yarn policies set-version` on Yarn 1 writes
+//     .yarn/releases/yarn-1.22.x.js plus a .yarnrc yarn-path, and that
+//     redirect long outlives a migration to Berry — leaving a repo whose
+//     lockfile is Berry and whose pinned toolchain is not.
+//
+// Empty when the resolved Yarn is Berry, which is the normal case: `yarn set
+// version` writes a packageManager pin (Berry 3.1+) or vendors a Berry release
+// (2.x/3.x).
 func yarnToolchainWarning(repoDir string) string {
 	if !yarnLockIsBerry(repoDir) {
 		return ""
 	}
-	if vendoredYarnRelease(repoDir) != "" || declaredYarnMajor(repoDir) >= 2 {
+	release := vendoredYarnRelease(repoDir)
+	if resolvedYarnMajor(repoDir, release) >= 2 {
 		return ""
 	}
-	return fmt.Sprintf("agentbox: %s has a Yarn Berry lockfile but pins no Yarn version: "+
-		"no packageManager field in package.json and no vendored .yarn/releases/*.cjs. "+
-		"The install below runs under the image's default Yarn Classic, which cannot read "+
-		"a Berry lockfile. Fix in the repo with `yarn set version <version>`.", repoDir)
+	cause := "pins no Yarn version: no packageManager field in package.json " +
+		"and no vendored .yarn/releases release"
+	if release != "" {
+		cause = fmt.Sprintf("pins Yarn Classic: %s", release)
+	}
+	return fmt.Sprintf("agentbox: %s has a Yarn Berry lockfile but %s. "+
+		"The install below runs under Yarn Classic, which cannot read a Berry "+
+		"lockfile. Fix in the repo with `yarn set version <version>`.", repoDir, cause)
 }
 
 // configValue returns the value of a top-level `key` line in a yarn config

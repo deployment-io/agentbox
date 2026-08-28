@@ -238,10 +238,9 @@ func TestInstallCommand(t *testing.T) {
 			wantArgs: []string{"install", "--frozen-lockfile"},
 		},
 		{
-			// A vendored release is a Berry convention (Classic's `yarn
-			// policies set-version` writes .js), so it selects --immutable
-			// even against an unmigrated lockfile.
-			name: "vendored release with a classic lockfile",
+			// The release's own version picks the flag, so a Berry release
+			// selects --immutable even against an unmigrated lockfile.
+			name: "vendored berry release with a classic lockfile",
 			files: map[string]string{
 				"yarn.lock":                     classicLock,
 				".yarn/releases/yarn-4.1.0.cjs": "// yarn 4\n",
@@ -249,6 +248,67 @@ func TestInstallCommand(t *testing.T) {
 			wantRelease: ".yarn/releases/yarn-4.1.0.cjs",
 			wantMgr:     "node",
 			wantArgs:    []string{"install", "--immutable"},
+		},
+
+		// Vendored CLASSIC releases. `yarn policies set-version` on Yarn 1
+		// writes .yarn/releases/yarn-1.22.x.js and a .yarnrc yarn-path — the
+		// shape deployment-io/website-svc carried out of its Gatsby era. The
+		// .js extension keeps these out of the *.cjs glob, but yarn-path
+		// resolves any extension, so the release runs and its version, not
+		// its mere presence, has to pick the flag. Classic does not reject
+		// --immutable; it ignores it and installs unfrozen.
+		{
+			name: "yarn-path redirecting at a classic release",
+			files: map[string]string{
+				"yarn.lock":                     classicLock,
+				".yarnrc":                       "yarn-path \".yarn/releases/yarn-1.22.1.js\"\n",
+				".yarn/releases/yarn-1.22.1.js": "// yarn 1\n",
+			},
+			wantRelease: ".yarn/releases/yarn-1.22.1.js",
+			wantMgr:     "node",
+			wantArgs:    []string{"install", "--frozen-lockfile"},
+		},
+		{
+			// website-svc's exact pre-fix state: Berry lockfile, Classic
+			// release. The install is doomed either way (Classic cannot read
+			// the lockfile) but it must fail on the frozen check rather than
+			// silently rewrite yarn.lock. yarnToolchainWarning covers it.
+			name: "yarn-path redirecting at a classic release, berry lockfile",
+			files: map[string]string{
+				"yarn.lock":                     berryLock,
+				".yarnrc":                       "yarn-path \".yarn/releases/yarn-1.22.1.js\"\n",
+				".yarn/releases/yarn-1.22.1.js": "// yarn 1\n",
+			},
+			wantRelease: ".yarn/releases/yarn-1.22.1.js",
+			wantMgr:     "node",
+			wantArgs:    []string{"install", "--frozen-lockfile"},
+		},
+		{
+			// A packageManager pin does not override the binary that runs:
+			// the vendored file is what gets exec'd, so its version decides.
+			name: "classic release wins over a berry packageManager pin",
+			files: map[string]string{
+				"yarn.lock":                     berryLock,
+				"package.json":                  `{"packageManager":"yarn@4.1.0"}`,
+				".yarnrc":                       "yarn-path \".yarn/releases/yarn-1.22.1.js\"\n",
+				".yarn/releases/yarn-1.22.1.js": "// yarn 1\n",
+			},
+			wantRelease: ".yarn/releases/yarn-1.22.1.js",
+			wantMgr:     "node",
+			wantArgs:    []string{"install", "--frozen-lockfile"},
+		},
+		{
+			// Unversioned filename → undetermined → the flag both majors
+			// honour, rather than a guess that silently unfreezes Classic.
+			name: "vendored release whose name carries no version",
+			files: map[string]string{
+				"yarn.lock":               berryLock,
+				".yarnrc.yml":             "yarnPath: .yarn/releases/yarn.cjs\n",
+				".yarn/releases/yarn.cjs": "// yarn ?\n",
+			},
+			wantRelease: ".yarn/releases/yarn.cjs",
+			wantMgr:     "node",
+			wantArgs:    []string{"install", "--frozen-lockfile"},
 		},
 
 		// packageManager naming something other than yarn never selects Berry.
@@ -319,11 +379,31 @@ func TestYarnToolchainWarning(t *testing.T) {
 			},
 		},
 		{
-			name: "berry lockfile with a vendored release",
+			name: "berry lockfile with a vendored berry release",
 			files: map[string]string{
 				"yarn.lock":                     berryLock,
 				".yarn/releases/yarn-4.1.0.cjs": "// yarn 4\n",
 			},
+		},
+		{
+			// website-svc's pre-fix shape. A release IS pinned, so an
+			// is-anything-pinned check would stay silent here — but what's
+			// pinned is Classic, which cannot read the lockfile.
+			name: "berry lockfile with a vendored CLASSIC release",
+			files: map[string]string{
+				"yarn.lock":                     berryLock,
+				".yarnrc":                       "yarn-path \".yarn/releases/yarn-1.22.1.js\"\n",
+				".yarn/releases/yarn-1.22.1.js": "// yarn 1\n",
+			},
+			want: true,
+		},
+		{
+			name: "berry lockfile with a classic packageManager pin",
+			files: map[string]string{
+				"yarn.lock":    berryLock,
+				"package.json": `{"packageManager":"yarn@1.22.22"}`,
+			},
+			want: true,
 		},
 		{
 			name:  "classic lockfile",
@@ -340,6 +420,38 @@ func TestYarnToolchainWarning(t *testing.T) {
 			got := yarnToolchainWarning(dir)
 			if (got != "") != tc.want {
 				t.Errorf("yarnToolchainWarning() = %q, want warning: %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestReleaseMajor pins the filename parse that decides --immutable vs
+// --frozen-lockfile for a vendored release. Getting it wrong in the Berry
+// direction is silent: Classic ignores --immutable and installs unfrozen
+// instead of refusing, so anything unrecognized must return 0.
+func TestReleaseMajor(t *testing.T) {
+	cases := []struct {
+		path string
+		want int
+	}{
+		{".yarn/releases/yarn-4.9.4.cjs", 4},
+		{".yarn/releases/yarn-3.6.4.cjs", 3},
+		{".yarn/releases/yarn-2.0.0-rc.1.cjs", 2},
+		{".yarn/releases/yarn-1.22.1.js", 1},
+		{".yarn/releases/yarn-1.22.19.cjs", 1},
+		// Two digits: string-sorted release picking is a separate concern,
+		// but the major itself must not truncate.
+		{".yarn/releases/yarn-10.0.0.cjs", 10},
+		// Unrecognized shapes are undetermined, never assumed Berry.
+		{".yarn/releases/yarn.cjs", 0},
+		{".yarn/releases/berry.cjs", 0},
+		{".yarn/releases/yarn-next.cjs", 0},
+		{"", 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.path, func(t *testing.T) {
+			if got := releaseMajor(tc.path); got != tc.want {
+				t.Errorf("releaseMajor(%q) = %d, want %d", tc.path, got, tc.want)
 			}
 		})
 	}
