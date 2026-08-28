@@ -3,11 +3,17 @@
 package node
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
 
 	"github.com/deployment-io/agentbox/internal/vendoring"
 )
@@ -30,17 +36,26 @@ func (*detector) Detect(repoDir string) (bool, error) {
 	return false, err
 }
 
-// EnsureToolchain is a no-op: Node, npm and yarn are baked into the agentbox
-// image, so they're present in both the vendor and agent phases.
+// EnsureToolchain is a no-op: Node, npm, pnpm and the corepack yarn shim are
+// baked into the agentbox image, so they're present in both the vendor and
+// agent phases.
 func (*detector) EnsureToolchain(context.Context) error { return nil }
 
 // Vendor installs the project's dependencies into node_modules using the
 // package manager its lockfile implies. node_modules lands in the repo dir
 // under the bind-mounted /work, so it persists into the agent phase, which
 // then runs tsc / build / test offline against it. node_modules is
-// conventionally gitignored, so CommitAndPush never stages it.
+// conventionally gitignored, so CommitAndPush never stages it. A Yarn Berry
+// repo on the default PnP linker writes .pnp.cjs and .yarn/cache instead of
+// node_modules — also in the repo dir, so the same persistence holds and the
+// repo's own yarn-wrapped scripts resolve against it.
 func (*detector) Vendor(ctx context.Context, repoDir string) error {
 	name, args := installCommand(repoDir)
+	if name == "yarn" {
+		if w := yarnToolchainWarning(repoDir); w != "" {
+			fmt.Fprintln(os.Stderr, w)
+		}
+	}
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = repoDir
 	cmd.Stdout = os.Stderr
@@ -59,9 +74,9 @@ func (*detector) Vendor(ctx context.Context, repoDir string) error {
 // non-npm project's tree isn't polluted with a stray lockfile that
 // CommitAndPush might stage.
 //
-// Covers npm, classic yarn (1.x), and pnpm. yarn Berry (2+) and bun fall
-// through to the npm fallback today — functional, but not lockfile-exact;
-// dedicated support is a follow-up.
+// Covers npm, yarn (classic 1.x and Berry 2+ — see yarnCommand), and pnpm.
+// bun falls through to the npm fallback today — functional, but not
+// lockfile-exact; dedicated support is a follow-up.
 func installCommand(repoDir string) (string, []string) {
 	switch {
 	case fileExists(filepath.Join(repoDir, "pnpm-lock.yaml")):
@@ -70,7 +85,7 @@ func installCommand(repoDir string) (string, []string) {
 		// real files in a store under $HOME, which is an ephemeral tmpfs here.
 		return "pnpm", []string{"install", "--frozen-lockfile", "--node-linker=hoisted"}
 	case fileExists(filepath.Join(repoDir, "yarn.lock")):
-		return "yarn", []string{"install", "--frozen-lockfile"}
+		return yarnCommand(repoDir)
 	case fileExists(filepath.Join(repoDir, "package-lock.json")),
 		fileExists(filepath.Join(repoDir, "npm-shrinkwrap.json")):
 		return "npm", []string{"ci"}
@@ -79,23 +94,196 @@ func installCommand(repoDir string) (string, []string) {
 	}
 }
 
+// yarnCommand resolves which Yarn runs for repoDir, and with which install
+// flags. The two vary independently:
+//
+//   - The binary. A repo that ships its own release in-tree (a yarnPath in
+//     .yarnrc.yml / .yarnrc, or a lone .yarn/releases/*.cjs — how `yarn set
+//     version` leaves a 2.x/3.x repo) gets that exact file run under node:
+//     no network, no corepack, no version guessing. Everything else goes
+//     through the `yarn` shim, which is corepack's (see the Dockerfile), so
+//     a package.json packageManager pin resolves to that Yarn and a repo
+//     with no pin gets the Classic 1.x default pre-warmed into the image —
+//     byte-for-byte today's behaviour for Classic repos.
+//   - The flags. Berry dropped --frozen-lockfile in favour of --immutable,
+//     and rejects the flag it doesn't know, so the flag has to follow the
+//     version that is actually about to run — not the lockfile format. A
+//     repo mid-migration (Classic lockfile, packageManager pinned to
+//     yarn@4) runs Berry, so it gets --immutable.
+//
+// Note what is deliberately NOT a signal here: a Berry lockfile on its own.
+// Nothing in the image can act on it — with no pin and no vendored release
+// corepack still runs Classic — so it selects today's Classic invocation and
+// yarnToolchainWarning explains the failure ahead of it.
+func yarnCommand(repoDir string) (string, []string) {
+	release := vendoredYarnRelease(repoDir)
+	args := []string{"install", "--frozen-lockfile"}
+	if release != "" || declaredYarnMajor(repoDir) >= 2 {
+		args = []string{"install", "--immutable"}
+	}
+	if release != "" {
+		return "node", append([]string{release}, args...)
+	}
+	return "yarn", args
+}
+
+// vendoredYarnRelease returns the path of the Yarn release repoDir ships
+// in-tree, or "" if it ships none. An explicit yarnPath wins over whatever
+// happens to sit in .yarn/releases: .yarnrc.yml is Berry's config, .yarnrc
+// is Classic's, which Berry repos still use to redirect an otherwise
+// unmigrated toolchain. A yarnPath naming a file that isn't there is
+// ignored rather than trusted — better the shim than a guaranteed ENOENT.
+// Multiple vendored releases are ambiguous; the highest-sorting name wins,
+// which is the newest release for any conventional yarn-<version>.cjs set.
+func vendoredYarnRelease(repoDir string) string {
+	for _, cfg := range []struct{ file, key string }{
+		{".yarnrc.yml", "yarnPath:"},
+		{".yarnrc", "yarn-path"},
+	} {
+		p := configValue(filepath.Join(repoDir, cfg.file), cfg.key)
+		if p == "" {
+			continue
+		}
+		if !filepath.IsAbs(p) {
+			p = filepath.Join(repoDir, p)
+		}
+		if regularFile(p) {
+			return p
+		}
+	}
+	matches, _ := filepath.Glob(filepath.Join(repoDir, ".yarn", "releases", "*.cjs"))
+	sort.Strings(matches)
+	for i := len(matches) - 1; i >= 0; i-- {
+		if regularFile(matches[i]) {
+			return matches[i]
+		}
+	}
+	return ""
+}
+
+// declaredYarnMajor returns the major version of the Yarn pinned in
+// package.json's packageManager field — corepack's pin, e.g.
+// "yarn@4.1.0+sha224.abc". 0 when the field is absent, names another
+// package manager, or doesn't parse.
+func declaredYarnMajor(repoDir string) int {
+	b, err := os.ReadFile(filepath.Join(repoDir, "package.json"))
+	if err != nil {
+		return 0
+	}
+	var pkg struct {
+		PackageManager string `json:"packageManager"`
+	}
+	if err := json.Unmarshal(b, &pkg); err != nil {
+		return 0
+	}
+	spec, ok := strings.CutPrefix(strings.TrimSpace(pkg.PackageManager), "yarn@")
+	if !ok {
+		return 0
+	}
+	major, _, _ := strings.Cut(spec, ".")
+	major, _, _ = strings.Cut(major, "+")
+	n, err := strconv.Atoi(major)
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
+// yarnLockIsBerry reports whether repoDir's yarn.lock was written by Yarn
+// Berry. Berry lockfiles are YAML carrying a `__metadata:` block (version 4
+// through 8 across 2.x–4.x) a few lines in; Classic's are a bespoke format
+// headed by "# yarn lockfile v1". Only the head of the file is read —
+// lockfiles run to megabytes.
+func yarnLockIsBerry(repoDir string) bool {
+	f, err := os.Open(filepath.Join(repoDir, "yarn.lock"))
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(io.LimitReader(f, 8<<10))
+	for sc.Scan() {
+		if strings.HasPrefix(sc.Text(), "__metadata:") {
+			return true
+		}
+	}
+	return false
+}
+
+// yarnToolchainWarning returns a one-line diagnostic for the one Yarn shape
+// the image cannot resolve on the repo's behalf: a Berry lockfile with
+// neither a packageManager pin nor a vendored release. corepack has nothing
+// to key off, so it runs its Classic default, which can't parse the lockfile
+// and aborts under --frozen-lockfile. The install is left to fail exactly as
+// it does today — but preceded by a line naming the cause and the one-command
+// repo-side fix, instead of Classic's bare "your lockfile needs to be
+// updated". Empty when there is nothing to say, which is the normal case:
+// `yarn set version` writes a packageManager pin (Berry 3.1+) or vendors a
+// release (2.x/3.x), so a Berry repo has to have been hand-stripped to land
+// here.
+func yarnToolchainWarning(repoDir string) string {
+	if !yarnLockIsBerry(repoDir) {
+		return ""
+	}
+	if vendoredYarnRelease(repoDir) != "" || declaredYarnMajor(repoDir) >= 2 {
+		return ""
+	}
+	return fmt.Sprintf("agentbox: %s has a Yarn Berry lockfile but pins no Yarn version: "+
+		"no packageManager field in package.json and no vendored .yarn/releases/*.cjs. "+
+		"The install below runs under the image's default Yarn Classic, which cannot read "+
+		"a Berry lockfile. Fix in the repo with `yarn set version <version>`.", repoDir)
+}
+
+// configValue returns the value of a top-level `key` line in a yarn config
+// file — `yarnPath: .yarn/releases/yarn-4.1.0.cjs` (.yarnrc.yml) or
+// `yarn-path "./.yarn/releases/yarn-1.22.19.cjs"` (.yarnrc) — unquoted, or
+// "" if the file or key is absent. Matching only at column 0 keeps nested
+// YAML keys of the same name out of the result; this is deliberately not a
+// YAML parse, since one key of one shape is all that's needed.
+func configValue(path, key string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(io.LimitReader(f, 64<<10))
+	for sc.Scan() {
+		line := sc.Text()
+		if !strings.HasPrefix(line, key) {
+			continue
+		}
+		v := strings.TrimSpace(strings.TrimPrefix(line, key))
+		return strings.Trim(v, `"'`)
+	}
+	return ""
+}
+
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
 }
 
+func regularFile(path string) bool {
+	st, err := os.Stat(path)
+	return err == nil && st.Mode().IsRegular()
+}
+
 // AllowedHosts are the public registries the install reaches: registry.npmjs.org
-// (npm + pnpm) and registry.yarnpkg.com (classic yarn's default registry).
+// (npm + pnpm), registry.yarnpkg.com (classic yarn's default registry), and
+// repo.yarnpkg.com, where corepack fetches the Yarn release a repo's
+// packageManager field pins. corepack resolves some versions through the npm
+// registry instead, so both are needed; missing repo.yarnpkg.com shows up as
+// the proxy stalling the install rather than as a named denial.
 // Private registries / scoped tokens (.npmrc + NPM_TOKEN) are a follow-up.
 func (*detector) AllowedHosts() []string {
-	return []string{"registry.npmjs.org", "registry.yarnpkg.com"}
+	return []string{"registry.npmjs.org", "registry.yarnpkg.com", "repo.yarnpkg.com"}
 }
 
 // VerifyHosts are the public registries the agent phase may reach to resolve
 // verify-time JS deps (and any the agent newly adds). Same as the vendor
-// hosts — npm/yarn have no private-git-host equivalent to exclude.
+// hosts — npm/yarn have no private-git-host equivalent to exclude, and the
+// agent phase runs the same corepack-backed `yarn`.
 func (*detector) VerifyHosts() []string {
-	return []string{"registry.npmjs.org", "registry.yarnpkg.com"}
+	return []string{"registry.npmjs.org", "registry.yarnpkg.com", "repo.yarnpkg.com"}
 }
 
 // Env redirects each supported package manager's tarball / content-store
@@ -118,7 +306,16 @@ func (*detector) Env(cacheDir string, _ []string) []string {
 	}
 	return []string{
 		// yarn (classic 1.x): standard env var for the tarball cache.
+		// Berry honours it too (it maps YARN_* onto its own config keys,
+		// here cacheFolder) for repos that keep the per-project cache.
 		"YARN_CACHE_FOLDER=" + filepath.Join(cacheDir, "yarn"),
+		// yarn (berry): with enableGlobalCache — the default since Yarn 4 —
+		// cacheFolder is bypassed for a cache under globalFolder, which
+		// defaults into /home/agent, i.e. straight onto the 1 GB tmpfs the
+		// var above exists to avoid. Classic reads global-folder only for
+		// `yarn global`, which the vendor step never runs, so this is inert
+		// for Classic repos.
+		"YARN_GLOBAL_FOLDER=" + filepath.Join(cacheDir, "yarn-berry"),
 		// npm: maps to the `cache` config key (covers tarballs +
 		// metadata). pnpm reads npm_config_* too, so this also moves
 		// pnpm's auxiliary cache off /home/agent.
