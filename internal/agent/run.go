@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/deployment-io/agentbox/internal/cgroupmem"
 	"github.com/deployment-io/agentbox/internal/config"
 	"github.com/deployment-io/agentbox/internal/progress"
 	"github.com/deployment-io/agentbox/internal/result"
@@ -162,6 +163,16 @@ func Run(ctx context.Context, cfg *config.Config, driver Driver) (outcome result
 
 	select {
 	case err := <-done:
+		// A run that merely ran hot says so here. Without this the first
+		// sign of memory pressure is a job dying, with nothing to show it
+		// had been climbing for a while. A signal death is left alone —
+		// classifyFailure gives it the fuller account, and saying it twice
+		// would just be noise.
+		if !isSignalKill(err) {
+			if mem := cgroupmem.Explain(false); mem != "" {
+				fmt.Fprintf(os.Stderr, "[agentbox] %s\n", mem)
+			}
+		}
 		return buildOutcome(err, parser.State(), stderrBuf.String(), driver.Binary())
 	case <-ctx.Done():
 		return gracefulShutdown(cmd, done, parser, reasonSignal, "")
@@ -331,6 +342,18 @@ func buildOutcome(err error, state ParsedState, stderrText, binary string) resul
 	return classifyFailure(err, state, stderrText, binary)
 }
 
+// isSignalKill reports whether the process was terminated by a signal rather
+// than exiting with a status. Only then is an OOM in play — a plain non-zero
+// exit is the agent's own decision and memory has nothing to do with it.
+func isSignalKill(err error) bool {
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		return false
+	}
+	status, ok := exitErr.Sys().(syscall.WaitStatus)
+	return ok && status.Signaled()
+}
+
 // classifyFailure picks exit code 2 for auth / rate-limit failures, 1 otherwise.
 func classifyFailure(err error, state ParsedState, stderrText, binary string) result.Outcome {
 	authFailure := state.IsAuthFailure || HasAuthKeyword(strings.ToLower(stderrText))
@@ -386,8 +409,22 @@ func failureMessage(err error, state ParsedState, stderrText, binary string) str
 		// No result event at all: the agent died before reporting (crash,
 		// early exit). "exit status 1" alone is useless, so append the
 		// tail of its stderr as the best available detail.
-		if tail := stderrTail(stderrText); tail != "" {
-			return fmt.Sprintf("%s exited with error: %v — %s", binary, err, tail)
+		//
+		// A signal death gets the cgroup's account of memory appended too.
+		// "signal: killed" reads as a crash and sends the reader looking at
+		// the agent, when the kernel may simply have killed it for memory —
+		// a dead end that cost an evening on 2026-08-28. cgroupmem answers
+		// it outright, INCLUDING when the answer is "not memory", and says
+		// so plainly when the kernel cannot tell us.
+		detail := stderrTail(stderrText)
+		if mem := cgroupmem.Explain(isSignalKill(err)); mem != "" {
+			if detail != "" {
+				detail += " — "
+			}
+			detail += mem
+		}
+		if detail != "" {
+			return fmt.Sprintf("%s exited with error: %v — %s", binary, err, detail)
 		}
 		return fmt.Sprintf("%s exited with error: %v", binary, err)
 	case err != nil:
