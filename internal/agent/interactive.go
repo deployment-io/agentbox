@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/deployment-io/agentbox/internal/cgroupmem"
 	"github.com/deployment-io/agentbox/internal/config"
 	"github.com/deployment-io/agentbox/internal/result"
 )
@@ -322,6 +323,13 @@ func interactiveExitOutcome(waitErr error, stderrText, binary string) result.Out
 	msg := fmt.Sprintf("%s exited with error: %v", binary, waitErr)
 	if tail := stderrTail(stderrText); tail != "" {
 		msg += " — " + tail
+	}
+	// Sessions get the same memory account as Steps. This is a separate
+	// path from classifyFailure, so it has to ask separately — and a session
+	// runs in the same container under the same limit, so an unexplained
+	// "signal: killed" here is the same dead end it is there.
+	if mem := cgroupmem.Explain(isSignalKill(waitErr)); mem != "" {
+		msg += " — " + mem
 	}
 	return result.Outcome{Status: result.StatusFailure, ExitCode: exit, Error: msg}
 }

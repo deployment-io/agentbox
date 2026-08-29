@@ -191,3 +191,72 @@ func TestMissingPeakIsLabelledAsAnUnderstatement(t *testing.T) {
 		t.Errorf("Explain = %q, want the figure labelled as an understatement", msg)
 	}
 }
+
+// The production-runner hedge. oom_kill was added to v1's memory.oom_control
+// in kernel 4.13, and Amazon Linux 2 is exactly the kind of long-lived image
+// where that assumption deserves a fallback. failcnt is universally present on
+// v1 (runc reads it), so when the kill counter is missing but the cgroup did
+// hit its ceiling, say so — as suspicion, not as a confirmed kill.
+func TestV1FailcntCarriesTheDiagnosisWhenOOMCounterIsAbsent(t *testing.T) {
+	withCgroup(t, map[string]string{
+		"memory/memory.oom_control":        "oom_kill_disable 0\nunder_oom 0\n",
+		"memory/memory.limit_in_bytes":     fourGiB,
+		"memory/memory.max_usage_in_bytes": "4294967296",
+		"memory/memory.failcnt":            "918",
+	})
+	msg := Explain(true)
+	if !strings.Contains(msg, "hit its memory limit 918 time(s)") {
+		t.Errorf("Explain = %q, want the failcnt evidence", msg)
+	}
+	if !strings.Contains(msg, "likely but unconfirmed") {
+		t.Error("failcnt is evidence, not proof — it must not claim a confirmed kill")
+	}
+	if strings.Contains(msg, "OOM-killed by the kernel") {
+		t.Error("must not assert a kill the kernel never reported")
+	}
+}
+
+// failcnt of zero adds nothing, so the report stays honestly undetermined
+// rather than implying memory was fine.
+func TestV1ZeroFailcntStaysUndetermined(t *testing.T) {
+	withCgroup(t, map[string]string{
+		"memory/memory.oom_control":    "oom_kill_disable 0\nunder_oom 0\n",
+		"memory/memory.limit_in_bytes": fourGiB,
+		"memory/memory.failcnt":        "0",
+	})
+	if msg := Explain(true); !strings.Contains(msg, "undetermined") {
+		t.Errorf("Explain = %q, want undetermined", msg)
+	}
+}
+
+// A real kill count always wins over failcnt — the counter is proof, failcnt
+// is only evidence, and reporting the weaker one would be a downgrade.
+func TestOOMCounterWinsOverFailcnt(t *testing.T) {
+	withCgroup(t, map[string]string{
+		"memory/memory.oom_control":        "oom_kill_disable 0\nunder_oom 0\noom_kill 1\n",
+		"memory/memory.limit_in_bytes":     fourGiB,
+		"memory/memory.max_usage_in_bytes": "4294967296",
+		"memory/memory.failcnt":            "918",
+	})
+	msg := Explain(true)
+	if !strings.Contains(msg, "OOM-killed by the kernel") {
+		t.Errorf("Explain = %q, want the confirmed kill", msg)
+	}
+	if strings.Contains(msg, "unconfirmed") {
+		t.Error("a present kill counter is proof; it must not be hedged")
+	}
+}
+
+// NearLimit multiplies the limit in the obvious formulation, which overflows
+// uint64 for a large ceiling and silently inverts the comparison. A limit this
+// size is unrealistic, but a wrong answer from arithmetic is not a thing to
+// leave in a diagnostic.
+func TestNearLimitDoesNotOverflowOnAHugeLimit(t *testing.T) {
+	huge := uint64(1) << 61
+	if (Stats{Available: true, LimitBytes: huge, PeakBytes: 1024}).NearLimit() {
+		t.Error("1 KiB against an exabyte limit is not near the limit")
+	}
+	if !(Stats{Available: true, LimitBytes: huge, PeakBytes: huge}).NearLimit() {
+		t.Error("usage at the limit must register as near it")
+	}
+}

@@ -32,6 +32,7 @@ const (
 	v2Current = "memory.current"
 
 	v1OOMControl = "memory/memory.oom_control"
+	v1FailCnt    = "memory/memory.failcnt"
 	v1Limit      = "memory/memory.limit_in_bytes"
 	v1MaxUsage   = "memory/memory.max_usage_in_bytes"
 	v1Usage      = "memory/memory.usage_in_bytes"
@@ -77,6 +78,19 @@ type Stats struct {
 	// send the next person debugging exactly where we sent ourselves. When
 	// this is false the honest report is "could not determine", never "no".
 	OOMKillsKnown bool
+	// LimitHits counts how many times allocation hit the ceiling (cgroup v1
+	// memory.failcnt). It is NOT a kill count — a cgroup can hit its limit
+	// and reclaim its way out — so it never proves an OOM on its own.
+	//
+	// It is here because it is the one v1 memory pressure signal that is
+	// universally present. The oom_kill field this package prefers was added
+	// to memory.oom_control in kernel 4.13, and the production runner
+	// (Amazon Linux 2) is exactly the sort of long-lived image where that
+	// assumption deserves a fallback rather than a silent "undetermined".
+	LimitHits uint64
+	// LimitHitsKnown records that failcnt was present, for the same reason
+	// OOMKillsKnown exists.
+	LimitHitsKnown bool
 	// Available is false when no cgroup memory files could be read at all,
 	// which is the normal case outside a container.
 	Available bool
@@ -94,7 +108,10 @@ func (s Stats) NearLimit() bool {
 	if used == 0 {
 		used = s.CurrentBytes
 	}
-	return used*10 >= s.LimitBytes*9
+	// Division rather than the more obvious used*10 >= limit*9: the limit is
+	// only bounded above by the unlimited sentinel, so multiplying it can
+	// overflow uint64 and silently invert the comparison.
+	return used >= s.LimitBytes/10*9
 }
 
 // Read returns what the container's memory cgroup reports. It never fails:
@@ -141,6 +158,11 @@ func readV1() (Stats, bool) {
 	}
 	s.PeakBytes = readUint(path(v1MaxUsage))
 	s.CurrentBytes = readUint(path(v1Usage))
+	if b, err := os.ReadFile(path(v1FailCnt)); err == nil {
+		if n, convErr := strconv.ParseUint(strings.TrimSpace(string(b)), 10, 64); convErr == nil {
+			s.LimitHits, s.LimitHitsKnown = n, true
+		}
+	}
 	return ownCgroupOnly(s), true
 }
 
@@ -239,6 +261,15 @@ func Explain(killed bool) string {
 		return "the agent was OOM-killed by the kernel — " + usage + limit +
 			", " + strconv.FormatUint(s.OOMKills, 10) + " process(es) killed in this container. " +
 			"Raise AGENTBOX_MEMORY_BYTES on the runner, or reduce the build's parallelism."
+	case killed && !s.OOMKillsKnown && s.LimitHitsKnown && s.LimitHits > 0:
+		// No kill counter on this kernel, but the cgroup did hit its ceiling.
+		// That is evidence, not proof — a cgroup can hit the limit and
+		// reclaim its way out — so it is worded as the strong suspicion it
+		// is rather than borrowing the certainty of a kill count.
+		return "the agent was killed by a signal and this container hit its memory limit " +
+			strconv.FormatUint(s.LimitHits, 10) + " time(s) — " + usage + limit +
+			". This kernel exposes no OOM kill counter, so memory is the likely but unconfirmed cause; " +
+			"raise AGENTBOX_MEMORY_BYTES on the runner, or reduce the build's parallelism."
 	case killed && !s.OOMKillsKnown:
 		// The honest answer, and the reason OOMKillsKnown exists: this
 		// kernel does not expose the counter, so silence here would read as
