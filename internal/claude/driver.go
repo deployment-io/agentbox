@@ -42,16 +42,31 @@ const agentType = "claude-code"
 //
 // Kept deliberately terse: this prefix runs on every Claude Code call,
 // so trimming directly reduces the per-Step token bill. One worked
-// example is enough; the structure carries the rest.
+// example is enough; the structure carries the rest — the failing-verify
+// case is the one exception, and it earns its second example.
+//
+// stderr_tail is asked for ONLY when passed is false, so the common path
+// costs nothing extra. Without it a failed Step reported just the command
+// it ran — "agent self-verification failed: go build ./... && go vet
+// ./... && go test ./..." — which names the ritual and not the cause, and
+// left whoever was debugging to reproduce the failure themselves to find
+// out what it even was. It cost a Task 23 minutes of finished work on
+// 2026-08-29, where the answer turned out to be one pre-existing vet
+// warning in a package the agent never opened.
+//
+// Verbatim output is the point: an agent's paraphrase of an error is the
+// one thing the reader can already guess. The exact text is what makes it
+// greppable and searchable.
 const finalMessageInstruction = `Before finishing: when the repo has a feasible build/test command (e.g. go build ./... && go vet ./..., go test ./..., tsc, pytest), run it to verify your edits and fix failures within your turn budget.
 
 Final-message format. Your final assistant message must contain, at the very end:
 
 1. A multi-line changes summary describing what you changed and why, noting the verify outcome. This becomes the PR body's lead-in.
 
-2. The verification result as compact JSON wrapped in <verify>...</verify>. If you ran build/test: {"ran":true,"passed":true|false,"command":"<command>"}. If you did not (no buildable code, docs-only, etc.): {"ran":false,"skipped_reason":"<why>"}. Example:
+2. The verification result as compact JSON wrapped in <verify>...</verify>. If you ran build/test: {"ran":true,"passed":true|false,"command":"<command>"}. If you did not (no buildable code, docs-only, etc.): {"ran":false,"skipped_reason":"<why>"}. When passed is false, ALSO include "stderr_tail": the last few lines of actual failure output, verbatim — the error text, not your description of it. Example:
 
    <verify>{"ran":true,"passed":true,"command":"go build ./... && go vet ./..."}</verify>
+   <verify>{"ran":true,"passed":false,"command":"go test ./...","stderr_tail":"pkg/auth/token.go:42:9: undefined: ParseJWT"}</verify>
 
 3. A short PR title (≤72 chars, imperative mood, one line) wrapped in <pr_title>...</pr_title>. Example:
 
