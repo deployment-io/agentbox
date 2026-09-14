@@ -1,9 +1,13 @@
 package claude
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"os"
+	"strings"
 
+	"github.com/deployment-io/agentbox/internal/agent"
 	"github.com/deployment-io/agentbox/internal/config"
 )
 
@@ -84,14 +88,31 @@ func (d *Driver) BuildInteractiveArgs(cfg *config.Config) []string {
 //
 //	{"type":"user","message":{"role":"user","content":"..."}}
 //
-// json.Marshal escapes the user text, so arbitrary content (quotes,
-// newlines, control characters) is safe to embed. Passed to
+// A turn carrying images uses the Messages API's other content shape — an
+// array of blocks, the text first, then one base64 image block each:
+//
+//	{"type":"user","message":{"role":"user","content":[
+//	  {"type":"text","text":"..."},
+//	  {"type":"image","source":{"type":"base64","media_type":"image/png","data":"..."}}]}}
+//
+// A turn with no images encodes as the plain string, byte-for-byte as it did
+// before images existed. json.Marshal escapes the user text, so arbitrary
+// content (quotes, newlines, control characters) is safe to embed. Passed to
 // agent.PumpTextStdin by RunSession.
-func (d *Driver) encodeUserMessage(text string) ([]byte, error) {
+func (d *Driver) encodeUserMessage(msg agent.UserMessage) ([]byte, error) {
 	var env userEnvelope
 	env.Type = "user"
 	env.Message.Role = "user"
-	env.Message.Content = text
+	if len(msg.Images) == 0 {
+		env.Message.Content = msg.Text
+	} else {
+		blocks, note := imageBlocks(msg.Images)
+		text := msg.Text
+		if note != "" {
+			text += "\n\n" + note
+		}
+		env.Message.Content = append([]userContentBlock{{Type: "text", Text: text}}, blocks...)
+	}
 	b, err := json.Marshal(env)
 	if err != nil {
 		return nil, fmt.Errorf("encode user message: %w", err)
@@ -99,10 +120,53 @@ func (d *Driver) encodeUserMessage(text string) ([]byte, error) {
 	return append(b, '\n'), nil
 }
 
+// imageBlocks reads each image off disk and renders it as a base64 content
+// block. An unreadable image is reported to the user as a note appended to the
+// turn's text rather than failing the turn: the message itself is what the user
+// is waiting on, and an agent told an image is missing can ask for it again —
+// an agent that never gets the turn cannot.
+func imageBlocks(images []agent.UserImage) (blocks []userContentBlock, note string) {
+	var missing []string
+	for _, img := range images {
+		data, err := os.ReadFile(img.Path)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[agentbox] cannot read attached image %s: %v\n", img.Path, err)
+			missing = append(missing, img.Path)
+			continue
+		}
+		blocks = append(blocks, userContentBlock{
+			Type: "image",
+			Source: &userImageSource{
+				Type:      "base64",
+				MediaType: img.MediaType,
+				Data:      base64.StdEncoding.EncodeToString(data),
+			},
+		})
+	}
+	if len(missing) > 0 {
+		note = "(note: an attached image could not be loaded: " + strings.Join(missing, ", ") + ")"
+	}
+	return blocks, note
+}
+
+// userEnvelope's Content is `any` so one struct covers both content shapes the
+// Messages API accepts: a plain string, or an array of blocks.
 type userEnvelope struct {
 	Type    string `json:"type"`
 	Message struct {
 		Role    string `json:"role"`
-		Content string `json:"content"`
+		Content any    `json:"content"`
 	} `json:"message"`
+}
+
+type userContentBlock struct {
+	Type   string           `json:"type"`
+	Text   string           `json:"text,omitempty"`
+	Source *userImageSource `json:"source,omitempty"`
+}
+
+type userImageSource struct {
+	Type      string `json:"type"`
+	MediaType string `json:"media_type"`
+	Data      string `json:"data"`
 }

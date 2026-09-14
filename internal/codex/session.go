@@ -86,7 +86,7 @@ func (d *Driver) RunSession(ctx context.Context, cfg *config.Config, sess *agent
 
 		if err := enc.Encode(rpcRequest{ID: nextID, Method: "turn/start", Params: turnStartParams{
 			ThreadID: threadID,
-			Input:    []inputItem{{Type: "text", Text: text}},
+			Input:    turnInput(text, msg.Images),
 		}}); err != nil {
 			return fmt.Errorf("codex turn/start: %w", err)
 		}
@@ -140,6 +140,20 @@ type turnStartParams struct {
 type inputItem struct {
 	Type string `json:"type"`
 	Text string `json:"text"`
+	Path string `json:"path,omitempty"`
+}
+
+// turnInput builds a turn's input items: the text, then one "localImage" item
+// per attached image. The app-server reads each path off the filesystem itself
+// — no base64 on the wire — and it can, because the interactive session runs
+// codex with the danger-full-access sandbox (see sandboxMode). A turn with no
+// images produces exactly the single text item it always did.
+func turnInput(text string, images []agent.UserImage) []inputItem {
+	items := []inputItem{{Type: "text", Text: text}}
+	for _, img := range images {
+		items = append(items, inputItem{Type: "localImage", Path: img.Path})
+	}
+	return items
 }
 
 // rpcMessage is the union of an inbound response (ID + Result/Error) and a

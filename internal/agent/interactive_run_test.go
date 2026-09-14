@@ -94,7 +94,7 @@ func TestPumpUserMessages(t *testing.T) {
 	close(fio.msgs) // drained, then NextUserMessage returns io.EOF
 
 	w := &recordWriteCloser{}
-	encode := func(s string) ([]byte, error) { return []byte("MSG:" + s + "\n"), nil }
+	encode := func(m UserMessage) ([]byte, error) { return []byte("MSG:" + m.Text + "\n"), nil }
 
 	done := make(chan struct{})
 	go func() {
@@ -122,7 +122,7 @@ func TestPumpUserMessages_StopsOnContextCancel(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		PumpTextStdin(ctx, fio, func(string) ([]byte, error) { return nil, nil }, w)
+		PumpTextStdin(ctx, fio, func(UserMessage) ([]byte, error) { return nil, nil }, w)
 		close(done)
 	}()
 	cancel()

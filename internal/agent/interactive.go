@@ -113,6 +113,19 @@ type UserMessage struct {
 	ID string
 	// Text is the user's message body.
 	Text string
+	// Images are files the consumer wrote into the working directory and
+	// wants attached to this turn. Empty for a text-only turn, which every
+	// driver must then encode exactly as it did before images existed.
+	Images []UserImage
+}
+
+// UserImage is one image attached to a user turn: a readable path inside the
+// container plus the metadata a driver needs to hand it to its agent.
+type UserImage struct {
+	Path      string
+	MediaType string
+	Width     int
+	Height    int
 }
 
 // AssistantChunk is an incremental slice of assistant text within a turn.
@@ -354,19 +367,19 @@ func classifySessionEnd(serr, waitErr error, stderrText, binary string) result.O
 }
 
 // PumpTextStdin feeds user turns to a simple line-oriented agent: for each
-// message from iio it writes encode(text) to stdin, until ctx is cancelled
+// message from iio it writes encode(msg) to stdin, until ctx is cancelled
 // or iio returns an error (e.g. io.EOF). It owns stdin and closes it on
 // return. Drivers whose protocol is one self-contained line per user turn
 // (Claude Code's stream-json) use this; stateful protocols (Codex's
 // JSON-RPC) drive stdin themselves.
-func PumpTextStdin(ctx context.Context, iio InteractiveIO, encode func(string) ([]byte, error), stdin io.WriteCloser) {
+func PumpTextStdin(ctx context.Context, iio InteractiveIO, encode func(UserMessage) ([]byte, error), stdin io.WriteCloser) {
 	defer stdin.Close()
 	for {
 		msg, err := iio.NextUserMessage(ctx)
 		if err != nil {
 			return // ctx cancelled or end-of-input
 		}
-		line, err := encode(msg.Text)
+		line, err := encode(msg)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[agentbox] encode user message %s: %v\n", msg.ID, err)
 			continue
