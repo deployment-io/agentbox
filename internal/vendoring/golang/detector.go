@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/deployment-io/agentbox/internal/vendoring"
@@ -80,10 +81,77 @@ func (*detector) VerifyHosts() []string {
 	return []string{"proxy.golang.org", "sum.golang.org", "storage.googleapis.com"}
 }
 
-// goWorkspaceVersion is the `go` directive written into a generated go.work.
-// Must be >= every in-Step module's go directive; tracks the Go baked into
-// the agentbox image (GO_VERSION in the Dockerfile) — bump together.
-const goWorkspaceVersion = "1.24.11"
+// goWorkspaceFloor is the lowest `go` directive a generated go.work carries.
+// The directive actually written is the highest `go` line among the in-Step
+// modules (see workspaceGoVersion): with a go.work present the go command
+// takes its version requirement from go.work, not from the modules, so a
+// go.work older than any module fails every go command with "module requires
+// go >= X, but go.work lists Y". A hard-coded value here rotted exactly that
+// way when the repos moved to Go 1.25 while this still said 1.24.11. The
+// floor only matters when no module declares a version at all.
+const goWorkspaceFloor = "1.24"
+
+// goDirective matches the `go` line of a go.mod: `go 1.25.14`, `go 1.24`,
+// `go 1.26rc1`.
+var goDirective = regexp.MustCompile(`(?m)^go[ \t]+(\S+)`)
+
+// workspaceGoVersion returns the highest go directive across repoDirs' go.mod
+// files, or goWorkspaceFloor if none is found. A repo without a go.mod (or an
+// unreadable one) is skipped — Finalize is only called for dirs the detector
+// matched, and a missing directive is a legal, if archaic, go.mod.
+func workspaceGoVersion(repoDirs []string) string {
+	best := goWorkspaceFloor
+	for _, dir := range repoDirs {
+		data, err := os.ReadFile(filepath.Join(dir, "go.mod"))
+		if err != nil {
+			continue
+		}
+		m := goDirective.FindSubmatch(data)
+		if m == nil {
+			continue
+		}
+		if v := string(m[1]); compareGoVersions(v, best) > 0 {
+			best = v
+		}
+	}
+	return best
+}
+
+// compareGoVersions orders go directive versions numerically component by
+// component ("1.25.14" > "1.25.2" > "1.25" > "1.24"). A pre-release suffix
+// ("1.26rc1") is compared as the numeric prefix it carries; that's enough to
+// pick a workspace version, which never needs to distinguish rc from final.
+func compareGoVersions(a, b string) int {
+	pa, pb := strings.Split(a, "."), strings.Split(b, ".")
+	for i := 0; i < len(pa) || i < len(pb); i++ {
+		var x, y int
+		if i < len(pa) {
+			x = leadingInt(pa[i])
+		}
+		if i < len(pb) {
+			y = leadingInt(pb[i])
+		}
+		if x != y {
+			if x < y {
+				return -1
+			}
+			return 1
+		}
+	}
+	return 0
+}
+
+// leadingInt parses the digits at the start of s ("14" → 14, "26rc1" → 26).
+func leadingInt(s string) int {
+	n := 0
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			break
+		}
+		n = n*10 + int(r-'0')
+	}
+	return n
+}
 
 // Env points the toolchain at the shared cache and marks the in-Step repos'
 // module owners as private (direct git via the vendor token, not the public
@@ -142,7 +210,7 @@ func (*detector) Finalize(workDir string, repoDirs []string) error {
 		return nil
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "go %s\n\nuse (\n", goWorkspaceVersion)
+	fmt.Fprintf(&b, "go %s\n\nuse (\n", workspaceGoVersion(repoDirs))
 	for _, dir := range repoDirs {
 		rel, err := filepath.Rel(workDir, dir)
 		if err != nil {

@@ -112,6 +112,14 @@ func TestFinalizeWritesGoWork(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// The workspace's go line must be the highest module directive, not a
+	// constant: a go.work older than any module fails every go command.
+	if err := os.WriteFile(filepath.Join(a, "go.mod"), []byte("module kit\n\ngo 1.24\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(b, "go.mod"), []byte("module app\n\ngo 1.25.14\n\ntoolchain go1.25.14\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := d.Finalize(work, []string{a, b}); err != nil {
 		t.Fatalf("Finalize: %v", err)
 	}
@@ -119,7 +127,7 @@ func TestFinalizeWritesGoWork(t *testing.T) {
 	if err != nil {
 		t.Fatalf("go.work not written: %v", err)
 	}
-	for _, want := range []string{"go " + goWorkspaceVersion, "use (", "./0-kit", "./1-app"} {
+	for _, want := range []string{"go 1.25.14\n", "use (", "./0-kit", "./1-app"} {
 		if !strings.Contains(string(data), want) {
 			t.Errorf("go.work missing %q; got:\n%s", want, data)
 		}
@@ -132,5 +140,59 @@ func TestFinalizeWritesGoWork(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(solo, "go.work")); !os.IsNotExist(err) {
 		t.Error("go.work should not be written for <2 modules")
+	}
+}
+
+func TestWorkspaceGoVersion(t *testing.T) {
+	work := t.TempDir()
+	mod := func(name, body string) string {
+		dir := filepath.Join(work, name)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if body != "" {
+			if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return dir
+	}
+	cases := []struct {
+		name string
+		dirs []string
+		want string
+	}{
+		{"no go.mod anywhere falls back to the floor", []string{mod("none", "")}, goWorkspaceFloor},
+		{"go.mod without a go line falls back to the floor", []string{mod("old", "module old\n")}, goWorkspaceFloor},
+		{"single module", []string{mod("one", "module one\n\ngo 1.25.0\n")}, "1.25.0"},
+		{"highest wins, numerically not lexically", []string{
+			mod("a", "module a\n\ngo 1.25.14\n"), mod("b", "module b\n\ngo 1.25.2\n"), mod("c", "module c\n\ngo 1.9\n"),
+		}, "1.25.14"},
+		{"a pre-release directive still orders by its numeric prefix", []string{
+			mod("rc", "module rc\n\ngo 1.26rc1\n"), mod("d", "module d\n\ngo 1.25.14\n"),
+		}, "1.26rc1"},
+		{"the go line is matched at line start, not inside a require block", []string{
+			mod("e", "module e\n\ngo 1.24\n\nrequire (\n\tgolang.org/x/tools v0.47.0 // go 1.99 in a comment\n)\n"),
+		}, "1.24"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := workspaceGoVersion(tc.dirs); got != tc.want {
+				t.Errorf("workspaceGoVersion = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCompareGoVersions(t *testing.T) {
+	for _, tc := range []struct {
+		a, b string
+		want int
+	}{
+		{"1.25.14", "1.25.2", 1}, {"1.25", "1.25.0", 0}, {"1.24", "1.25", -1}, {"1.26rc1", "1.25.14", 1}, {"1.25.14", "1.25.14", 0},
+	} {
+		if got := compareGoVersions(tc.a, tc.b); got != tc.want {
+			t.Errorf("compare(%q, %q) = %d, want %d", tc.a, tc.b, got, tc.want)
+		}
 	}
 }
