@@ -228,7 +228,9 @@ func TestTurnInput(t *testing.T) {
 				t.Fatalf("turnInput = %+v, want %+v", got, tc.want)
 			}
 			// The wire shape matters as much as the struct: a text item must
-			// not grow a "path" key, and an image item must not grow "text".
+			// not grow a "path" key, and an image item must not carry an
+			// empty "text" — codex ignores unknown fields today, but the
+			// documented localImage item is {type, path} and nothing else.
 			b, err := json.Marshal(got)
 			if err != nil {
 				t.Fatal(err)
@@ -236,7 +238,7 @@ func TestTurnInput(t *testing.T) {
 			if tc.images == nil && string(b) != `[{"type":"text","text":"hello"}]` {
 				t.Errorf("text-only request = %s", b)
 			}
-			if tc.images != nil && !strings.Contains(string(b), `{"type":"localImage","text":"","path":"/work/uploads/a-shot.png"}`) {
+			if tc.images != nil && !strings.Contains(string(b), `{"type":"localImage","path":"/work/uploads/a-shot.png"}`) {
 				t.Errorf("request = %s", b)
 			}
 		})

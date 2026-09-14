@@ -139,7 +139,7 @@ type turnStartParams struct {
 
 type inputItem struct {
 	Type string `json:"type"`
-	Text string `json:"text"`
+	Text string `json:"text,omitempty"`
 	Path string `json:"path,omitempty"`
 }
 
