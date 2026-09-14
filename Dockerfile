@@ -1,5 +1,5 @@
 # ---- Stage 1: Build agentbox binary ----
-FROM golang:1.24-bookworm AS builder
+FROM golang:1.25-bookworm AS builder
 
 WORKDIR /src
 COPY . .
@@ -54,14 +54,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # runs `go build`/`go vet`/`go test` to check its edits before commit, and
 # the `agentbox vendor` subcommand uses `go mod download` to pre-fetch
 # module deps. dpkg arch keeps the multi-arch release builds (amd64/arm64)
-# correct; GOTOOLCHAIN=local pins this version (no per-repo auto-download).
-ARG GO_VERSION=1.24.11
+# correct.
+#
+# GO_VERSION is the baseline, not a ceiling. GOTOOLCHAIN=auto (below) lets a
+# repo whose go.mod requires a newer Go than this image carries fetch that
+# exact toolchain during the vendor phase — which allows public egress — into
+# the shared GOMODCACHE, where the agent phase reuses it offline. The repo's
+# own go/toolchain lines are the pin, so the build is still reproducible.
+# This used to be GOTOOLCHAIN=local, which made every Task on a repo newer
+# than the image fail at `go mod download` with "go.mod requires go >= X
+# (running go Y; GOTOOLCHAIN=local)" until a new image shipped.
+ARG GO_VERSION=1.25.14
 RUN ARCH="$(dpkg --print-architecture)" \
     && curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${ARCH}.tar.gz" -o /tmp/go.tgz \
     && tar -C /usr/local -xzf /tmp/go.tgz \
     && rm /tmp/go.tgz
 ENV PATH=/usr/local/go/bin:$PATH
-ENV GOTOOLCHAIN=local
+ENV GOTOOLCHAIN=auto
 
 # Non-root user with pre-configured per-user install prefixes, so
 # runtime `npm install -g` and `pip install --user` work without root.
