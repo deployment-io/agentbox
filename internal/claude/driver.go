@@ -192,6 +192,12 @@ func (d *Driver) NewLogFormatter(sink io.Writer) io.WriteCloser {
 	return newHumanLogFormatter(sink, openRawStreamLog())
 }
 
+// Capabilities reports MCP tool support: BuildArgs points Claude Code at
+// the bridge via --mcp-config when cfg.MCPSocket is set.
+func (d *Driver) Capabilities() agent.Capabilities {
+	return agent.Capabilities{MCPTools: true}
+}
+
 func openRawStreamLog() io.WriteCloser {
 	f, err := os.OpenFile(rawStreamLogPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
