@@ -68,6 +68,18 @@ type inputMessage struct {
 	ID      string `json:"id"`
 	Content string `json:"content"`
 	Ts      int64  `json:"ts"`
+	// Images is additive: a record written by a consumer that predates image
+	// attachments simply has no "images" key and parses exactly as before.
+	// Paths are in-container and point at files the consumer wrote before the
+	// record, so they are readable by the time the turn is consumed.
+	Images []inputImage `json:"images,omitempty"`
+}
+
+type inputImage struct {
+	Path      string `json:"path"`
+	MediaType string `json:"mediaType"`
+	Width     int    `json:"width"`
+	Height    int    `json:"height"`
 }
 
 // NextUserMessage returns the oldest pending input file (by filename),
@@ -126,7 +138,16 @@ func (f *FSIO) takeOldestInput() (agent.UserMessage, bool, error) {
 		if id == "" {
 			id = strings.TrimSuffix(name, ".json")
 		}
-		return agent.UserMessage{ID: id, Text: in.Content}, true, nil
+		images := make([]agent.UserImage, 0, len(in.Images))
+		for _, img := range in.Images {
+			images = append(images, agent.UserImage{
+				Path: img.Path, MediaType: img.MediaType, Width: img.Width, Height: img.Height,
+			})
+		}
+		if len(images) == 0 {
+			images = nil // a text-only turn carries no image slice at all
+		}
+		return agent.UserMessage{ID: id, Text: in.Content, Images: images}, true, nil
 	}
 	return agent.UserMessage{}, false, nil
 }

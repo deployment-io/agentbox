@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -284,5 +285,53 @@ func TestFSIO_ConcurrentDuplex(t *testing.T) {
 		t.Errorf("heartbeat read: %v", err)
 	} else if err := json.Unmarshal(b, &heartbeatRecord{}); err != nil {
 		t.Errorf("heartbeat not valid JSON: %v", err)
+	}
+}
+
+func TestNextUserMessage_Images(t *testing.T) {
+	cases := []struct {
+		name   string
+		record string
+		want   []agent.UserImage
+	}{
+		{
+			// A record written before images existed has no "images" key and
+			// must parse exactly as it always did.
+			name:   "no images key",
+			record: `{"id":"m1","content":"hello","ts":5}`,
+		},
+		{
+			name:   "empty images list is still a text-only turn",
+			record: `{"id":"m1","content":"hello","ts":5,"images":[]}`,
+		},
+		{
+			name:   "images are carried onto the turn",
+			record: `{"id":"m1","content":"hello","ts":5,"images":[{"path":"/work/uploads/a-shot.png","mediaType":"image/png","width":1280,"height":800},{"path":"/work/uploads/b.jpg","mediaType":"image/jpeg","width":4,"height":3}]}`,
+			want: []agent.UserImage{
+				{Path: "/work/uploads/a-shot.png", MediaType: "image/png", Width: 1280, Height: 800},
+				{Path: "/work/uploads/b.jpg", MediaType: "image/jpeg", Width: 4, Height: 3},
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f, err := New(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(f.inputDir, "0000000001.json"), []byte(tc.record), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			msg, err := f.NextUserMessage(context.Background())
+			if err != nil {
+				t.Fatalf("NextUserMessage: %v", err)
+			}
+			if msg.ID != "m1" || msg.Text != "hello" {
+				t.Errorf("msg = %+v", msg)
+			}
+			if !reflect.DeepEqual(msg.Images, tc.want) {
+				t.Errorf("images = %+v, want %+v", msg.Images, tc.want)
+			}
+		})
 	}
 }

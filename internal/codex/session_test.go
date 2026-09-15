@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -201,5 +202,45 @@ func TestRunTurn_FailedTurnStillEmitsTurnEnd(t *testing.T) {
 	}
 	if sink.turnEnds != 1 {
 		t.Errorf("turnEnds = %d, want 1 on turn/failed", sink.turnEnds)
+	}
+}
+
+func TestTurnInput(t *testing.T) {
+	cases := []struct {
+		name   string
+		images []agent.UserImage
+		want   []inputItem
+	}{
+		{"no images is the request that always shipped", nil, []inputItem{{Type: "text", Text: "hello"}}},
+		{"one localImage item per image, after the text", []agent.UserImage{
+			{Path: "/work/uploads/a-shot.png", MediaType: "image/png", Width: 1280, Height: 800},
+			{Path: "/work/uploads/b.jpg", MediaType: "image/jpeg"},
+		}, []inputItem{
+			{Type: "text", Text: "hello"},
+			{Type: "localImage", Path: "/work/uploads/a-shot.png"},
+			{Type: "localImage", Path: "/work/uploads/b.jpg"},
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := turnInput("hello", tc.images)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("turnInput = %+v, want %+v", got, tc.want)
+			}
+			// The wire shape matters as much as the struct: a text item must
+			// not grow a "path" key, and an image item must not carry an
+			// empty "text" — codex ignores unknown fields today, but the
+			// documented localImage item is {type, path} and nothing else.
+			b, err := json.Marshal(got)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.images == nil && string(b) != `[{"type":"text","text":"hello"}]` {
+				t.Errorf("text-only request = %s", b)
+			}
+			if tc.images != nil && !strings.Contains(string(b), `{"type":"localImage","path":"/work/uploads/a-shot.png"}`) {
+				t.Errorf("request = %s", b)
+			}
+		})
 	}
 }

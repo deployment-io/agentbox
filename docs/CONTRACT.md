@@ -67,7 +67,7 @@ not yet wired.
 
 | Path | Direction | Contents |
 |---|---|---|
-| `.agentbox-input/messages/<name>.json` | consumer → agentbox | one user turn `{"id","content","ts"}`; consumed (deleted) in filename order. |
+| `.agentbox-input/messages/<name>.json` | consumer → agentbox | one user turn `{"id","content","ts"}`; consumed (deleted) in filename order. Optional `"images"`: `[{"path","mediaType","width","height"}]`, images to attach to that turn — `path` is in-container (e.g. `/work/uploads/a1b2c3-1-shot.png`) and the consumer must write the file **before** the record. agentbox hands each one to the agent with the message (a base64 content block for **claude-code**, a `localImage` input item for **codex**); an image it cannot read is reported in the turn's text instead of dropping the turn. The key is additive — an older agentbox ignores it, and the turn still names the file in its text. |
 | `.agentbox-output/messages/<seq>.json` | agentbox → consumer | assistant output `{"seq","type":"chunk"\|"final"\|"turn_end","text"}`; zero-padded `seq` so lexical order is chronological. A `turn_end` record (no `text`) follows the turn's last `final` — emitted when the agent finishes (or fails) a turn and is back to waiting for input, so the consumer can gate its composer on the boundary. |
 | `.agentbox-output/task-spec.json` | agentbox → consumer | latest extracted task-spec (overwritten): the structured fields plus `raw`. |
 | `.agentbox-output/heartbeat.json` | agentbox → consumer | liveness `{"ts","turns","input_tokens","output_tokens"}` (overwritten ~every 30s). |
