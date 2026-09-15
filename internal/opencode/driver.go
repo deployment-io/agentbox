@@ -249,3 +249,17 @@ func (d *Driver) NewOutputParser() agent.OutputParser {
 func (d *Driver) NewLogFormatter(sink io.Writer) io.WriteCloser {
 	return newHumanLogFormatter(sink, openRawStreamLog())
 }
+
+// Capabilities reports no MCP tool support: this driver never points
+// opencode at the bridge, so it cannot invoke runner-side tools.
+//
+// Not a deliberate exclusion — PLAN_tasks_opencode_support.md treated the
+// MCP tool socket as agent-agnostic, an assumption the codex driver
+// disproved (aiming a harness at the shared bridge is per-harness
+// config). The hook to fix it already exists: writeAutonomousConfig
+// writes a config file and points OPENCODE_CONFIG at it, so an MCP server
+// entry belongs there. Confirm opencode's config schema accepts one
+// before flipping this to true.
+func (d *Driver) Capabilities() agent.Capabilities {
+	return agent.Capabilities{MCPTools: false}
+}

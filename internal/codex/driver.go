@@ -218,3 +218,10 @@ func (d *Driver) NewOutputParser() agent.OutputParser {
 func (d *Driver) NewLogFormatter(sink io.Writer) io.WriteCloser {
 	return newHumanLogFormatter(sink, openRawStreamLog())
 }
+
+// Capabilities reports MCP tool support: Codex has no --mcp-config flag,
+// so BuildArgs writes mcp_servers.deployment_io into its config via -c
+// when cfg.MCPSocket is set.
+func (d *Driver) Capabilities() agent.Capabilities {
+	return agent.Capabilities{MCPTools: true}
+}
