@@ -6,6 +6,7 @@ package claude
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -145,25 +146,30 @@ func (d *Driver) BuildArgs(cfg *config.Config) []string {
 		// `agentbox mcp-bridge` stdio bridge. --dangerously-skip-permissions
 		// (set above) also auto-allows these tools, so the agent invokes them
 		// without a permission prompt.
-		args = append(args, "--mcp-config", mcpConfigJSON(cfg.MCPSocket))
+		if mcpConfig := mcpConfigJSON(cfg.MCPSocket); mcpConfig != "" {
+			args = append(args, "--mcp-config", mcpConfig)
+		}
 	}
 	return args
 }
 
 // mcpConfigJSON builds the inline --mcp-config value that registers the runner's
-// tool channel as a stdio MCP server: this same binary run as
-// `agentbox mcp-bridge <socket>`, which pipes JSON-RPC to the runner. Claude
-// Code accepts a JSON string here (not only a file path). os.Executable
-// resolves the bridge binary, falling back to the image's fixed path.
+// tool channel as a stdio MCP server. Claude Code accepts a JSON string here
+// (not only a file path). The bridge invocation itself comes from
+// agent.BridgeCommand, which all three drivers share.
 func mcpConfigJSON(socket string) string {
-	self, err := os.Executable()
-	if err != nil || self == "" {
-		self = "/usr/local/bin/agentbox"
+	command, args := agent.BridgeCommand(socket)
+	server := map[string]any{"command": command, "args": args}
+	b, err := json.Marshal(map[string]any{
+		"mcpServers": map[string]any{"deployment-io": server},
+	})
+	if err != nil {
+		// Only string values go in, so marshalling cannot realistically
+		// fail; returning empty leaves the caller to omit --mcp-config
+		// rather than pass malformed JSON.
+		return ""
 	}
-	return fmt.Sprintf(
-		`{"mcpServers":{"deployment-io":{"command":%q,"args":["mcp-bridge",%q]}}}`,
-		self, socket,
-	)
+	return string(b)
 }
 
 func (d *Driver) DetectVersion() string {

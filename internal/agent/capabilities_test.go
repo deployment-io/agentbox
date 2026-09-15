@@ -26,9 +26,7 @@ func TestDeclaredCapabilities(t *testing.T) {
 	want := map[string]agent.Capabilities{
 		"claude-code": {MCPTools: true},
 		"codex":       {MCPTools: true},
-		// opencode's driver never points it at the MCP bridge — see the
-		// comment on its Capabilities method.
-		"opencode": {MCPTools: false},
+		"opencode":    {MCPTools: true},
 	}
 
 	for _, agentType := range agent.RegisteredTypes() {
