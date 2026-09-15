@@ -13,6 +13,12 @@ import (
 
 const defaultNoActivityTimeout = 10 * time.Minute
 
+// MCPSocketEnv names the env var carrying the runner's per-task MCP tool
+// socket path. Load reads it into Config.MCPSocket; a driver that wires MCP
+// outside BuildArgs — and so has no *Config in hand — reads the env var
+// itself, from here, so the name is spelled once.
+const MCPSocketEnv = "MCP_TOOL_RPC_SOCKET"
+
 // Agent execution modes, selected via the AGENT_MODE env var.
 const (
 	// ModeBatch is the default fire-and-forget mode: one
@@ -68,9 +74,9 @@ type Config struct {
 	AppendSystemPrompt string
 
 	// MCPSocket is the container path of the runner's per-task MCP tool socket
-	// (MCP_TOOL_RPC_SOCKET). Set for the agent phase when the runner exposes
-	// runner-executed tools; empty = no tool channel. The claude driver points
-	// the agent's MCP client at it via --mcp-config + the `mcp-bridge`
+	// (MCPSocketEnv). Set for the agent phase when the runner exposes
+	// runner-executed tools; empty = no tool channel. Each driver points its
+	// agent's MCP client at it via agent.BridgeCommand + the `mcp-bridge`
 	// subcommand. Credentials stay in the runner; only intent crosses the socket.
 	MCPSocket string
 
@@ -117,7 +123,7 @@ func Load() (*Config, error) {
 		SessionID:            strings.TrimSpace(os.Getenv("SESSION_ID")),
 		MaxBudgetUSD:         strings.TrimSpace(os.Getenv("MAX_BUDGET_USD")),
 		ReadOnly:             parseBoolEnv("READ_ONLY"),
-		MCPSocket:            strings.TrimSpace(os.Getenv("MCP_TOOL_RPC_SOCKET")),
+		MCPSocket:            strings.TrimSpace(os.Getenv(MCPSocketEnv)),
 	}
 
 	switch c.Mode {
