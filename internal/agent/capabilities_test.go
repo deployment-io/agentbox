@@ -1,6 +1,7 @@
 package agent_test
 
 import (
+	"sort"
 	"testing"
 
 	"github.com/deployment-io/agentbox/internal/agent"
@@ -19,19 +20,29 @@ import (
 // MCPTools. Flipping one of these silently would let such a pairing be
 // accepted and then fail mid-run.
 //
-// A new agent shows up here as a compile-time miss (the map lookup fails),
-// which is the point: adding a Driver should force a decision about what
-// it can do rather than defaulting into a claim.
+// A new agent shows up as an unexpected registry entry when this runs, so
+// adding a Driver forces a decision about what it can do rather than
+// letting it default into a claim. (The compiler enforces only that the
+// method exists — the interface does that; what it declares is on us.)
 func TestDeclaredCapabilities(t *testing.T) {
 	want := map[string]agent.Capabilities{
 		"claude-code": {MCPTools: true},
 		"codex":       {MCPTools: true},
-		// opencode's driver never points it at the MCP bridge — see the
-		// comment on its Capabilities method.
-		"opencode": {MCPTools: false},
+		"opencode":    {MCPTools: true},
 	}
 
-	for _, agentType := range agent.RegisteredTypes() {
+	registered := agent.RegisteredTypes()
+
+	// Without this the test is vacuous in the one case that matters: if the
+	// side-effect imports above are dropped or a driver's init() stops
+	// registering, the loop body never runs and this reports PASS while
+	// checking nothing — in a test whose entire job is catching that drift.
+	if len(registered) != len(want) {
+		t.Fatalf("registry has %d agents %v, expected %d %v; a driver was added, "+
+			"removed, or failed to register", len(registered), registered, len(want), keys(want))
+	}
+
+	for _, agentType := range registered {
 		expected, known := want[agentType]
 		if !known {
 			t.Errorf("agent %q is registered but has no expected capabilities here; "+
@@ -47,4 +58,13 @@ func TestDeclaredCapabilities(t *testing.T) {
 			t.Errorf("%s capabilities = %+v, want %+v", agentType, got, expected)
 		}
 	}
+}
+
+func keys(m map[string]agent.Capabilities) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
