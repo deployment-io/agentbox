@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"sort"
 
 	"github.com/deployment-io/agentbox/internal/config"
 	"github.com/deployment-io/agentbox/internal/result"
@@ -39,6 +40,39 @@ type Driver interface {
 	// (Claude Code: stream-json; Aider: diff+markdown). Output suitable
 	// for programmatic parsing is rarely suitable for human log viewing.
 	NewLogFormatter(sink io.Writer) io.WriteCloser
+	// Capabilities declares what this agent can do beyond running a
+	// prompt, so a caller can reject an unsupported pairing up front
+	// instead of discovering it mid-run. See Capabilities.
+	Capabilities() Capabilities
+}
+
+// Capabilities declares what a Driver's agent can do beyond running a
+// prompt to completion.
+//
+// Declared, not detected, on purpose. Every capability here is a
+// property of the Driver's own wiring, so the orchestrator cannot probe
+// for it — and a caller that guesses wrong finds out only when the agent
+// is already running and reaches for something that isn't there. That
+// failure surfaces as a confusing mid-run error, long after the point
+// where the pairing could simply have been rejected.
+//
+// This is a struct rather than a bool so that adding a second capability
+// doesn't change the Driver interface again.
+type Capabilities struct {
+	// MCPTools reports whether this Driver points its agent's MCP client
+	// at the tool socket named by MCP_TOOL_RPC_SOCKET.
+	//
+	// The bridge itself (`agentbox mcp-bridge <socket>`) is shared, but
+	// aiming a harness at it is per-harness config: claude passes a
+	// config flag, codex has no such flag and instead writes
+	// mcp_servers.* into its TOML via -c. A Driver that does neither
+	// cannot invoke runner-side tools at all, so it cannot serve a step
+	// whose work *is* tool invocation — deploying a preview, verifying
+	// it, reading deployment logs.
+	//
+	// False is the safe default: a new Driver that hasn't wired the
+	// bridge should report false rather than claim a facility it lacks.
+	MCPTools bool
 }
 
 // OutputParser consumes an agent's output stream and accumulates
@@ -151,4 +185,17 @@ func DriverFor(agentType, version string) (Driver, error) {
 		return nil, fmt.Errorf("unsupported AGENT_TYPE %q", agentType)
 	}
 	return factory(version), nil
+}
+
+// RegisteredTypes returns every registered agent type, sorted. Callers
+// that need to enumerate the agents this build supports — reporting the
+// capability matrix, or asserting every Driver has declared one — read it
+// from here rather than keeping a second list that can drift.
+func RegisteredTypes() []string {
+	types := make([]string, 0, len(registry))
+	for agentType := range registry {
+		types = append(types, agentType)
+	}
+	sort.Strings(types)
+	return types
 }

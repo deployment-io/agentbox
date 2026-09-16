@@ -114,6 +114,13 @@ func (d *Driver) DetectVersion() string {
 func (d *Driver) NewOutputParser() agent.OutputParser {
 	return newOutputParser()
 }
+
+// Declare only what this driver actually wires. False is the safe
+// default — claiming a facility the driver hasn't wired turns a
+// rejectable misconfiguration into a confusing mid-run failure.
+func (d *Driver) Capabilities() agent.Capabilities {
+	return agent.Capabilities{MCPTools: false}
+}
 ```
 
 **2. Create `internal/aider/parser.go`** implementing the
@@ -161,9 +168,11 @@ That's it. The Driver + OutputParser abstractions handle the rest.
 - **Functions rarely exceed 50 lines.** Decompose into private helpers
   in the same file rather than writing long functions.
 - **Errors wrap with `%w`**: `fmt.Errorf("install failed: %w", err)`.
-- **Small interfaces.** `Driver` has 5 methods; `OutputParser` has 2.
+- **Small interfaces.** `Driver` has 8 methods; `OutputParser` has 2.
   Avoid growing them unless a new concern genuinely applies to every
-  agent.
+  agent. `Capabilities()` earned its place because every agent either
+  can or cannot reach a given facility, and callers must be able to ask
+  before starting a run.
 - **Tests use `t.Setenv`** for env manipulation — automatic cleanup,
   no race with parallel tests.
 - **Package names stay short and lowercase.** `claude`, not
@@ -226,11 +235,17 @@ docker build --build-arg CLAUDE_CODE_VERSION=X.Y.Z -t agentbox:dev .
 
 Maintained list of agent types consumers can set `AGENT_TYPE` to:
 
-| Agent Type | Package | Status |
-|---|---|---|
-| `claude-code` | `internal/claude` | v1 |
-| `codex` | `internal/codex` | v1 |
-| `opencode` | `internal/opencode` | prototype |
+| Agent Type | Package | Status | MCP tools |
+|---|---|---|---|
+| `claude-code` | `internal/claude` | v1 | yes — `--mcp-config` |
+| `codex` | `internal/codex` | v1 | yes — `mcp_servers.*` via `-c` (no `--mcp-config` flag) |
+| `opencode` | `internal/opencode` | prototype | no — driver never points it at the bridge |
+
+The MCP-tools column is the same fact each Driver declares via
+`Capabilities()`; the table is for humans, `Capabilities()` is what code
+reads. Consumers use it to decide which agent can serve a step whose work
+*is* tool invocation (deploy a preview, verify it, read deployment logs) —
+an agent without it fails mid-run instead of being rejected up front.
 
 When adding a new agent, add its row above and to the README's
 "Supported Agents" section.
