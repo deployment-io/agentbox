@@ -18,6 +18,7 @@ package opencode
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -35,6 +36,13 @@ const agentType = "opencode"
 // between the global and project configs). The driver writes a minimal config
 // there granting full tool autonomy.
 const opencodeConfigEnv = "OPENCODE_CONFIG"
+
+// bridgeDiscoveryTimeoutMS is how long opencode may spend fetching the
+// bridge's tool list before giving up and loading none. Generous over
+// opencode's 5s default because the cost of expiring is a silently
+// tool-less run rather than an error, and the cost of a larger value is
+// only a slower failure in the case where the bridge is genuinely dead.
+const bridgeDiscoveryTimeoutMS = 30000
 
 // finalMessageInstruction is appended to the user's prompt so opencode's final
 // message ends with a changes summary, a <verify>{json}</verify> block, and a
@@ -187,14 +195,60 @@ func (d *Driver) Ensure(ctx context.Context) error {
 // exported var reaches the opencode subprocess.
 func writeAutonomousConfig() error {
 	path := filepath.Join(os.TempDir(), "opencode-agentbox.json")
-	const cfg = `{"$schema":"https://opencode.ai/config.json","permission":"allow"}`
-	if err := os.WriteFile(path, []byte(cfg), 0o644); err != nil {
+	cfg, err := json.Marshal(autonomousConfig(os.Getenv(config.MCPSocketEnv)))
+	if err != nil {
+		return fmt.Errorf("building opencode config: %w", err)
+	}
+	if err := os.WriteFile(path, cfg, 0o644); err != nil {
 		return fmt.Errorf("writing opencode autonomy config: %w", err)
 	}
 	if err := os.Setenv(opencodeConfigEnv, path); err != nil {
 		return fmt.Errorf("setting %s: %w", opencodeConfigEnv, err)
 	}
 	return nil
+}
+
+// autonomousConfig builds the config document: full tool autonomy, plus the
+// runner's tool socket registered as a local (stdio) MCP server when one is
+// exposed.
+//
+// The socket is read from the environment rather than *config.Config because
+// Ensure — where the config file must be written, so agent.Run's post-Ensure
+// os.Environ() snapshot carries OPENCODE_CONFIG — takes no cfg. Same var
+// config.Load reads, same approach AllowedHosts already takes here.
+//
+// opencode's schema puts MCP servers in an `mcp` block keyed by name, where a
+// local server is {"type":"local","command":[...]} with command and args in
+// one array. Registering nothing when the socket is absent keeps a plain
+// agent run free of a dangling bridge.
+func autonomousConfig(socket string) map[string]any {
+	cfg := map[string]any{
+		"$schema": "https://opencode.ai/config.json",
+		// Headless runs must never block on a permission prompt — the
+		// container sandbox and network allowlist are the real guardrails.
+		"permission": "allow",
+	}
+	socket = strings.TrimSpace(socket)
+	if socket == "" {
+		return cfg
+	}
+	command, args := agent.BridgeCommand(socket)
+	cfg["mcp"] = map[string]any{
+		"deployment-io": map[string]any{
+			"type":    "local",
+			"command": append([]string{command}, args...),
+			"enabled": true,
+			// Discovery timeout, not execution: opencode uses this when
+			// fetching the server's tool list, and a server that misses it
+			// has its tools silently not loaded — the agent then runs as
+			// though no tool channel existed. The 5s default is a cold-start
+			// race here, since the bridge has to exec and the runner has to
+			// answer before it expires. Long tool calls (a preview deploy)
+			// are unaffected either way; this only buys headroom on startup.
+			"timeout": bridgeDiscoveryTimeoutMS,
+		},
+	}
+	return cfg
 }
 
 func (d *Driver) Binary() string {
@@ -250,16 +304,9 @@ func (d *Driver) NewLogFormatter(sink io.Writer) io.WriteCloser {
 	return newHumanLogFormatter(sink, openRawStreamLog())
 }
 
-// Capabilities reports no MCP tool support: this driver never points
-// opencode at the bridge, so it cannot invoke runner-side tools.
-//
-// Not a deliberate exclusion — PLAN_tasks_opencode_support.md treated the
-// MCP tool socket as agent-agnostic, an assumption the codex driver
-// disproved (aiming a harness at the shared bridge is per-harness
-// config). The hook to fix it already exists: writeAutonomousConfig
-// writes a config file and points OPENCODE_CONFIG at it, so an MCP server
-// entry belongs there. Confirm opencode's config schema accepts one
-// before flipping this to true.
+// Capabilities reports MCP tool support: writeAutonomousConfig registers
+// the bridge as a local stdio server in opencode's `mcp` block when the
+// runner exposes a socket.
 func (d *Driver) Capabilities() agent.Capabilities {
-	return agent.Capabilities{MCPTools: false}
+	return agent.Capabilities{MCPTools: true}
 }

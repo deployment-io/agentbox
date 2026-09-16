@@ -239,7 +239,7 @@ Maintained list of agent types consumers can set `AGENT_TYPE` to:
 |---|---|---|---|
 | `claude-code` | `internal/claude` | v1 | yes — `--mcp-config` |
 | `codex` | `internal/codex` | v1 | yes — `mcp_servers.*` via `-c` (no `--mcp-config` flag) |
-| `opencode` | `internal/opencode` | prototype | no — driver never points it at the bridge |
+| `opencode` | `internal/opencode` | prototype | yes — `mcp` block written into its config file |
 
 The MCP-tools column is the same fact each Driver declares via
 `Capabilities()`; the table is for humans, `Capabilities()` is what code
