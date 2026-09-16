@@ -151,18 +151,24 @@ func (d *Driver) BuildArgs(cfg *config.Config) []string {
 }
 
 // mcpConfigJSON builds the inline --mcp-config value that registers the runner's
-// tool channel as a stdio MCP server: this same binary run as
-// `agentbox mcp-bridge <socket>`, which pipes JSON-RPC to the runner. Claude
-// Code accepts a JSON string here (not only a file path). os.Executable
-// resolves the bridge binary, falling back to the image's fixed path.
+// tool channel as a stdio MCP server. Claude Code accepts a JSON string here
+// (not only a file path). The bridge invocation itself comes from
+// agent.BridgeCommand, which all three drivers share.
+//
+// Deliberately built by formatting rather than json.Marshal: this cannot fail,
+// so BuildArgs has no error path on which it might omit --mcp-config and hand
+// back an agent that runs happily with no tools and reports success. A silent
+// capability loss is worse than any malformed-JSON risk formatting carries here,
+// where every value is a filesystem path.
 func mcpConfigJSON(socket string) string {
-	self, err := os.Executable()
-	if err != nil || self == "" {
-		self = "/usr/local/bin/agentbox"
+	command, args := agent.BridgeCommand(socket)
+	quoted := make([]string, len(args))
+	for i, arg := range args {
+		quoted[i] = fmt.Sprintf("%q", arg)
 	}
 	return fmt.Sprintf(
-		`{"mcpServers":{"deployment-io":{"command":%q,"args":["mcp-bridge",%q]}}}`,
-		self, socket,
+		`{"mcpServers":{"deployment-io":{"command":%q,"args":[%s]}}}`,
+		command, strings.Join(quoted, ","),
 	)
 }
 
