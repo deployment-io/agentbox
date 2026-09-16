@@ -165,29 +165,27 @@ func (d *Driver) BuildArgs(cfg *config.Config) []string {
 		//
 		// NOTE: verify against the pinned codex — if -c overrides don't register
 		// MCP servers, write mcp_servers into ~/.codex/config.toml in Ensure.
-		self := agentboxSelfPath()
+		command, bridgeArgs := agent.BridgeCommand(cfg.MCPSocket)
 		args = append(args,
-			"-c", "mcp_servers.deployment_io.command="+jsonValue(self),
-			"-c", "mcp_servers.deployment_io.args=["+jsonValue("mcp-bridge")+","+jsonValue(cfg.MCPSocket)+"]",
+			"-c", "mcp_servers.deployment_io.command="+jsonValue(command),
+			"-c", "mcp_servers.deployment_io.args="+jsonList(bridgeArgs),
 		)
 	}
 	args = append(args, cfg.StepPrompt+"\n\n"+finalMessageInstruction)
 	return args
 }
 
-// agentboxSelfPath resolves this binary's path for the mcp-bridge command,
-// falling back to the image's fixed location.
-func agentboxSelfPath() string {
-	if self, err := os.Executable(); err == nil && self != "" {
-		return self
-	}
-	return "/usr/local/bin/agentbox"
-}
-
 // jsonValue renders v as a JSON literal for a `codex -c key=<value>` override
 // (codex parses the value as JSON, falling back to a bare string).
 func jsonValue(v string) string {
 	b, _ := json.Marshal(v)
+	return string(b)
+}
+
+// jsonList renders vs as a JSON array literal for a `codex -c key=<value>`
+// override.
+func jsonList(vs []string) string {
+	b, _ := json.Marshal(vs)
 	return string(b)
 }
 
