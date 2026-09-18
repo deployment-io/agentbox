@@ -150,3 +150,19 @@ func TestExtract_UnclosedBlockIsNotABlock(t *testing.T) {
 		t.Errorf("Strip should leave an unclosed block alone, got %q", got)
 	}
 }
+
+// The fence marker inside a JSON string value (the agent quoting the block
+// format in an assumption) is mid-line, so it is not a closing fence: the
+// block must end at the real closing fence and parse whole. This was the
+// second production failure on 2026-09-18.
+func TestExtract_FenceMarkerInsideJSONString(t *testing.T) {
+	text := "Below is the spec.\n\n" +
+		block(`{"title":"t","goal":"g","assumptions":["strip is fence-based (` + "```task-spec```" + `); tags need their own pattern"]}`)
+	s, ok := Extract(text)
+	if !ok || s.Title != "t" || len(s.Assumptions) != 1 {
+		t.Fatalf("expected the whole block to parse, got ok=%v %+v", ok, s)
+	}
+	if got := Strip(text); got != "Below is the spec." {
+		t.Errorf("Strip should remove the whole block, got %q", got)
+	}
+}
