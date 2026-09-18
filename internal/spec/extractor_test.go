@@ -108,3 +108,61 @@ func TestStrip_NoBlock(t *testing.T) {
 		t.Errorf("Strip with no block = %q, want unchanged", got)
 	}
 }
+
+// A mid-sentence mention of the fence marker (the agent describing the
+// block format in prose) must not open a block: it would otherwise run
+// to the real block's opening fence and take the spec with it.
+func TestExtract_ProseMentionDoesNotOpenBlock(t *testing.T) {
+	text := "stripTaskSpec is fence-based (```task-spec\nfences), so a tag needs its own pattern.\n\n" +
+		"4. more prose the strip must keep\n\n" +
+		block(`{"title":"real","goal":"the actual spec"}`)
+	s, ok := Extract(text)
+	if !ok || s.Title != "real" {
+		t.Fatalf("expected the real block, got ok=%v %+v", ok, s)
+	}
+	got := Strip(text)
+	if !strings.Contains(got, "fence-based (```task-spec") || !strings.Contains(got, "4. more prose") {
+		t.Errorf("Strip should keep the prose mention and what follows it, got: %q", got)
+	}
+	if strings.Contains(got, "\"goal\"") {
+		t.Errorf("Strip should remove the real block, got: %q", got)
+	}
+}
+
+// An opening fence on its own line that the agent never closed must not
+// claim the closing fence of the real block that follows it.
+func TestExtract_UnclosedEarlierOpeningIgnored(t *testing.T) {
+	text := "```task-spec\n{\"title\":\"abandoned\"\n\nprose\n\n" +
+		block(`{"title":"real","goal":"g"}`)
+	s, ok := Extract(text)
+	if !ok || s.Title != "real" {
+		t.Fatalf("expected the real block, got ok=%v %+v", ok, s)
+	}
+}
+
+// Fences are only fences at the start of a line: an indented or trailing
+// closing marker does not end a block, and a lone opening is not a block.
+func TestExtract_UnclosedBlockIsNotABlock(t *testing.T) {
+	if _, ok := Extract("```task-spec\n{\"title\":\"t\",\"goal\":\"g\"}"); ok {
+		t.Error("expected ok=false for a block with no closing fence")
+	}
+	if got := Strip("prose\n\n```task-spec\n{\"title\":\"t\"}"); got != "prose\n\n```task-spec\n{\"title\":\"t\"}" {
+		t.Errorf("Strip should leave an unclosed block alone, got %q", got)
+	}
+}
+
+// The fence marker inside a JSON string value (the agent quoting the block
+// format in an assumption) is mid-line, so it is not a closing fence: the
+// block must end at the real closing fence and parse whole. This was the
+// second production failure on 2026-09-18.
+func TestExtract_FenceMarkerInsideJSONString(t *testing.T) {
+	text := "Below is the spec.\n\n" +
+		block(`{"title":"t","goal":"g","assumptions":["strip is fence-based (` + "```task-spec```" + `); tags need their own pattern"]}`)
+	s, ok := Extract(text)
+	if !ok || s.Title != "t" || len(s.Assumptions) != 1 {
+		t.Fatalf("expected the whole block to parse, got ok=%v %+v", ok, s)
+	}
+	if got := Strip(text); got != "Below is the spec." {
+		t.Errorf("Strip should remove the whole block, got %q", got)
+	}
+}

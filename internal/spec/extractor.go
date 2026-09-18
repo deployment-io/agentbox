@@ -22,10 +22,54 @@ import (
 // contain backticks).
 const fence = "```"
 
-// specBlockRe matches a fenced ```task-spec ... ``` block and captures
-// its inner body. Dotall so the JSON can span lines; non-greedy so the
-// first closing fence ends a block.
-var specBlockRe = regexp.MustCompile("(?s)" + fence + `task-spec\s*\n(.*?)` + fence)
+// openRe matches an opening ```task-spec fence on a line of its own and
+// closeRe a closing ``` fence on a line of its own. Both are anchored to
+// the start of a line: a fence marker mentioned mid-sentence (the agent
+// describing the block format in prose) must not open a block, or it
+// swallows everything up to the real block's opening fence and the spec
+// is lost — seen in production 2026-09-18.
+var (
+	openRe  = regexp.MustCompile("(?m)^" + fence + `task-spec[ \t]*$`)
+	closeRe = regexp.MustCompile("(?m)^" + fence + `[ \t]*$`)
+)
+
+// span is one fenced block: [start, end) covers both fences; body is the
+// text between them.
+type span struct {
+	start, end int
+	body       string
+}
+
+// blocks returns every well-formed ```task-spec``` block in text, newest
+// first. Openings are paired with the nearest closing fence that follows
+// them, scanning from the last opening backwards so that an earlier
+// unclosed opening (a prose mention at line start, or a block the agent
+// never closed) can neither claim the newest block's closing fence nor
+// mask the block itself. An opening with no closing fence after it is
+// not a block.
+func blocks(text string) []span {
+	opens := openRe.FindAllStringIndex(text, -1)
+	var out []span
+	limit := len(text) // blocks must end before the previously found one starts
+	for i := len(opens) - 1; i >= 0; i-- {
+		o := opens[i]
+		if o[1] >= limit {
+			continue // this opening sits inside a block already claimed
+		}
+		rest := text[o[1]:limit]
+		c := closeRe.FindStringIndex(rest)
+		if c == nil {
+			continue
+		}
+		out = append(out, span{
+			start: o[0],
+			end:   o[1] + c[1],
+			body:  rest[:c[0]],
+		})
+		limit = o[0]
+	}
+	return out
+}
 
 // parsedSpec mirrors the JSON the agent emits inside the block. Field
 // names track the system-prompt schema.
@@ -48,9 +92,8 @@ type parsedSpec struct {
 // scanned newest-first, so the most recent valid spec wins and an older
 // one is used only as a fallback when newer blocks are malformed.
 func Extract(text string) (agent.SpecSnapshot, bool) {
-	matches := specBlockRe.FindAllStringSubmatch(text, -1)
-	for i := len(matches) - 1; i >= 0; i-- {
-		raw := strings.TrimSpace(matches[i][1])
+	for _, b := range blocks(text) {
+		raw := strings.TrimSpace(b.body)
 		var p parsedSpec
 		if err := json.Unmarshal([]byte(raw), &p); err != nil {
 			continue
@@ -81,5 +124,9 @@ func Extract(text string) (agent.SpecSnapshot, bool) {
 // whitespace, leaving the user-facing prose. Used to keep the machine-only
 // spec block out of the rendered chat message.
 func Strip(text string) string {
-	return strings.TrimSpace(specBlockRe.ReplaceAllString(text, ""))
+	// blocks is newest-first, so removing in order keeps earlier offsets valid.
+	for _, b := range blocks(text) {
+		text = text[:b.start] + text[b.end:]
+	}
+	return strings.TrimSpace(text)
 }
