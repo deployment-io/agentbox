@@ -144,7 +144,28 @@ func Annotate(ctx context.Context, vr *result.VerifyResult, opts Options) {
 	// establishing anything.
 	clearBaselineClaims(vr)
 
-	if !vr.Ran || vr.Passed {
+	if !vr.Ran {
+		return
+	}
+	// The prompt asks for per-repo steps only when there is more than one
+	// repository, so a single-repo run — the common case — reports the
+	// legacy rollup alone. That rollup IS the one repository's step; treat
+	// it as such, or single-repo Tasks would never get a baseline at all.
+	if len(vr.Steps) == 0 && !vr.Passed {
+		if step, ok := soleRepoStep(vr, opts); ok {
+			vr.Steps = []result.VerifyStep{step}
+		}
+	}
+	// The rollup is agent-authored too. "passed = every step passed" is the
+	// contract, so enforce it rather than let a rollup that contradicts its
+	// own steps walk a failed step past the gate.
+	for i := range vr.Steps {
+		if !vr.Steps[i].Passed {
+			vr.Passed = false
+			break
+		}
+	}
+	if vr.Passed {
 		return
 	}
 	failed := failedStepIndexes(vr.Steps)
@@ -164,6 +185,31 @@ func Annotate(ctx context.Context, vr *result.VerifyResult, opts Options) {
 		}
 	}
 	vr.PreExisting = preExisting
+}
+
+// soleRepoStep turns a rollup with no per-step detail into the single step
+// it describes, when exactly one repository was checked out at the start of
+// the run. With two or more there is no telling which one the rollup is
+// about, so nothing is synthesised and the gate stays closed.
+func soleRepoStep(vr *result.VerifyResult, opts Options) (result.VerifyStep, bool) {
+	if len(opts.StartCommits) != 1 || strings.TrimSpace(vr.Command) == "" {
+		return result.VerifyStep{}, false
+	}
+	var dir string
+	for d := range opts.StartCommits {
+		dir = d
+	}
+	rel, err := filepath.Rel(filepath.Clean(opts.WorkDir), dir)
+	if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+		return result.VerifyStep{}, false
+	}
+	return result.VerifyStep{
+		Repo:       rel,
+		Command:    vr.Command,
+		Passed:     vr.Passed,
+		StdoutTail: vr.StdoutTail,
+		StderrTail: vr.StderrTail,
+	}, true
 }
 
 // clearBaselineClaims drops every field this package owns, so nothing the

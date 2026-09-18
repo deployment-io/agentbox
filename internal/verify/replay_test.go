@@ -654,3 +654,67 @@ func TestAgentAssertedClaimsAreDiscardedOnEarlyReturns(t *testing.T) {
 		})
 	}
 }
+
+// A single-repo run reports the legacy rollup with no steps — the prompt only
+// asks for steps with more than one repository. That rollup is the one
+// repository's step and must get a baseline like any other, or the common
+// case would be the one case the gate can never open for.
+func TestSingleRepoRollupIsReplayedAsItsOwnStep(t *testing.T) {
+	mustGit(t)
+	workDir := newWorkDir(t)
+	repo, startSHA := newRepo(t, workDir, "0-acme/api", 1) // red before the agent
+
+	vr := &result.VerifyResult{Ran: true, Passed: false, Command: checkCmd, StderrTail: "agent saw it fail"}
+	Annotate(context.Background(), vr, Options{
+		WorkDir:      workDir,
+		StartCommits: map[string]string{repo.dir: startSHA},
+	})
+
+	if len(vr.Steps) != 1 {
+		t.Fatalf("steps = %d, want the rollup synthesised as one step", len(vr.Steps))
+	}
+	s := vr.Steps[0]
+	if s.Repo != "0-acme/api" || s.Command != checkCmd || s.Passed || s.StderrTail != "agent saw it fail" {
+		t.Errorf("synthesised step = %+v", s)
+	}
+	if !s.BaselineRan || s.BaselinePassed || !vr.PreExisting {
+		t.Errorf("baseline not established for the synthesised step: %+v pre_existing=%v", s, vr.PreExisting)
+	}
+}
+
+func TestRollupWithoutStepsIsNotSynthesisedForTwoRepos(t *testing.T) {
+	mustGit(t)
+	workDir := newWorkDir(t)
+	a, aSHA := newRepo(t, workDir, "0-acme/api", 1)
+	b, bSHA := newRepo(t, workDir, "1-acme/web", 1)
+
+	vr := &result.VerifyResult{Ran: true, Passed: false, Command: checkCmd}
+	Annotate(context.Background(), vr, Options{
+		WorkDir:      workDir,
+		StartCommits: map[string]string{a.dir: aSHA, b.dir: bSHA},
+	})
+	if len(vr.Steps) != 0 || vr.PreExisting {
+		t.Errorf("a rollup over two repos names neither; got steps=%+v pre_existing=%v", vr.Steps, vr.PreExisting)
+	}
+}
+
+// The rollup is agent-authored: "passed" with a failed step underneath must
+// not pass the gate. The step wins, and it is replayed like any failure.
+func TestFailedStepOverridesPassingRollup(t *testing.T) {
+	mustGit(t)
+	workDir := newWorkDir(t)
+	repo, startSHA := newRepo(t, workDir, "0-acme/api", 0)
+	repo.writeCheck(1) // the agent's uncommitted change breaks it
+
+	vr := &result.VerifyResult{Ran: true, Passed: true, Command: checkCmd, Steps: []result.VerifyStep{failedStep("0-acme/api")}}
+	Annotate(context.Background(), vr, Options{
+		WorkDir:      workDir,
+		StartCommits: map[string]string{repo.dir: startSHA},
+	})
+	if vr.Passed {
+		t.Error("rollup passed=true survived a failed step")
+	}
+	if !vr.Steps[0].BaselineRan || !vr.Steps[0].BaselinePassed || vr.PreExisting {
+		t.Errorf("the failed step should have been replayed and found new: %+v pre_existing=%v", vr.Steps[0], vr.PreExisting)
+	}
+}

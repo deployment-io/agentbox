@@ -243,7 +243,7 @@ Omitted entirely when the agent reported nothing.
 | `duration_ms` | agent | Wall-clock of the agent's own verification. |
 | `stdout_tail` / `stderr_tail` | agent | Capped tails of the failure output, verbatim. Asked for only when `passed` is false. |
 | `skipped_reason` | agent | One-liner, present only when `ran` is false. |
-| `steps` | agent | Per-repository breakdown; see below. Omitted for a single-repository run. |
+| `steps` | agent | Per-repository breakdown; see below. Omitted by the agent for a single-repository run, in which case agentbox synthesises the one step from the rollup before replaying it. A failed step always forces the rollup `passed` to false. |
 | `pre_existing` | **agentbox** | Whether every failed step also failed on the baseline; see below. |
 
 `command`, `passed` and the tails remain the ROLLUP whether or not `steps` is
