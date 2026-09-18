@@ -357,14 +357,27 @@ func TestLoad_WhitespaceStepPromptRejected(t *testing.T) {
 }
 
 func TestLoad_DefaultWorkDir(t *testing.T) {
-	// If WORK_DIR is unset, code falls back to /work. Since /work won't
-	// exist in the test env, Load should return an error about WORK_DIR.
+	// If WORK_DIR is unset, code falls back to /work. Whether /work exists
+	// depends on where the suite runs: it does not on a developer machine,
+	// and it always does inside a deployment.io Task container (the agent's
+	// working directory is /work), which is where this test used to fail
+	// and take the Task's self-verification down with it. Assert the
+	// default either way rather than assuming the environment.
 	setEnv(t, map[string]string{
 		"STEP_PROMPT":       "do the thing",
 		"ANTHROPIC_API_KEY": "sk-ant-test",
 	})
 
-	_, err := Load()
+	cfg, err := Load()
+	if _, statErr := os.Stat("/work"); statErr == nil {
+		if err != nil {
+			t.Fatalf("/work exists, so Load should succeed with the default: %v", err)
+		}
+		if cfg.WorkDir != "/work" {
+			t.Errorf("WorkDir = %q, want the default /work", cfg.WorkDir)
+		}
+		return
+	}
 	if err == nil {
 		t.Fatal("expected error because default /work doesn't exist in test env")
 	}
