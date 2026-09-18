@@ -16,11 +16,12 @@ import (
 
 // codexFakeIO delivers one user turn then EOF, and captures forwarded output.
 type codexFakeIO struct {
-	msgs     chan agent.UserMessage
-	chunks   []string
-	finals   []string
-	specs    []agent.SpecSnapshot
-	turnEnds int
+	msgs        chan agent.UserMessage
+	chunks      []string
+	finals      []string
+	specs       []agent.SpecSnapshot
+	suggestions []agent.RepoSuggestion
+	turnEnds    int
 }
 
 func (f *codexFakeIO) NextUserMessage(ctx context.Context) (agent.UserMessage, error) {
@@ -45,6 +46,10 @@ func (f *codexFakeIO) ForwardFinal(m agent.AssistantMessage) error {
 }
 func (f *codexFakeIO) ForwardSpecUpdate(s agent.SpecSnapshot) error {
 	f.specs = append(f.specs, s)
+	return nil
+}
+func (f *codexFakeIO) ForwardRepoSuggestion(s agent.RepoSuggestion) error {
+	f.suggestions = append(f.suggestions, s)
 	return nil
 }
 func (f *codexFakeIO) ForwardTurnEnd() error {
