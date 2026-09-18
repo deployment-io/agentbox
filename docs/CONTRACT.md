@@ -171,7 +171,35 @@ Written on exit. Schema:
   "turns": 0,
   "cost_usd": 0.0421,
   "error": "error description",
-  "denied_hosts": ["pypi.org", "files.pythonhosted.org"]
+  "denied_hosts": ["pypi.org", "files.pythonhosted.org"],
+  "pr_title": "Add OAuth login to auth-service",
+  "verify_result": {
+    "ran": true,
+    "passed": false,
+    "command": "go test ./...",
+    "duration_ms": 41230,
+    "stdout_tail": "…",
+    "stderr_tail": "user_test.go:31: want 200, got 500",
+    "skipped_reason": "docs-only change",
+    "pre_existing": true,
+    "steps": [
+      {
+        "repo": "0-acme/api",
+        "command": "go test ./...",
+        "passed": false,
+        "stdout_tail": "…",
+        "stderr_tail": "user_test.go:31: want 200, got 500",
+        "baseline_ran": true,
+        "baseline_passed": false,
+        "baseline_stderr_tail": "user_test.go:31: want 200, got 500"
+      },
+      {
+        "repo": "1-acme/web",
+        "command": "npm test",
+        "passed": true
+      }
+    ]
+  }
 }
 ```
 
@@ -200,6 +228,72 @@ Restrictions](#network-restrictions). Other proxy deny categories
 (IP-literal, non-443 port, non-CONNECT method, private-IP block) are
 intentionally NOT included; those represent agent bugs or
 security-gate violations rather than allowlist gaps.
+
+#### `verify_result`
+
+The agent's own build/test check, run before it declares itself done, plus
+agentbox's comparison of any failure against the state the run started from.
+Omitted entirely when the agent reported nothing.
+
+| Field | Written by | Meaning |
+|---|---|---|
+| `ran` | agent | Whether a verification was run at all. `false` means none was attempted — a docs-only change, no detectable build command — and `skipped_reason` says why. Consumers do **not** gate on a skipped verify. |
+| `passed` | agent | Rollup verdict: true only when every step passed. |
+| `command` | agent | The representative command line. |
+| `duration_ms` | agent | Wall-clock of the agent's own verification. |
+| `stdout_tail` / `stderr_tail` | agent | Capped tails of the failure output, verbatim. Asked for only when `passed` is false. |
+| `skipped_reason` | agent | One-liner, present only when `ran` is false. |
+| `steps` | agent | Per-repository breakdown; see below. Omitted by the agent for a single-repository run, in which case agentbox synthesises the one step from the rollup before replaying it. A failed step always forces the rollup `passed` to false. |
+| `pre_existing` | **agentbox** | Whether every failed step also failed on the baseline; see below. |
+
+`command`, `passed` and the tails remain the ROLLUP whether or not `steps` is
+present, so a consumer written before `steps` existed behaves exactly as it
+did before.
+
+Each entry in `steps` describes one repository's verification:
+
+| Field | Written by | Meaning |
+|---|---|---|
+| `repo` | agent | The repository directory **relative to `WORK_DIR`** as the agent sees it, e.g. `0-acme/api`. |
+| `command` | agent | The command line run for that repository. |
+| `passed` | agent | That repository's verdict. |
+| `stdout_tail` / `stderr_tail` | agent | Capped tails for that repository. |
+| `baseline_ran` | **agentbox** | Whether a baseline comparison was actually carried out. |
+| `baseline_passed` | **agentbox** | Whether the same command passed on the baseline. Meaningful only when `baseline_ran` is true. |
+| `baseline_stderr_tail` | **agentbox** | Output of the baseline run, present when the baseline also failed. |
+
+**Baseline** means *the commit each repository was checked out at when
+agentbox started* — recorded before the agent subprocess is spawned, not read
+back afterwards. It is not the repository's base branch, and it is not HEAD at
+the end of the run: an agent is allowed to commit its own work, so HEAD at the
+end can be entirely the agent's change, and replaying there would reproduce
+the agent's own failure and misreport it as pre-existing.
+
+For every FAILED step, agentbox materialises that commit with `git worktree
+add --detach` under `<WORK_DIR>/.agentbox-tmp`, re-runs the step's command
+there with the agent's environment and caches (plus `GOWORK=off`, and the
+agent's `node_modules` / `.venv` symlinked in rather than reinstalled), and
+records the verdict on the step. The agent's own working tree is never
+touched — no stash, no checkout, and the worktree is removed and pruned
+afterwards. Each replay is bounded by a per-step timeout (10m) and the run as
+a whole by an overall replay budget (30m).
+
+The fields marked **agentbox** above are written by agentbox alone. The
+`<verify>` block is agent-authored JSON, so agentbox discards any value the
+agent supplied for them before replaying — an agent cannot assert its own
+failure is pre-existing.
+
+`pre_existing` is true only when EVERY failed step reported `baseline_ran:
+true` and `baseline_passed: false` — i.e. the run inherited all of its
+failures rather than introducing any. It is failure-closed: a step with no
+recorded start commit, an unresolvable `repo` path, a commit that is no longer
+reachable, or a replay that errored or timed out reports `baseline_ran: false`
+and prevents `pre_existing` from being set. Passing steps are never replayed,
+and the whole pass only runs when `status` is `success`.
+
+Consumers are expected to gate a commit / push on `ran && !passed &&
+!pre_existing`, and to surface a pre-existing failure to the user instead of
+discarding the run's work.
 
 To read the result file from the host, bind-mount a path and point
 `RESULT_PATH` at it, or `docker cp` the default path after exit.

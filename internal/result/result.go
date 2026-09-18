@@ -132,6 +132,11 @@ type TokenUsage struct {
 // which case SkippedReason carries a one-liner. When Ran is true, Passed
 // reflects the verify command's exit status and the *Tail fields carry
 // the (capped) command output for debugging and Re-run-with-feedback.
+// A multi-repository run verifies once per repository, so the single
+// Command/Passed pair can only ever describe one of them. Steps carries the
+// per-repository detail; the top-level fields remain the ROLLUP (the command
+// the agent considers representative, and passed = every step passed) so a
+// consumer that predates Steps behaves exactly as it did before.
 type VerifyResult struct {
 	Ran           bool   `json:"ran"`
 	Passed        bool   `json:"passed"`
@@ -140,6 +145,46 @@ type VerifyResult struct {
 	StdoutTail    string `json:"stdout_tail,omitempty"`
 	StderrTail    string `json:"stderr_tail,omitempty"`
 	SkippedReason string `json:"skipped_reason,omitempty"`
+
+	// Steps is the per-repository breakdown, reported by the agent in its
+	// <verify> trailer. Omitted by agents (and older prompts) that report a
+	// single rollup only.
+	Steps []VerifyStep `json:"steps,omitempty"`
+
+	// PreExisting is set by agentbox — never by the agent — after replaying
+	// every failed step on the commit each repository was checked out at
+	// when agentbox started. True only when EVERY failed step also failed on
+	// that baseline, i.e. the run did not introduce the failure. The runner
+	// uses it to push and open the PR anyway instead of discarding the work,
+	// surfacing the failure in the job log and PR body instead.
+	//
+	// A step whose baseline could not be established (BaselineRan false)
+	// never contributes, so an unknown baseline keeps the gate closed.
+	PreExisting bool `json:"pre_existing,omitempty"`
+}
+
+// VerifyStep is one repository's verification within a run: what was run,
+// whether it passed, and — for a failure — whether the same command also
+// failed on the repository's start-of-run commit.
+//
+// The baseline fields are populated by agentbox's replay, not by the agent.
+// BaselineRan false means no baseline could be established (no recorded start
+// commit, an unresolvable repo path, a worktree that could not be created, a
+// replay that errored, or one that hit a timeout) and is deliberately
+// indistinguishable from "we don't know" — the consumer must treat it as a
+// genuine failure.
+type VerifyStep struct {
+	// Repo is the repository directory relative to WORK_DIR as the agent
+	// sees it, e.g. "0-acme/api".
+	Repo       string `json:"repo,omitempty"`
+	Command    string `json:"command,omitempty"`
+	Passed     bool   `json:"passed"`
+	StdoutTail string `json:"stdout_tail,omitempty"`
+	StderrTail string `json:"stderr_tail,omitempty"`
+
+	BaselineRan        bool   `json:"baseline_ran,omitempty"`
+	BaselinePassed     bool   `json:"baseline_passed,omitempty"`
+	BaselineStderrTail string `json:"baseline_stderr_tail,omitempty"`
 }
 
 // Path returns the destination for result.json — $RESULT_PATH or the

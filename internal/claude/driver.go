@@ -45,6 +45,13 @@ const agentType = "claude-code"
 // example is enough; the structure carries the rest — the failing-verify
 // case is the one exception, and it earns its second example.
 //
+// The multi-repo "steps" form earns the third. A single rollup cannot say
+// WHICH repository failed, and without that agentbox cannot replay the
+// failing command on that repository's start-of-run commit — which is the
+// only way to tell a failure this run introduced from one it inherited.
+// Absent steps, every failing verify is treated as new and the Step's work
+// is discarded.
+//
 // stderr_tail is asked for ONLY when passed is false, so the common path
 // costs nothing extra. Without it a failed Step reported just the command
 // it ran — "agent self-verification failed: go build ./... && go vet
@@ -67,6 +74,12 @@ Final-message format. Your final assistant message must contain, at the very end
 
    <verify>{"ran":true,"passed":true,"command":"go build ./... && go vet ./..."}</verify>
    <verify>{"ran":true,"passed":false,"command":"go test ./...","stderr_tail":"pkg/auth/token.go:42:9: undefined: ParseJWT"}</verify>
+
+   With more than one repository, add "steps" — one per repo, "repo" being its directory relative to the work dir — and keep the top-level fields as the rollup (passed = every step passed):
+
+   <verify>{"ran":true,"passed":false,"command":"go test ./...","steps":[{"repo":"0-acme/api","command":"go test ./...","passed":false,"stderr_tail":"user_test.go:31: want 200, got 500"},{"repo":"1-acme/web","command":"npm test","passed":true}]}</verify>
+
+   A failed verify blocks the commit and push, so fix what you can first.
 
 3. A short PR title (≤72 chars, imperative mood, one line) wrapped in <pr_title>...</pr_title>. Example:
 
