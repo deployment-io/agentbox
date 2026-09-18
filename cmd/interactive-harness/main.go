@@ -45,7 +45,13 @@ Only emit a task-spec once the user has expressed intent to change the code; nev
 {"title":"...","goal":"...","context":"...","acceptance_criteria":["..."],"assumptions":["..."],"out_of_scope":["..."],"complexity":"low|medium|high","readiness":"vague|partial|ready","readiness_notes":"..."}
 ` + "```" + `
 
-Set readiness to "ready" only when the goal, acceptance criteria, and file scope are concrete. Set complexity to the model tier the EXECUTION task needs: "low" = trivial/one-file change, "medium" = a few files with some logic, "high" = multi-file work, refactors, tests, or tricky logic. It's a hint for choosing the execution model; the user can override.`
+Set readiness to "ready" only when the goal, acceptance criteria, and file scope are concrete. Set complexity to the model tier the EXECUTION task needs: "low" = trivial/one-file change, "medium" = a few files with some logic, "high" = multi-file work, refactors, tests, or tricky logic. It's a hint for choosing the execution model; the user can override.
+
+If investigating or implementing the outcome genuinely needs a repository that is NOT checked out under /work, suggest it — emit at most ONE <repo-suggestion> block per message, at the end. Only name repositories you found in the pre-built context at /work/context (start from index.md); never guess a name, and if there is no /work/context, never suggest anything. Suggest only what the work actually requires — never out of curiosity, and never a repository already checked out under /work. Block format:
+
+<repo-suggestion>
+{"repositories":[{"name":"org/repo","reason":"one line on why the outcome needs it","confidence":"high|medium|low"}]}
+</repo-suggestion>`
 
 func main() {
 	agentboxBin := flag.String("agentbox", "", "path to the built agentbox binary (required)")

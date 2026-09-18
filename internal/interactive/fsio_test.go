@@ -140,6 +140,69 @@ func TestFSIO_SpecAndHeartbeat(t *testing.T) {
 	}
 }
 
+// The suggestion file is overwritten in place, latest wins, and is never
+// cleared — a turn that suggests nothing simply doesn't call this.
+func TestFSIO_RepoSuggestionOverwrites(t *testing.T) {
+	f, _ := New(t.TempDir())
+
+	// Nothing is written until the agent actually suggests something, so a
+	// consumer polling the path sees no file (and logs no noise) until then.
+	if _, err := os.Stat(f.suggestionPath); !os.IsNotExist(err) {
+		t.Fatalf("suggestion file should not exist before the first forward: %v", err)
+	}
+
+	first := agent.RepoSuggestion{Repositories: []agent.SuggestedRepo{
+		{Name: "owner/a", Reason: "needed for the model", Confidence: "high"},
+		{Name: "owner/b"},
+	}}
+	if err := f.ForwardRepoSuggestion(first); err != nil {
+		t.Fatal(err)
+	}
+	rec := readSuggestion(t, f.suggestionPath)
+	if len(rec.Repositories) != 2 || rec.Repositories[0].Name != "owner/a" ||
+		rec.Repositories[0].Reason != "needed for the model" || rec.Repositories[0].Confidence != "high" {
+		t.Fatalf("suggestion = %+v", rec)
+	}
+	if rec.Repositories[1].Name != "owner/b" || rec.Repositories[1].Reason != "" {
+		t.Errorf("second entry = %+v", rec.Repositories[1])
+	}
+
+	// A later suggestion replaces the file wholesale — no merge, no append.
+	if err := f.ForwardRepoSuggestion(agent.RepoSuggestion{
+		Repositories: []agent.SuggestedRepo{{Name: "owner/c", Confidence: "low"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rec = readSuggestion(t, f.suggestionPath)
+	if len(rec.Repositories) != 1 || rec.Repositories[0].Name != "owner/c" {
+		t.Errorf("latest suggestion should have replaced the file: %+v", rec)
+	}
+
+	// No stray temp files survive the atomic writes.
+	entries, err := os.ReadDir(filepath.Dir(f.suggestionPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".tmp") {
+			t.Errorf("temp file left behind: %s", e.Name())
+		}
+	}
+}
+
+func readSuggestion(t *testing.T, path string) repoSuggestionRecord {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("suggestion file: %v", err)
+	}
+	var rec repoSuggestionRecord
+	if err := json.Unmarshal(b, &rec); err != nil {
+		t.Fatalf("suggestion json: %v", err)
+	}
+	return rec
+}
+
 // TestWriteJSONAtomic_ConcurrentSamePath hammers one path from many
 // goroutines. With a shared "<path>.tmp" name this races — writers clobber the
 // single temp file and a rename hits ENOENT after another renamed it away — so

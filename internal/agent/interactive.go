@@ -80,6 +80,12 @@ type InteractiveSink interface {
 	// message. Called only when the message carried a valid spec block.
 	ForwardSpecUpdate(spec SpecSnapshot) error
 
+	// ForwardRepoSuggestion delivers the repositories the agent suggested
+	// adding to the session. Called only when the message carried a valid
+	// repo-suggestion block; latest wins and a suggestion is never cleared, so
+	// a message without one leaves the previous suggestion standing.
+	ForwardRepoSuggestion(suggestion RepoSuggestion) error
+
 	// ForwardTurnEnd signals that the agent finished its turn and is now
 	// blocked waiting for the next user message. Sent after the turn's last
 	// ForwardFinal (Claude Code's end-of-turn "result" event, Codex's
@@ -161,6 +167,23 @@ type SpecSnapshot struct {
 	Complexity string
 	// Raw is the verbatim JSON payload of the block, for storage/audit.
 	Raw string
+}
+
+// RepoSuggestion is the set of repositories the agent suggested adding to the
+// session, parsed from a <repo-suggestion> block in its output. Held here as a
+// pass-through DTO; parsing lives in internal/reposuggestion.
+type RepoSuggestion struct {
+	Repositories []SuggestedRepo
+}
+
+// SuggestedRepo is one suggested repository. It is DISPLAY DATA: Name is a
+// lookup key the consumer resolves against the org's repository list, and the
+// clone URL / provider / branch of an accepted suggestion come from that
+// resolved repository, never from the agent's block.
+type SuggestedRepo struct {
+	Name       string
+	Reason     string
+	Confidence string // "high" | "medium" | "low"
 }
 
 // SessionState is the periodic liveness snapshot passed to Heartbeat.

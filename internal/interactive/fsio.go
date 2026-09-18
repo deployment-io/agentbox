@@ -9,6 +9,7 @@
 //	.agentbox-input/messages/<name>.json    user turns (consumed in name order)
 //	.agentbox-output/messages/<seq>.json    assistant chunks + finals (seq order)
 //	.agentbox-output/task-spec.json         latest extracted spec (overwritten)
+//	.agentbox-output/repo-suggestion.json   latest repo suggestion (overwritten)
 //	.agentbox-output/heartbeat.json         latest liveness snapshot (overwritten)
 //
 // Both sides write atomically (temp file + rename) so the reader never
@@ -36,12 +37,13 @@ const defaultPollInterval = 500 * time.Millisecond
 
 // FSIO is the filesystem implementation of agent.InteractiveIO.
 type FSIO struct {
-	inputDir  string
-	outputDir string
-	specPath  string
-	hbPath    string
-	poll      time.Duration
-	seq       atomic.Int64
+	inputDir       string
+	outputDir      string
+	specPath       string
+	suggestionPath string
+	hbPath         string
+	poll           time.Duration
+	seq            atomic.Int64
 }
 
 // New creates the input/output directories under workDir and returns an
@@ -49,11 +51,12 @@ type FSIO struct {
 func New(workDir string) (*FSIO, error) {
 	outBase := filepath.Join(workDir, ".agentbox-output")
 	f := &FSIO{
-		inputDir:  filepath.Join(workDir, ".agentbox-input", "messages"),
-		outputDir: filepath.Join(outBase, "messages"),
-		specPath:  filepath.Join(outBase, "task-spec.json"),
-		hbPath:    filepath.Join(outBase, "heartbeat.json"),
-		poll:      defaultPollInterval,
+		inputDir:       filepath.Join(workDir, ".agentbox-input", "messages"),
+		outputDir:      filepath.Join(outBase, "messages"),
+		specPath:       filepath.Join(outBase, "task-spec.json"),
+		suggestionPath: filepath.Join(outBase, "repo-suggestion.json"),
+		hbPath:         filepath.Join(outBase, "heartbeat.json"),
+		poll:           defaultPollInterval,
 	}
 	if err := os.MkdirAll(f.inputDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create input dir: %w", err)
@@ -209,6 +212,28 @@ func (f *FSIO) ForwardSpecUpdate(s agent.SpecSnapshot) error {
 		Complexity:  s.Complexity,
 		Raw:         s.Raw,
 	})
+}
+
+type repoSuggestionRecord struct {
+	Repositories []suggestedRepoRecord `json:"repositories"`
+}
+
+type suggestedRepoRecord struct {
+	Name       string `json:"name"`
+	Reason     string `json:"reason,omitempty"`
+	Confidence string `json:"confidence,omitempty"`
+}
+
+// ForwardRepoSuggestion overwrites the latest-suggestion file, the same way
+// ForwardSpecUpdate overwrites the spec: latest wins and the file is never
+// cleared, so a turn that suggests nothing leaves the last suggestion standing
+// for the consumer to age out on its own terms.
+func (f *FSIO) ForwardRepoSuggestion(s agent.RepoSuggestion) error {
+	repos := make([]suggestedRepoRecord, 0, len(s.Repositories))
+	for _, r := range s.Repositories {
+		repos = append(repos, suggestedRepoRecord{Name: r.Name, Reason: r.Reason, Confidence: r.Confidence})
+	}
+	return writeJSONAtomic(f.suggestionPath, repoSuggestionRecord{Repositories: repos})
 }
 
 type heartbeatRecord struct {

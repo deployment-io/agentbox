@@ -10,6 +10,7 @@ import (
 
 	"github.com/deployment-io/agentbox/internal/agent"
 	"github.com/deployment-io/agentbox/internal/config"
+	"github.com/deployment-io/agentbox/internal/reposuggestion"
 	"github.com/deployment-io/agentbox/internal/spec"
 )
 
@@ -317,14 +318,18 @@ func (r *rpcReader) runTurn(out agent.InteractiveSink) error {
 	}
 }
 
-// finalizeMessage forwards one completed agent message: any task-spec it
-// carries, then the user-visible text — as a chunk if it wasn't already
-// streamed via deltas — and the final.
+// finalizeMessage forwards one completed agent message: any task-spec and
+// repo-suggestion it carries, then the user-visible text — as a chunk if it
+// wasn't already streamed via deltas — and the final. Both blocks are stripped
+// from the display text; a message can carry either, both, or neither.
 func (r *rpcReader) finalizeMessage(out agent.InteractiveSink, text string, streamed bool) {
 	if s, ok := spec.Extract(text); ok {
 		_ = out.ForwardSpecUpdate(s)
 	}
-	display := spec.Strip(text)
+	if rs, ok := reposuggestion.Extract(text); ok {
+		_ = out.ForwardRepoSuggestion(rs)
+	}
+	display := reposuggestion.Strip(spec.Strip(text))
 	if display == "" {
 		return
 	}

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/deployment-io/agentbox/internal/agent"
+	"github.com/deployment-io/agentbox/internal/reposuggestion"
 	"github.com/deployment-io/agentbox/internal/spec"
 )
 
@@ -13,8 +14,9 @@ import (
 // forwards structured updates to a sink: assistant text (streamed
 // token-by-token when partial-message deltas are present, otherwise one
 // chunk per completed message), the completed message per turn, and any
-// ```task-spec``` block. Tool-use, tool-result, thinking, and init events
-// are not chat-visible; the container's human log surfaces those.
+// ```task-spec``` or <repo-suggestion> block. Tool-use, tool-result,
+// thinking, and init events are not chat-visible; the container's human log
+// surfaces those.
 //
 // handleLine is called from the session's single stdout-reader goroutine,
 // so the forwarder needs no internal locking.
@@ -79,9 +81,10 @@ func (f *chunkForwarder) handleLine(line []byte) {
 }
 
 // handleAssistant processes a completed assistant message: forwards any
-// task-spec block, then the user-visible text (as one chunk if it wasn't
-// already streamed via partial deltas) and the turn-final message. The spec
-// block is parsed from the full text but stripped from the chat text.
+// task-spec and repo-suggestion block, then the user-visible text (as one chunk
+// if it wasn't already streamed via partial deltas) and the turn-final message.
+// Both blocks are parsed from the full text but stripped from the chat text; a
+// message can carry either, both, or neither.
 func (f *chunkForwarder) handleAssistant(raw json.RawMessage) {
 	full := assistantText(raw)
 	streamed := f.streamedThisMsg
@@ -90,10 +93,13 @@ func (f *chunkForwarder) handleAssistant(raw json.RawMessage) {
 	if s, ok := spec.Extract(full); ok {
 		_ = f.sink.ForwardSpecUpdate(s)
 	}
+	if rs, ok := reposuggestion.Extract(full); ok {
+		_ = f.sink.ForwardRepoSuggestion(rs)
+	}
 
-	display := spec.Strip(full)
+	display := reposuggestion.Strip(spec.Strip(full))
 	if display == "" {
-		return // nothing user-visible (e.g. a tool-only or spec-only message)
+		return // nothing user-visible (e.g. a tool-only or block-only message)
 	}
 	if !streamed {
 		_ = f.sink.ForwardChunk(agent.AssistantChunk{Text: display})

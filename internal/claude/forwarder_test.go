@@ -9,10 +9,11 @@ import (
 )
 
 type captureSink struct {
-	chunks   []string
-	finals   []string
-	specs    []agent.SpecSnapshot
-	turnEnds int
+	chunks      []string
+	finals      []string
+	specs       []agent.SpecSnapshot
+	suggestions []agent.RepoSuggestion
+	turnEnds    int
 }
 
 func (s *captureSink) ForwardChunk(c agent.AssistantChunk) error {
@@ -25,6 +26,10 @@ func (s *captureSink) ForwardFinal(m agent.AssistantMessage) error {
 }
 func (s *captureSink) ForwardSpecUpdate(sp agent.SpecSnapshot) error {
 	s.specs = append(s.specs, sp)
+	return nil
+}
+func (s *captureSink) ForwardRepoSuggestion(rs agent.RepoSuggestion) error {
+	s.suggestions = append(s.suggestions, rs)
 	return nil
 }
 func (s *captureSink) ForwardTurnEnd() error {
@@ -86,6 +91,60 @@ func TestForwarder_StripsSpecBlock(t *testing.T) {
 	}
 	if !strings.Contains(sink.finals[0], "Here is the plan.") {
 		t.Errorf("final should keep prose: %v", sink.finals)
+	}
+}
+
+// A single assistant message carrying BOTH machine-only blocks forwards both
+// payloads and produces display text with neither.
+func TestForwarder_StripsBothBlocks(t *testing.T) {
+	sink := &captureSink{}
+	fwd := newChunkForwarder(sink)
+	text := "Here is the plan.\n\n```task-spec\n{\"title\":\"T\",\"goal\":\"G\"}\n```\n\n" +
+		"<repo-suggestion>\n" +
+		`{"repositories":[{"name":"deployment-io/kit","reason":"the Session model lives here","confidence":"high"}]}` +
+		"\n</repo-suggestion>"
+	fwd.handleLine([]byte(assistantLine(text)))
+
+	if len(sink.specs) != 1 || sink.specs[0].Goal != "G" {
+		t.Errorf("specs = %v, want one with goal G", sink.specs)
+	}
+	if len(sink.suggestions) != 1 || len(sink.suggestions[0].Repositories) != 1 {
+		t.Fatalf("suggestions = %+v, want one naming a repository", sink.suggestions)
+	}
+	r := sink.suggestions[0].Repositories[0]
+	if r.Name != "deployment-io/kit" || r.Reason != "the Session model lives here" || r.Confidence != "high" {
+		t.Errorf("suggested repo = %+v", r)
+	}
+	if len(sink.finals) != 1 || sink.finals[0] != "Here is the plan." {
+		t.Errorf("display text should be the prose alone: %v", sink.finals)
+	}
+}
+
+// A suggestion-only message forwards the suggestion and no chat text, matching
+// how a spec-only message already behaves.
+func TestForwarder_SuggestionOnlyMessage(t *testing.T) {
+	sink := &captureSink{}
+	fwd := newChunkForwarder(sink)
+	fwd.handleLine([]byte(assistantLine("<repo-suggestion>\n" +
+		`{"repositories":[{"name":"owner/repo","reason":"needed"}]}` + "\n</repo-suggestion>")))
+
+	if len(sink.suggestions) != 1 {
+		t.Fatalf("suggestions = %+v, want 1", sink.suggestions)
+	}
+	if len(sink.chunks) != 0 || len(sink.finals) != 0 {
+		t.Errorf("a suggestion-only message must forward no chat text: chunks=%v finals=%v", sink.chunks, sink.finals)
+	}
+}
+
+// The task-spec path is untouched by the new block: a message with only a spec
+// forwards no suggestion.
+func TestForwarder_SpecOnlyForwardsNoSuggestion(t *testing.T) {
+	sink := &captureSink{}
+	fwd := newChunkForwarder(sink)
+	fwd.handleLine([]byte(assistantLine("Plan.\n\n```task-spec\n{\"title\":\"T\",\"goal\":\"G\"}\n```")))
+
+	if len(sink.specs) != 1 || len(sink.suggestions) != 0 {
+		t.Errorf("specs = %v, suggestions = %+v", sink.specs, sink.suggestions)
 	}
 }
 

@@ -52,8 +52,9 @@ func (f *fakeIO) heartbeats() int {
 
 func (f *fakeIO) ForwardChunk(AssistantChunk) error    { return nil }
 func (f *fakeIO) ForwardFinal(AssistantMessage) error  { return nil }
-func (f *fakeIO) ForwardSpecUpdate(SpecSnapshot) error { return nil }
-func (f *fakeIO) ForwardTurnEnd() error                { return nil }
+func (f *fakeIO) ForwardSpecUpdate(SpecSnapshot) error       { return nil }
+func (f *fakeIO) ForwardRepoSuggestion(RepoSuggestion) error { return nil }
+func (f *fakeIO) ForwardTurnEnd() error                      { return nil }
 
 // recordWriteCloser captures everything written and tracks Close.
 type recordWriteCloser struct {
