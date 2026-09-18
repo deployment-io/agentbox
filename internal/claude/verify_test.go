@@ -88,3 +88,12 @@ func TestFinalMessageInstructionAsksForFailureOutput(t *testing.T) {
 		t.Error("the tail must be scoped to the failing case")
 	}
 }
+
+// A single rollup can't say WHICH repository failed, and without that
+// agentbox has nothing to replay on that repository's start-of-run commit —
+// so every failing verify in a multi-repo Task is treated as new and the
+// Step's work is discarded. The prompt has to ask for the per-repo form, or
+// the baseline machinery never gets an input.
+func TestFinalMessageInstructionAsksForMultiRepoSteps(t *testing.T) {
+	assertStepsFormRequested(t, finalMessageInstruction)
+}

@@ -36,6 +36,12 @@ Final-message format. Your final message must contain, at the very end:
 
    <verify>{"ran":true,"passed":true,"command":"go build ./... && go vet ./..."}</verify>
 
+   With more than one repository, add "steps" — one per repo, "repo" being its directory relative to the work dir — and keep the top-level fields as the rollup (passed = every step passed):
+
+   <verify>{"ran":true,"passed":false,"command":"go test ./...","steps":[{"repo":"0-acme/api","command":"go test ./...","passed":false,"stderr_tail":"user_test.go:31: want 200, got 500"},{"repo":"1-acme/web","command":"npm test","passed":true}]}</verify>
+
+   A failed verify blocks the commit and push, so fix what you can first.
+
 3. A short PR title (≤72 chars, imperative mood, one line) wrapped in <pr_title>...</pr_title>. Example:
 
    <pr_title>Add OAuth login to auth-service</pr_title>

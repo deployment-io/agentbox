@@ -18,6 +18,7 @@ import (
 	"github.com/deployment-io/agentbox/internal/config"
 	"github.com/deployment-io/agentbox/internal/progress"
 	"github.com/deployment-io/agentbox/internal/result"
+	"github.com/deployment-io/agentbox/internal/verify"
 )
 
 // parserProgressSource adapts an OutputParser into a progress.Source.
@@ -66,6 +67,11 @@ func Run(ctx context.Context, cfg *config.Config, driver Driver) (outcome result
 	// the /work root (its cwd). Agent-agnostic; every batch driver folds
 	// cfg.StepPrompt into its args. No-op when there are no repositories.
 	cfg.StepPrompt = anchorPromptToRepos(cfg.StepPrompt, cfg.WorkDir)
+
+	// Snapshot each repository's commit BEFORE the agent can move it. This is
+	// the baseline a failed verify is replayed against — see
+	// recordStartCommits for why HEAD at the end of the run is not one.
+	startCommits := recordStartCommits(cfg.WorkDir)
 
 	cmd := exec.Command(driver.Binary(), driver.BuildArgs(cfg)...)
 	cmd.Dir = cfg.WorkDir
@@ -173,7 +179,9 @@ func Run(ctx context.Context, cfg *config.Config, driver Driver) (outcome result
 				fmt.Fprintf(os.Stderr, "[agentbox] %s\n", mem)
 			}
 		}
-		return buildOutcome(err, parser.State(), stderrBuf.String(), driver.Binary())
+		oc := buildOutcome(err, parser.State(), stderrBuf.String(), driver.Binary())
+		annotateVerifyBaseline(ctx, cfg, startCommits, &oc)
+		return oc
 	case <-ctx.Done():
 		return gracefulShutdown(cmd, done, parser, reasonSignal, "")
 	case <-timeoutReached:
@@ -185,6 +193,25 @@ func Run(ctx context.Context, cfg *config.Config, driver Driver) (outcome result
 		fmt.Fprintf(os.Stderr, "[agentbox] %s\n", detail)
 		return gracefulShutdown(cmd, done, parser, reasonLimit, detail)
 	}
+}
+
+// annotateVerifyBaseline replays each failed verification step on the commit
+// its repository was checked out at when the run began, so the consumer can
+// tell a failure this run introduced from one it inherited.
+//
+// Only on the SUCCESS path: the runner's verify gate is unreachable when the
+// status is anything else, so replaying there would spend minutes producing
+// a field nobody reads. The replay honours ctx, so a SIGTERM arriving during
+// it aborts promptly instead of extending shutdown by the step timeout.
+func annotateVerifyBaseline(ctx context.Context, cfg *config.Config, startCommits map[string]string, oc *result.Outcome) {
+	if oc.Status != result.StatusSuccess || oc.VerifyResult == nil {
+		return
+	}
+	verify.Annotate(ctx, oc.VerifyResult, verify.Options{
+		WorkDir:      cfg.WorkDir,
+		StartCommits: startCommits,
+		Log:          os.Stderr,
+	})
 }
 
 // agentboxInputEnv are env vars that form agentbox's OWN input contract

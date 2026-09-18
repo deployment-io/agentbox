@@ -44,6 +44,7 @@ internal/
 │   └── parser.go      #   Stream-json OutputParser
 ├── config/            # Env var loading + validation
 ├── result/            # /result.json schema + writer
+├── verify/            # Baseline replay of a failed verify (agent-agnostic)
 └── signals/           # SIGTERM/SIGINT → context cancellation
 ```
 
