@@ -14,6 +14,7 @@ import (
 
 	"github.com/deployment-io/agentbox/internal/agent"
 	"github.com/deployment-io/agentbox/internal/config"
+	"github.com/deployment-io/agentbox/internal/review"
 )
 
 // rawStreamLogPath is the in-container path that captures Claude Code's
@@ -87,6 +88,18 @@ Final-message format. Your final assistant message must contain, at the very end
 
 Emit <verify> and <pr_title> only here, at the very end.`
 
+// trailingInstruction picks which contract this run is held to. A REVIEW run
+// is asked for a <review> trailer and is NOT asked for the implementer's
+// <verify> or <pr_title> — it changes nothing, so a verification result would
+// be a claim about someone else's work and a PR title would be a review
+// naming the change it reviewed.
+func trailingInstruction(cfg *config.Config) string {
+	if cfg.Mode == config.ModeReview {
+		return review.Instruction(cfg.ReviewPasses)
+	}
+	return finalMessageInstruction
+}
+
 func init() {
 	agent.Register(agentType, NewDriver)
 }
@@ -142,7 +155,7 @@ func (d *Driver) BuildArgs(cfg *config.Config) []string {
 	// Claude Code rejects --output-format=stream-json + -p without --verbose.
 	args := []string{
 		"-p", cfg.StepPrompt,
-		"--append-system-prompt", finalMessageInstruction,
+		"--append-system-prompt", trailingInstruction(cfg),
 		"--output-format", "stream-json",
 		"--verbose",
 		"--dangerously-skip-permissions",

@@ -107,6 +107,10 @@ type Outcome struct {
 	// PLAN_tasks_verification.md.
 	VerifyResult *VerifyResult `json:"verify_result,omitempty"`
 
+	// ReviewResult is what a review-mode run found. Nil for every other
+	// mode, and for a review that produced no parseable trailer.
+	ReviewResult *ReviewResult `json:"review_result,omitempty"`
+
 	// ExitCode is the classified exit code (see Exit* constants:
 	// 0 success, 1 generic execution failure, 2 auth/rate-limit,
 	// 3 cancelled, 4 timeout). agentbox's process exits with this

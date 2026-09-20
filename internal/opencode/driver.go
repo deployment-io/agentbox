@@ -28,6 +28,7 @@ import (
 
 	"github.com/deployment-io/agentbox/internal/agent"
 	"github.com/deployment-io/agentbox/internal/config"
+	"github.com/deployment-io/agentbox/internal/review"
 )
 
 const agentType = "opencode"
@@ -279,8 +280,18 @@ func (d *Driver) BuildArgs(cfg *config.Config) []string {
 	if cfg.Model != "" {
 		args = append(args, "--model", cfg.Model)
 	}
-	args = append(args, cfg.StepPrompt+"\n\n"+finalMessageInstruction)
+	args = append(args, cfg.StepPrompt+"\n\n"+trailingInstruction(cfg))
 	return args
+}
+
+// trailingInstruction picks which contract this run is held to — see the
+// claude driver's copy. In review mode the implementer's instruction is not
+// appended, so no <verify> or <pr_title> trailer is requested or produced.
+func trailingInstruction(cfg *config.Config) string {
+	if cfg.Mode == config.ModeReview {
+		return review.Instruction(cfg.ReviewPasses)
+	}
+	return finalMessageInstruction
 }
 
 func (d *Driver) DetectVersion() string {

@@ -18,6 +18,7 @@ import (
 	"github.com/deployment-io/agentbox/internal/config"
 	"github.com/deployment-io/agentbox/internal/progress"
 	"github.com/deployment-io/agentbox/internal/result"
+	"github.com/deployment-io/agentbox/internal/review"
 	"github.com/deployment-io/agentbox/internal/verify"
 )
 
@@ -63,10 +64,23 @@ const (
 func Run(ctx context.Context, cfg *config.Config, driver Driver) (outcome result.Outcome) {
 	agentVersion := driver.DetectVersion()
 
-	// Steer the agent to write inside the checked-out repo subdirs rather than
-	// the /work root (its cwd). Agent-agnostic; every batch driver folds
-	// cfg.StepPrompt into its args. No-op when there are no repositories.
-	cfg.StepPrompt = anchorPromptToRepos(cfg.StepPrompt, cfg.WorkDir)
+	// Review mode's work item is the diff, not a prompt someone handed us: it
+	// is computed here, before anything else, because the cost gate can decide
+	// that no pass is worth running and that answer needs no agent at all.
+	var reviewPlan review.Plan
+	if cfg.Mode == config.ModeReview {
+		reviewPlan = review.Build(cfg)
+		if reviewPlan.NothingToReview() {
+			return skippedReviewOutcome(cfg, agentVersion, reviewPlan)
+		}
+		cfg.StepPrompt = reviewPlan.Prompt
+	} else {
+		// Steer the agent to write inside the checked-out repo subdirs rather
+		// than the /work root (its cwd). Agent-agnostic; every batch driver
+		// folds cfg.StepPrompt into its args. No-op when there are no
+		// repositories — and meaningless for a review, which writes nothing.
+		cfg.StepPrompt = anchorPromptToRepos(cfg.StepPrompt, cfg.WorkDir)
+	}
 
 	// Snapshot each repository's commit BEFORE the agent can move it. This is
 	// the baseline a failed verify is replayed against — see
@@ -180,6 +194,10 @@ func Run(ctx context.Context, cfg *config.Config, driver Driver) (outcome result
 			}
 		}
 		oc := buildOutcome(err, parser.State(), stderrBuf.String(), driver.Binary())
+		if cfg.Mode == config.ModeReview {
+			liftReview(&oc, reviewPlan)
+			return oc
+		}
 		annotateVerifyBaseline(ctx, cfg, startCommits, &oc)
 		return oc
 	case <-ctx.Done():
@@ -192,6 +210,58 @@ func Run(ctx context.Context, cfg *config.Config, driver Driver) (outcome result
 		detail := msg + "; subprocess killed"
 		fmt.Fprintf(os.Stderr, "[agentbox] %s\n", detail)
 		return gracefulShutdown(cmd, done, parser, reasonLimit, detail)
+	}
+}
+
+// liftReview moves the agent's <review> trailer out of its final message and
+// into the outcome, and puts the stripped message back as the changes summary.
+//
+// Stripping is not optional and is not conditional on the trailer parsing: the
+// block is machine payload, and changes_summary is rendered verbatim into a
+// pull-request body. A malformed block that leaked there would show a reviewer
+// raw JSON where the review's prose should be.
+func liftReview(oc *result.Outcome, plan review.Plan) {
+	reviewResult, stripped := review.LiftResult(oc.ChangesSummary, plan.Coverage)
+	oc.ChangesSummary = stripped
+	oc.ReviewResult = reviewResult
+	// A review changes nothing, so the implementer's fields describe work it
+	// did not do. Clear them rather than let a stray trailer from a confused
+	// agent reach the runner, which merges them into the Step's own record.
+	oc.FilesChanged = nil
+	oc.VerifyResult = nil
+	oc.PRTitle = ""
+}
+
+// skippedReviewOutcome is the answer when the cost gate stood every pass down:
+// a SUCCESSFUL run that examined nothing, with the coverage record saying why.
+//
+// Success rather than a skip status on purpose — the review did what it was
+// asked to do, which was to decide that a documentation-only change does not
+// need a security pass. The consumer reads the coverage, not the status, to
+// learn what was examined.
+func skippedReviewOutcome(cfg *config.Config, agentVersion string, plan review.Plan) result.Outcome {
+	now := time.Now().Unix()
+	reasons := map[string]bool{}
+	for _, c := range plan.Coverage {
+		if c.Reason != "" && c.Reason != review.ReasonNoPass {
+			reasons[c.Reason] = true
+		}
+	}
+	summary := "No review pass was worth running on this change."
+	for reason := range reasons {
+		summary = "No review pass was run: " + reason + "."
+		break
+	}
+	fmt.Fprintf(os.Stderr, "[agentbox] review: %s\n", summary)
+	return result.Outcome{
+		Status:         result.StatusSuccess,
+		ExitCode:       result.ExitSuccess,
+		AgentType:      cfg.AgentType,
+		AgentVersion:   agentVersion,
+		StartedAt:      now,
+		EndedAt:        now,
+		ChangesSummary: summary,
+		ReviewResult:   &result.ReviewResult{Findings: []result.ReviewFinding{}, Coverage: plan.Coverage},
 	}
 }
 

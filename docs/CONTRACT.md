@@ -11,7 +11,7 @@ logs, and read `/tmp/result.json` (or `$RESULT_PATH`) after exit.
 
 | Variable | Description |
 |---|---|
-| `STEP_PROMPT` | The prompt the agent executes (batch mode). Free-form text. Required unless `AGENT_MODE=interactive`, where user turns arrive over the message pipe instead. |
+| `STEP_PROMPT` | The prompt the agent executes (batch mode). Free-form text. Required unless `AGENT_MODE=interactive`, where user turns arrive over the message pipe instead, or `AGENT_MODE=review`, where the work item is the diff agentbox computes itself. |
 | `WORK_DIR` | Path to the bind-mounted working directory. Conventionally `/work`. agentbox validates that the directory exists before spawning the agent. |
 
 ### Credentials
@@ -76,6 +76,49 @@ not yet wired.
 The session ends when the agent exits (e.g. `MAX_BUDGET_USD` reached), the
 container receives SIGTERM (graceful: stdin is closed, then SIGTERM with a
 10s grace), or `NO_ACTIVITY_TIMEOUT` elapses with no agent output.
+
+### Review mode
+
+A one-shot review of the change an implement run produced, selected with
+`AGENT_MODE=review`. `STEP_PROMPT` is not required and is ignored: agentbox
+computes the diff of each repository's working tree against the commit named
+in `REVIEW_BASE_COMMITS`, decides which focused passes are worth running, and
+builds the prompt itself. All three agents (`AGENT_TYPE`) can serve it.
+
+In review mode the implementer's final-message instruction is NOT appended, so
+no `<verify>` and no `<pr_title>` trailer is requested or parsed. The agent is
+asked for a `<review>` block instead — see
+[`review_result`](#review_result).
+
+A review run reads NOTHING a previous run wrote: not `result.json`, not
+`progress.json`, not the interactive message records, not a transcript. Its
+prompt is the diff, the spec and the pass list. Consumers are expected to
+enforce the same boundary structurally (the deployment.io runner moves the
+implementer's `.agentbox-output` out of the work dir before each round), so
+the guarantee does not rest on agentbox's restraint alone.
+
+| Variable | Description |
+|---|---|
+| `AGENT_MODE` | `batch` (default), `interactive` or `review`. Any other value is rejected at startup. |
+| `REVIEW_SPEC` | What the change is meant to achieve — JSON of the task spec, or the prose description when there is no structured spec. Passed into the prompt verbatim; agentbox does not parse it. Optional: without it the change is judged on its own terms. |
+| `REVIEW_PASSES` | Comma-separated focused passes to run, e.g. `security,correctness`. Order is honoured. Empty / unset means `security,correctness`, the set this release ships. |
+| `REVIEW_BASE_COMMITS` | **Required in review mode.** JSON object mapping each repository directory relative to `WORK_DIR` to the commit it was checked out at when the Step began, e.g. `{"0-acme/api":"9fceb02…"}`. THE BASELINE IS NOT HEAD: an agent may commit its own work, and diffing against HEAD on that path shows nothing at all. |
+| `REVIEW_ROUND` | 1-based round number within one Step's review. Optional; absent or unreadable means `1`. |
+
+**Pass selection is cost-gated by what the diff touches.** A diff whose every
+changed path is documentation (`*.md`, `*.mdx`, `*.rst`, `*.txt`, `LICENSE`,
+`docs/**`, image files) skips both passes; a diff whose every changed path is
+a dependency lockfile (`package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`,
+`go.sum`, `Cargo.lock`, `poetry.lock`, `Gemfile.lock`, `composer.lock`) runs
+`security` and skips `correctness`; an empty diff skips both. A skipped pass
+is recorded in `coverage` with its reason — never silently omitted. When every
+pass is skipped, no agent is spawned at all and the run succeeds with the
+coverage record alone.
+
+**The diff is capped** at 400000 bytes overall and 60000 bytes per file, with
+explicit elision markers where content was dropped. Truncation is recorded in
+the `coverage` reason of every pass that ran, because a pass that saw part of
+a change reached a partial verdict and must not be reported as complete.
 
 ### Not in the contract
 
@@ -294,6 +337,63 @@ and the whole pass only runs when `status` is `success`.
 Consumers are expected to gate a commit / push on `ran && !passed &&
 !pre_existing`, and to surface a pre-existing failure to the user instead of
 discarding the run's work.
+
+#### `review_result`
+
+What a review-mode run found and what it actually looked at. Present only for
+`AGENT_MODE=review`; omitted entirely otherwise.
+
+```json
+"review_result": {
+  "findings": [
+    {
+      "key": "sec-auth-missing",
+      "parameter": "security",
+      "severity": "high",
+      "location": "0-acme/api/handler.go:41",
+      "what": "the new /export handler does not check the caller's session",
+      "why": "any unauthenticated caller can read another org's data",
+      "stage": "review",
+      "pass": "security"
+    }
+  ],
+  "coverage": [
+    {"parameter": "security", "state": "checked"},
+    {"parameter": "correctness", "state": "checked"},
+    {"parameter": "spec conformance", "state": "not checked", "reason": "no pass for this parameter in this release"}
+  ]
+}
+```
+
+| Field | Written by | Meaning |
+|---|---|---|
+| `findings[].key` | agent | Short stable slug for the finding, so the same finding is recognisable across rounds after a fix. |
+| `findings[].parameter` | agent | One of `security`, `correctness`, `spec conformance`, `testing`, `deploy readiness`, `performance`, `maintainability`, `reliability`. A NAME, not a number: agentbox imports no consumer's enum, so the consumer parses the name (case, spaces, hyphens and underscores ignored) and drops what it cannot read. |
+| `findings[].severity` | agent | One of `info`, `low`, `medium`, `high`, `critical`. |
+| `findings[].location` | agent | Where in the change, e.g. `0-acme/api/handler.go:41`. |
+| `findings[].what` / `why` | agent | What was seen, and why it matters. Both are needed: what alone leaves the reader to work out whether it matters, why alone leaves them hunting for where. |
+| `findings[].stage` | **agentbox** | Always `review` for a review run, stamped regardless of what the agent emitted. An agent cannot relabel where its finding came from. |
+| `findings[].pass` | agent | Which focused pass produced it. |
+| `coverage[].parameter` | **agentbox** | Every one of the eight parameters appears exactly once. |
+| `coverage[].state` | **agentbox** | `checked` (a pass ran), `skipped` (a pass stood down — see `reason`) or `not checked` (this release ships no pass for it). Built from what actually ran, not from the agent's claim; the agent's own claim is honoured only when it ADMITS a gap agentbox could not see. |
+| `coverage[].reason` | **agentbox** | Why a pass was skipped, or that the diff was truncated. |
+
+**`must_fix_open` is not part of this contract and never will be.** Whether
+findings block the change is a policy decision the consumer owns, made from
+its own severity thresholds; agentbox has no struct field for it, so an agent
+cannot assert that its own findings need not be fixed.
+
+**Caps applied at extraction**, mirroring the consumer's storage limits: at
+most 100 findings, one coverage entry per parameter, 120-rune `key`, 400-rune
+`location`, 1000-rune `what`, 1000-rune `why`, 60-rune `pass`, 400-rune
+`reason`. Every cap TRUNCATES in runes rather than rejecting — a review that
+found 400 things is still worth its first 100.
+
+The `<review>` block is extracted by the same machine-owned-block rules as the
+interactive task-spec: the tag must be on a line of its own, openings pair
+with the nearest following close scanning newest-first (so a prose mention
+cannot swallow a real block), the latest valid block wins, and every block is
+stripped from `changes_summary` so it can never leak into a pull-request body.
 
 To read the result file from the host, bind-mount a path and point
 `RESULT_PATH` at it, or `docker cp` the default path after exit.
