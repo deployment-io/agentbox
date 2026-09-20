@@ -178,7 +178,14 @@ func TestForwarder_IgnoresNonJSON(t *testing.T) {
 }
 
 func resultLine() string {
-	b, _ := json.Marshal(map[string]any{"type": "result", "result": "Hello"})
+	b, _ := json.Marshal(map[string]any{"type": "result", "subtype": "success", "result": "Hello"})
+	return string(b)
+}
+
+func errorResultLine(subtype, text string, turns int) string {
+	b, _ := json.Marshal(map[string]any{
+		"type": "result", "subtype": subtype, "is_error": true, "result": text, "num_turns": turns,
+	})
 	return string(b)
 }
 
@@ -211,5 +218,166 @@ func TestForwarder_ResultResetsPartialStreamState(t *testing.T) {
 	want := []string{"orphan", "next turn"}
 	if strings.Join(sink.chunks, "|") != strings.Join(want, "|") {
 		t.Errorf("chunks = %v, want %v", sink.chunks, want)
+	}
+}
+
+// A successful result forwards no chat text of its own — its text duplicates
+// the last assistant message. Both the modern shape (subtype=success) and the
+// bare shape (no subtype, no is_error) count as success.
+func TestForwarder_SuccessfulResultForwardsNoText(t *testing.T) {
+	for name, line := range map[string]string{
+		"subtype success": resultLine(),
+		"no subtype":      `{"type":"result","result":"Hello"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			sink := &captureSink{}
+			fwd := newChunkForwarder(sink)
+			fwd.handleLine([]byte(assistantLine("the answer")))
+			fwd.handleLine([]byte(line))
+
+			if len(sink.finals) != 1 || len(sink.chunks) != 1 {
+				t.Errorf("a successful result must add no chat text: chunks=%v finals=%v", sink.chunks, sink.finals)
+			}
+			if sink.turnEnds != 1 {
+				t.Errorf("turnEnds = %d, want 1", sink.turnEnds)
+			}
+		})
+	}
+}
+
+// An errored result is chat-visible: the reason is forwarded as an assistant
+// message (chunk + final, like any other) BEFORE the turn boundary, so the
+// user sees why the composer re-opened without an answer.
+func TestForwarder_ErroredResultIsChatVisible(t *testing.T) {
+	tests := []struct {
+		name         string
+		line         string
+		wantContains []string
+		wantAbsent   []string
+	}{
+		{
+			name:         "max turns names the count and the interactive remedy",
+			line:         errorResultLine("error_max_turns", "", 26),
+			wantContains: []string{"turn limit", "26 turns", "send a message to continue"},
+			wantAbsent:   []string{"max_turns"}, // the batch remedy is meaningless in a session
+		},
+		{
+			name:         "max budget names the budget",
+			line:         errorResultLine("error_max_budget_usd", "", 3),
+			wantContains: []string{"spending budget"},
+			wantAbsent:   []string{"max_budget_usd", "send a message"},
+		},
+		{
+			name:         "execution error names the class and quotes the result text",
+			line:         errorResultLine("error_during_execution", "Tool Bash timed out", 4),
+			wantContains: []string{"turn failed", "error_during_execution", "Tool Bash timed out"},
+		},
+		{
+			name:         "execution error with no result text still explains",
+			line:         errorResultLine("error_during_execution", "", 0),
+			wantContains: []string{"turn failed", "error_during_execution"},
+		},
+		{
+			name:         "is_error with a success subtype is still a failure",
+			line:         `{"type":"result","subtype":"success","is_error":true,"result":"API Error: 500"}`,
+			wantContains: []string{"turn failed", "API Error: 500"},
+			wantAbsent:   []string{"(success)"},
+		},
+		{
+			name:         "unknown non-success subtype without is_error is a failure",
+			line:         `{"type":"result","subtype":"error_something_new","result":""}`,
+			wantContains: []string{"turn failed", "error_something_new"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sink := &captureSink{}
+			fwd := newChunkForwarder(sink)
+			fwd.handleLine([]byte(assistantLine("working on it")))
+			fwd.handleLine([]byte(tt.line))
+
+			if len(sink.finals) != 2 {
+				t.Fatalf("finals = %v, want the turn's message then the failure explanation", sink.finals)
+			}
+			got := sink.finals[1]
+			if sink.chunks[len(sink.chunks)-1] != got {
+				t.Errorf("failure must be forwarded as chunk + final; chunks=%v final=%q", sink.chunks, got)
+			}
+			for _, want := range tt.wantContains {
+				if !strings.Contains(got, want) {
+					t.Errorf("message %q missing %q", got, want)
+				}
+			}
+			for _, absent := range tt.wantAbsent {
+				if strings.Contains(got, absent) {
+					t.Errorf("message %q must not contain %q", got, absent)
+				}
+			}
+			if sink.turnEnds != 1 {
+				t.Errorf("turnEnds = %d, want 1 (the failure is still a turn boundary)", sink.turnEnds)
+			}
+		})
+	}
+}
+
+// The failure message comes before the boundary, and the next turn is
+// unaffected: streamed state is reset and its message forwards normally.
+func TestForwarder_ErroredResultOrderingAndNextTurn(t *testing.T) {
+	sink := &captureSink{}
+	fwd := newChunkForwarder(sink)
+	fwd.handleLine([]byte(partialLine("orphan")))
+	fwd.handleLine([]byte(errorResultLine("error_during_execution", "boom", 1)))
+	if sink.turnEnds != 1 || len(sink.finals) != 1 {
+		t.Fatalf("after the failed turn: turnEnds=%d finals=%v", sink.turnEnds, sink.finals)
+	}
+	fwd.handleLine([]byte(assistantLine("next turn")))
+
+	if len(sink.finals) != 2 || sink.finals[1] != "next turn" {
+		t.Errorf("finals = %v, want the failure then the next turn's message", sink.finals)
+	}
+	if sink.chunks[len(sink.chunks)-1] != "next turn" {
+		t.Errorf("next turn's chunk was dropped as already-streamed: chunks=%v", sink.chunks)
+	}
+}
+
+// A long result excerpt is collapsed to one line and truncated, so a stack
+// trace in the result text doesn't become the chat message.
+func TestForwarder_ErroredResultExcerptIsBounded(t *testing.T) {
+	sink := &captureSink{}
+	fwd := newChunkForwarder(sink)
+	long := strings.Repeat("line of error output\n", 50)
+	fwd.handleLine([]byte(errorResultLine("error_during_execution", long, 1)))
+
+	if len(sink.finals) != 1 {
+		t.Fatalf("finals = %v", sink.finals)
+	}
+	got := sink.finals[0]
+	if strings.Contains(got, "\n") {
+		t.Errorf("excerpt must be one line: %q", got)
+	}
+	if len(got) > resultExcerptLen+80 {
+		t.Errorf("excerpt not truncated: len=%d %q", len(got), got)
+	}
+}
+
+// Claude Code reports an API error as an assistant message and repeats the
+// text on the failed result. The explanation must not quote what the user has
+// just read — but a later turn failing with the same text still quotes it.
+func TestForwarder_ErroredResultDoesNotRepeatShownMessage(t *testing.T) {
+	sink := &captureSink{}
+	fwd := newChunkForwarder(sink)
+	fwd.handleLine([]byte(assistantLine("API Error: 500 overloaded")))
+	fwd.handleLine([]byte(errorResultLine("error_during_execution", "API Error: 500 overloaded", 1)))
+
+	if len(sink.finals) != 2 {
+		t.Fatalf("finals = %v, want the error message then the explanation", sink.finals)
+	}
+	if got := sink.finals[1]; strings.Contains(got, "API Error") || !strings.Contains(got, "error_during_execution") {
+		t.Errorf("explanation = %q, want the class without the repeated text", got)
+	}
+
+	fwd.handleLine([]byte(errorResultLine("error_during_execution", "API Error: 500 overloaded", 1)))
+	if got := sink.finals[len(sink.finals)-1]; !strings.Contains(got, "API Error: 500 overloaded") {
+		t.Errorf("next turn's explanation = %q, want the result text (nothing was shown this turn)", got)
 	}
 }

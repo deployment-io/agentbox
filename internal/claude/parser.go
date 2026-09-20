@@ -299,30 +299,63 @@ func (p *streamParser) isAuthFailureLocked() bool {
 // the caller. Returns "" when the subtype carries no actionable detail,
 // letting the orchestrator fall back to the raw exit error + stderr.
 //
-// Only error_max_turns is special-cased: it's the one failure whose
-// remedy (raise max_turns) the message can name, and Claude Code can
-// signal it while exiting 0, so a status-only message would be
-// actively misleading. error_during_execution and friends are left to
-// the fallback path, which surfaces the agent's stderr — more useful
-// than a generic restatement of the subtype. Caller must hold p.mu.
+// Only the limit subtypes are special-cased: they're the failures whose
+// remedy (raise max_turns / max_budget_usd) the message can name, and
+// Claude Code can signal them while exiting 0, so a status-only message
+// would be actively misleading. error_during_execution and friends are
+// left to the fallback path, which surfaces the agent's stderr — more
+// useful than a generic restatement of the subtype. The predicate itself
+// is shared with the interactive forwarder (resultFailurePredicate);
+// only the remedy is batch-specific. Caller must hold p.mu.
 func (p *streamParser) failureReasonLocked() string {
 	if !p.isError {
 		return ""
 	}
-	// A Bedrock model-access denial is the other failure whose remedy the
-	// message can name — and the one where Claude Code's own words send the
-	// reader in TWO wrong directions at once, so it earns the same treatment
-	// as max_turns. See bedrockAccessReason.
-	if reason := bedrockAccessReason(p.changesSummary); reason != "" {
-		return reason
+	predicate, capped := resultFailurePredicate(p.errorSubtype, p.turns, p.changesSummary)
+	if !capped {
+		return predicate
 	}
-	if p.errorSubtype != "error_max_turns" {
-		return ""
+	if p.errorSubtype == resultSubtypeMaxBudget {
+		return predicate + "; raise max_budget_usd to allow more work"
 	}
-	if p.turns > 0 {
-		return fmt.Sprintf("reached its turn limit after %d turns; raise max_turns to allow more steps", p.turns)
+	return predicate + "; raise max_turns to allow more steps"
+}
+
+// Result-event subtypes Claude Code uses to classify a failed run or turn.
+// Any other non-"success" subtype (error_during_execution, ...) carries no
+// detail beyond the result text.
+const (
+	resultSubtypeMaxTurns  = "error_max_turns"
+	resultSubtypeMaxBudget = "error_max_budget_usd"
+)
+
+// resultFailurePredicate is the subtype → reason mapping shared by batch
+// (failureReasonLocked, which appends the raise-the-cap remedy) and
+// interactive mode (the chunk forwarder, which appends "send a message to
+// continue"). It returns a predicate to follow "the agent ..." — or "" when
+// the subtype carries nothing actionable, so each caller can pick its own
+// fallback (stderr in batch, the result text in interactive). capped is
+// true when the predicate is a limit the caller may name a remedy for;
+// the Bedrock reason already carries its own remedy and must not get one
+// appended.
+//
+// A Bedrock model-access denial is checked first: it's the one failure
+// where Claude Code's own words send the reader in TWO wrong directions at
+// once, so it earns a reason whatever the subtype. See bedrockAccessReason.
+func resultFailurePredicate(subtype string, turns int, summary string) (predicate string, capped bool) {
+	if reason := bedrockAccessReason(summary); reason != "" {
+		return reason, false
 	}
-	return "reached its turn limit; raise max_turns to allow more steps"
+	switch subtype {
+	case resultSubtypeMaxTurns:
+		if turns > 0 {
+			return fmt.Sprintf("reached its turn limit after %d turns", turns), true
+		}
+		return "reached its turn limit", true
+	case resultSubtypeMaxBudget:
+		return "exhausted its spending budget", true
+	}
+	return "", false
 }
 
 // bedrockAccessReason turns a Bedrock model-access denial into an instruction,

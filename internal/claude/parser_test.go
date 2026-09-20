@@ -290,6 +290,7 @@ func TestStreamParser_FailureReason(t *testing.T) {
 		{"max turns with count mentions max_turns", `{"type":"result","result":"","is_error":true,"subtype":"error_max_turns","num_turns":26}`, "max_turns"},
 		{"max turns without count still explains", `{"type":"result","result":"","is_error":true,"subtype":"error_max_turns"}`, "turn limit"},
 		{"success has no failure reason", `{"type":"result","result":"done","is_error":false,"subtype":"success"}`, ""},
+		{"max budget names the budget and remedy", `{"type":"result","result":"","is_error":true,"subtype":"error_max_budget_usd","num_turns":3}`, "max_budget_usd"},
 		{"other error subtype falls back (no reason)", `{"type":"result","result":"boom","is_error":true,"subtype":"error_during_execution"}`, ""},
 		{"error without subtype falls back (no reason)", `{"type":"result","result":"boom","is_error":true}`, ""},
 	}
