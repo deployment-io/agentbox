@@ -248,9 +248,18 @@ func agentConfig(socket string, reviewing bool) map[string]any {
 		"permission": "allow",
 	}
 	if reviewing {
+		// Every class named, none left at opencode's "ask" default: a
+		// headless run has nobody to ask, and an un-answered prompt is a
+		// hang or a silent deny. Reads stay open (the reviewer's whole job
+		// is reading, and the repos live outside its cwd), writes and
+		// commands are denied, and network fetches are denied because a
+		// reviewer has no reason to leave the container.
 		cfg["permission"] = map[string]any{
-			"edit": "deny",
-			"bash": "deny",
+			"edit":               "deny",
+			"bash":               "deny",
+			"webfetch":           "deny",
+			"external_directory": "allow",
+			"doom_loop":          "allow",
 		}
 	}
 	socket = strings.TrimSpace(socket)

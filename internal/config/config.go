@@ -230,10 +230,22 @@ var defaultReviewPasses = []string{"security", "correctness"}
 // Deliberately duplicated rather than imported from internal/review — review
 // imports config, so the dependency cannot go the other way. Two names is a
 // small enough mirror to keep by hand; adding a pass means adding it here and
-// to internal/review's parameterForPass, and the config test pins that.
+// to internal/review's parameterForPass. internal/review's
+// TestConfigAndReviewAgreeOnThePassList pins the two lists to each other.
 var knownReviewPasses = map[string]bool{
 	"security":    true,
 	"correctness": true,
+}
+
+// KnownReviewPasses returns every pass name this release can run, for the
+// cross-check test in internal/review (which can import config; config
+// cannot import review).
+func KnownReviewPasses() []string {
+	out := make([]string, 0, len(knownReviewPasses))
+	for p := range knownReviewPasses {
+		out = append(out, p)
+	}
+	return out
 }
 
 // loadReviewInputs reads and validates the REVIEW_* half of the contract.

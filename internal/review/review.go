@@ -173,11 +173,12 @@ func buildPrompt(cfg *config.Config, plan Plan) (string, bool) {
 	} else {
 		b.WriteString("(no spec was supplied — judge the change on its own terms)")
 	}
-	b.WriteString("\n\n[The change under review]\n")
-	b.WriteString("Each section below is one repository's diff against the commit it was checked out at when the Step began. Elision markers say where content was dropped.\n")
-	b.WriteString(plan.Diff.Text)
+	// Passes BEFORE the diff. The overall cap truncates from the tail, so
+	// whatever sits last is what an oversized prompt loses — and losing the
+	// instructions to a large diff would be losing the review. The diff is
+	// the only part that can be cut and still leave a review worth running.
 	b.WriteString("\n\n[Passes]\n")
-	b.WriteString("Run these passes ONE AT A TIME, in order. Each is a separate, focused examination of the same diff — finish one before starting the next, and do not merge them into a single sweep.\n")
+	b.WriteString("Run these passes ONE AT A TIME, in order, over the change shown after them. Each is a separate, focused examination of the same diff — finish one before starting the next, and do not merge them into a single sweep.\n")
 	for i, pass := range plan.Passes {
 		brief := passBriefs[pass]
 		if brief == "" {
@@ -185,6 +186,9 @@ func buildPrompt(cfg *config.Config, plan Plan) (string, bool) {
 		}
 		b.WriteString(fmt.Sprintf("\n%d. %s pass — %s\n", i+1, pass, brief))
 	}
+	b.WriteString("\n[The change under review]\n")
+	b.WriteString("Each section below is one repository's diff against the commit it was checked out at when the Step began. Elision markers say where content was dropped.\n")
+	b.WriteString(plan.Diff.Text)
 
 	prompt := b.String()
 	if len(prompt) > MaxPromptBytes {

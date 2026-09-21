@@ -2,6 +2,7 @@ package result
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -82,5 +83,37 @@ func TestWriteOmitsReviewResultForAnImplementRun(t *testing.T) {
 	raw, _ := os.ReadFile(Path())
 	if strings.Contains(string(raw), "review_result") {
 		t.Errorf("result.json mentions review_result for a non-review run: %s", raw)
+	}
+}
+
+// A review run that fails before the agent starts still writes a
+// review_result, so the consumer records why rather than finding nothing.
+func TestWriteReviewFailureCarriesCoverage(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("RESULT_PATH", filepath.Join(dir, "result.json"))
+	coverage := []ReviewCoverage{{Parameter: "security", State: "not checked", Reason: "config load failed: boom"}}
+	if err := WriteReviewFailure(errors.New("boom"), coverage); err != nil {
+		t.Fatalf("WriteReviewFailure: %v", err)
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "result.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if out["status"] != "failure" {
+		t.Errorf("status = %v, want failure", out["status"])
+	}
+	rr, ok := out["review_result"].(map[string]any)
+	if !ok {
+		t.Fatalf("review_result missing from a review-mode failure: %s", b)
+	}
+	if f, _ := rr["findings"].([]any); f == nil {
+		t.Errorf("findings must be an empty array, not absent/null: %s", b)
+	}
+	if c, _ := rr["coverage"].([]any); len(c) != 1 {
+		t.Errorf("coverage = %v, want the one entry supplied", rr["coverage"])
 	}
 }

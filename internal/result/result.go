@@ -254,3 +254,19 @@ func WriteFailure(err error, summary string) error {
 		ExitCode:       ExitExecutionFailure,
 	})
 }
+
+// WriteReviewFailure is WriteFailure for a review run that never reached the
+// agent: the outcome carries a review_result whose coverage names the failure
+// for every parameter, so the consumer records "not checked, because X"
+// rather than finding no review at all.
+func WriteReviewFailure(err error, coverage []ReviewCoverage) error {
+	return Write(Outcome{
+		Status:   StatusFailure,
+		Error:    err.Error(),
+		ExitCode: ExitExecutionFailure,
+		ReviewResult: &ReviewResult{
+			Findings: []ReviewFinding{},
+			Coverage: coverage,
+		},
+	})
+}

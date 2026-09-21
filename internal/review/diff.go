@@ -85,16 +85,17 @@ func Compute(workDir string, baseCommits map[string]string) (Diff, error) {
 	}
 	sort.Strings(dirs)
 
+	// PASS ONE — every repository, no budget. Paths feed the cost gate
+	// (SelectPasses), so they must be complete regardless of how much diff
+	// text fits: a docs-only repository that fills the budget must not hide a
+	// code change in the repository after it, or the gate skips every pass
+	// and reports a clean review of a change it never saw.
+	type repoDiff struct {
+		dir, base string
+		chunks    []string
+	}
 	var out Diff
-	var b strings.Builder
-	budget := MaxDiffBytes
-	overallTruncated := false
-	// shown is every changed path whose diff made it into Text, keyed the way
-	// out.Paths is. When the overall cap fires, the difference between
-	// out.Paths and shown is the list of files the reviewer has to open for
-	// itself — see notShownMarker.
-	shown := map[string]bool{}
-
+	repos := make([]repoDiff, 0, len(dirs))
 	for _, dir := range dirs {
 		repoPath := filepath.Join(workDir, dir)
 		base := baseCommits[dir]
@@ -112,51 +113,58 @@ func Compute(workDir string, baseCommits map[string]string) (Diff, error) {
 		if err != nil {
 			return Diff{}, err
 		}
-		if len(chunks) == 0 {
-			continue
+		if len(chunks) > 0 {
+			repos = append(repos, repoDiff{dir: dir, base: base, chunks: chunks})
 		}
-		if budget <= 0 {
-			overallTruncated = true
-			break
-		}
+	}
+
+	// PASS TWO — emit diff text within the budget. Everything not emitted is
+	// truncation, whether the budget ran out mid-file, between files, or
+	// between repositories, and whether it ran out by one byte or by many.
+	var b strings.Builder
+	budget := MaxDiffBytes
+	shown := map[string]bool{} // keyed like out.Paths; see notShownMarker
+	emitted := 0               // chunks fully or partially on the page
+	total := 0
+	for _, r := range repos {
+		total += len(r.chunks)
+	}
+
+emit:
+	for _, r := range repos {
 		// ONE header per repository. Emitting it per file made the prompt
 		// read as though each file were its own repo, and spent the budget
 		// on repetition rather than on diff.
-		header := fmt.Sprintf("\n--- repository %s (against %s) ---\n", dir, shortSHA(base))
+		header := fmt.Sprintf("\n--- repository %s (against %s) ---\n", r.dir, shortSHA(r.base))
 		if len(header) >= budget {
-			overallTruncated = true
 			break
 		}
 		b.WriteString(header)
 		budget -= len(header)
-
-		for _, chunk := range chunks {
+		for _, chunk := range r.chunks {
+			if budget <= 0 {
+				break emit
+			}
 			capped, fileTruncated := capFileChunk(chunk)
 			out.Truncated = out.Truncated || fileTruncated
-			if budget <= 0 {
-				overallTruncated = true
-				break
-			}
 			if len(capped) > budget {
-				overallTruncated = true
 				b.WriteString(truncateBytesOnRuneBoundary(capped, budget))
 				// A file cut mid-diff is still on the page: the reviewer can
 				// see its name and the elision marker and open it. Only files
 				// that never appear go on the not-shown list.
-				markShown(shown, dir, chunk)
+				markShown(shown, r.dir, chunk)
+				emitted++
 				budget = 0
-				break
+				break emit
 			}
 			b.WriteString(capped)
-			markShown(shown, dir, chunk)
+			markShown(shown, r.dir, chunk)
+			emitted++
 			budget -= len(capped)
-		}
-		if budget <= 0 {
-			break
 		}
 	}
 
-	if overallTruncated {
+	if emitted < total {
 		out.Truncated = true
 		b.WriteString(fmt.Sprintf(
 			"\n[… diff truncated: the overall cap of %d bytes was reached; later files are not shown]\n",

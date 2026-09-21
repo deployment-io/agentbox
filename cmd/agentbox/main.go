@@ -20,6 +20,7 @@ import (
 	"github.com/deployment-io/agentbox/internal/interactive"
 	"github.com/deployment-io/agentbox/internal/proxy"
 	"github.com/deployment-io/agentbox/internal/result"
+	"github.com/deployment-io/agentbox/internal/review"
 	"github.com/deployment-io/agentbox/internal/signals"
 	"github.com/deployment-io/agentbox/internal/vendoring"
 
@@ -164,6 +165,17 @@ func runAgent() {
 
 func exitWithFailure(label string, err error) {
 	fmt.Fprintf(os.Stderr, "[agentbox] %s: %v\n", label, err)
+	if os.Getenv("AGENT_MODE") == config.ModeReview {
+		// A review run that dies before the agent starts (bad REVIEW_*
+		// input, CLI install failure, proxy failure) still owes the consumer
+		// a review_result: the contract says one is present on every
+		// review-mode outcome, and the runner reads its absence as "no
+		// review happened" rather than "the review failed here, for this
+		// reason". Read AGENT_MODE from the environment because config may
+		// be the thing that failed to load.
+		_ = result.WriteReviewFailure(err, review.FailedCoverage(label+": "+err.Error()))
+		os.Exit(result.ExitExecutionFailure)
+	}
 	_ = result.WriteFailure(err, "")
 	os.Exit(result.ExitExecutionFailure)
 }

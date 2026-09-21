@@ -408,3 +408,110 @@ func firstBytes(s string) string {
 	}
 	return s
 }
+
+// REGRESSION: the cost gate must see every repository's changed paths even
+// when an earlier repository exhausts the diff budget. A large docs-only
+// repository followed by a code change must still run both passes — the
+// alternative is a clean review of a change the reviewer never saw.
+func TestComputeCollectsPathsFromEveryRepositoryEvenPastTheCap(t *testing.T) {
+	workDir := t.TempDir()
+	docs := filepath.Join(workDir, "0-acme", "docs")
+	api := filepath.Join(workDir, "1-acme", "api")
+	docsBase := initRepo(t, docs)
+	apiBase := initRepo(t, api)
+
+	var b strings.Builder
+	for b.Len() < MaxFileDiffBytes/2 {
+		b.WriteString("a line of prose that exists only to be long and fill the budget\n")
+	}
+	body := b.String()
+	for i := 0; i < 6; i++ {
+		write(t, filepath.Join(docs, fmt.Sprintf("guide%d.md", i)), body)
+	}
+	write(t, filepath.Join(api, "handler.go"), "package api\n// changed\n")
+
+	diff := mustCompute(t, workDir, map[string]string{"0-acme/docs": docsBase, "1-acme/api": apiBase})
+	if !diff.Truncated {
+		t.Fatal("Truncated = false, want true — the docs repository fills the budget")
+	}
+	if !contains(diff.Paths, "1-acme/api/handler.go") {
+		t.Fatalf("the second repository's change is missing from Paths: %v", diff.Paths)
+	}
+	if !strings.Contains(diff.Text, "1-acme/api/handler.go") {
+		t.Errorf("the dropped code change is not named in the not-shown list:\n%s", lastBytes(diff.Text))
+	}
+	passes, skipped := SelectPasses([]string{PassSecurity, PassCorrectness}, diff)
+	if len(passes) != 2 {
+		t.Errorf("passes = %v (skipped %v), want both — the change is not docs-only", passes, skipped)
+	}
+}
+
+// The overall cap can run out between repositories as well as within one.
+// Whatever was not emitted is truncation and must say so.
+func TestComputeMarksTruncationWhenALaterRepositoryIsDropped(t *testing.T) {
+	workDir := t.TempDir()
+	a := filepath.Join(workDir, "0-acme", "a")
+	c := filepath.Join(workDir, "1-acme", "c")
+	aBase := initRepo(t, a)
+	cBase := initRepo(t, c)
+
+	var b strings.Builder
+	for b.Len() < MaxFileDiffBytes/2 {
+		b.WriteString("// filler\n")
+	}
+	for i := 0; i < 6; i++ {
+		write(t, filepath.Join(a, fmt.Sprintf("f%d.go", i)), "package a\n"+b.String())
+	}
+	write(t, filepath.Join(c, "late.go"), "package c\n// tiny change that never reaches the page\n")
+
+	diff := mustCompute(t, workDir, map[string]string{"0-acme/a": aBase, "1-acme/c": cBase})
+	if !diff.Truncated || !strings.Contains(diff.Text, "diff truncated") {
+		t.Errorf("a dropped repository was not reported as truncation:\n%s", lastBytes(diff.Text))
+	}
+	if !strings.Contains(diff.Text, "1-acme/c/late.go") {
+		t.Errorf("the dropped repository's file is not on the not-shown list:\n%s", lastBytes(diff.Text))
+	}
+}
+
+// The passes are the part of the prompt a tail cut must never remove, so
+// they come before the diff.
+func TestBuildPromptPutsThePassesBeforeTheDiff(t *testing.T) {
+	workDir := t.TempDir()
+	repo := filepath.Join(workDir, "0-acme", "api")
+	base := initRepo(t, repo)
+	write(t, filepath.Join(repo, "main.go"), "package main\n// changed\n")
+	plan, err := Build(&config.Config{
+		WorkDir:           workDir,
+		ReviewBaseCommits: map[string]string{"0-acme/api": base},
+		ReviewPasses:      []string{PassSecurity, PassCorrectness},
+		ReviewRound:       1,
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	passes := strings.Index(plan.Prompt, "[Passes]")
+	change := strings.Index(plan.Prompt, "[The change under review]")
+	if passes < 0 || change < 0 || passes > change {
+		t.Errorf("passes at %d, change at %d — the passes must precede the diff so a tail cut cannot remove them", passes, change)
+	}
+}
+
+// config.knownReviewPasses and review.parameterForPass are a hand-kept
+// mirror (config cannot import review). This is the test the config comment
+// promises: the two lists name exactly the same passes.
+func TestConfigAndReviewAgreeOnThePassList(t *testing.T) {
+	known := config.KnownReviewPasses()
+	if len(known) != len(parameterForPass) {
+		t.Errorf("config knows %d passes, review maps %d: %v vs %v", len(known), len(parameterForPass), known, parameterForPass)
+	}
+	for _, p := range known {
+		if _, ok := parameterForPass[p]; !ok {
+			t.Errorf("config accepts pass %q but review maps it to no parameter", p)
+		}
+	}
+	for p := range parameterForPass {
+		if !contains(known, p) {
+			t.Errorf("review maps pass %q but config would drop it as unknown", p)
+		}
+	}
+}

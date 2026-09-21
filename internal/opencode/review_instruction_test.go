@@ -57,9 +57,22 @@ func TestAgentConfigDeniesWritesInReviewMode(t *testing.T) {
 	if !ok {
 		t.Fatalf("permission = %#v, want a per-tool map denying writes", cfg["permission"])
 	}
-	for _, tool := range []string{"edit", "bash"} {
+	for _, tool := range []string{"edit", "bash", "webfetch"} {
 		if perms[tool] != "deny" {
 			t.Errorf("permission[%q] = %v, want \"deny\"", tool, perms[tool])
+		}
+	}
+	// Nothing may be left at opencode's "ask" default: a headless run has
+	// nobody to ask. Reads outside cwd stay open because the repos live
+	// there.
+	for _, tool := range []string{"external_directory", "doom_loop"} {
+		if perms[tool] != "allow" {
+			t.Errorf("permission[%q] = %v, want \"allow\" — an unanswered ask is a hang", tool, perms[tool])
+		}
+	}
+	for tool, v := range perms {
+		if v == "ask" {
+			t.Errorf("permission[%q] = ask; every class must be decided for a headless reviewer", tool)
 		}
 	}
 	if _, wired := cfg["mcp"]; wired {
