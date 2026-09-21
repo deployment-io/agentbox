@@ -225,6 +225,77 @@ func TestComputeCapsTheWholeDiffAcrossFiles(t *testing.T) {
 	}
 }
 
+// When the overall cap drops files, the reviewer is told WHICH files, so the
+// marker is a to-do list it can work through with Read and git diff rather
+// than a shrug. Files that made it onto the page — including one cut
+// mid-diff — are not listed; files it never saw are.
+func TestComputeListsTheFilesTheCapDropped(t *testing.T) {
+	workDir := t.TempDir()
+	repo := filepath.Join(workDir, "0-acme", "api")
+	base := initRepo(t, repo)
+
+	var b strings.Builder
+	for b.Len() < MaxFileDiffBytes/2 {
+		b.WriteString("// a line of generated nonsense that exists only to be long\n")
+	}
+	body := b.String()
+	for i := 0; i < 6; i++ {
+		write(t, filepath.Join(repo, fmt.Sprintf("generated%d.go", i)), "package main\n"+body)
+	}
+
+	diff := mustCompute(t, workDir, map[string]string{"0-acme/api": base})
+	idx := strings.Index(diff.Text, "Changed files NOT shown above")
+	if idx < 0 {
+		t.Fatalf("no not-shown list after the overall cap fired:\n%s", lastBytes(diff.Text))
+	}
+	list := diff.Text[idx:]
+	if !strings.Contains(list, "0-acme/api/generated5.go") {
+		t.Errorf("the last file was dropped but is not listed:\n%s", list)
+	}
+	if strings.Contains(list, "0-acme/api/generated0.go") {
+		t.Errorf("the first file was shown but is listed as not shown:\n%s", list)
+	}
+	if len(list) > maxNotShownListBytes+64 {
+		t.Errorf("not-shown list is %d bytes, over its %d cap", len(list), maxNotShownListBytes)
+	}
+	// Every listed file really is absent from the diff body above the list.
+	body2 := diff.Text[:idx]
+	for _, p := range strings.Fields(strings.TrimSuffix(strings.SplitN(list, ":", 2)[1], "]\n")) {
+		if strings.HasPrefix(p, "(") {
+			break
+		}
+		if strings.Contains(body2, "b/"+strings.TrimPrefix(p, "0-acme/api/")) {
+			t.Errorf("%s is listed as not shown but its header is on the page", p)
+		}
+	}
+}
+
+func TestComputeListsNothingWhenEverythingFit(t *testing.T) {
+	workDir := t.TempDir()
+	repo := filepath.Join(workDir, "0-acme", "api")
+	base := initRepo(t, repo)
+	write(t, filepath.Join(repo, "main.go"), "package main\n// changed\n")
+	diff := mustCompute(t, workDir, map[string]string{"0-acme/api": base})
+	if strings.Contains(diff.Text, "NOT shown above") {
+		t.Errorf("a diff that fit carries a not-shown list:\n%s", diff.Text)
+	}
+}
+
+func TestChunkPath(t *testing.T) {
+	for in, want := range map[string]string{
+		"diff --git a/main.go b/main.go\nindex 1..2":    "main.go",
+		"diff --git a/dir/a b.go b/dir/a b.go\n":        "dir/a b.go",
+		"diff --git a/dev/null b/new.go\nnew file mode": "new.go",
+	} {
+		if got, ok := chunkPath(in); !ok || got != want {
+			t.Errorf("chunkPath(%q) = %q,%v want %q", in, got, ok, want)
+		}
+	}
+	if _, ok := chunkPath("not a header\n"); ok {
+		t.Error("a chunk with no header must not resolve to a path")
+	}
+}
+
 // The whole prompt — diff, spec, briefs — must stay under the argv limit, so
 // the review of a very large change still starts.
 func TestBuildPromptStaysUnderTheArgvLimit(t *testing.T) {

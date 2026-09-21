@@ -89,6 +89,11 @@ func Compute(workDir string, baseCommits map[string]string) (Diff, error) {
 	var b strings.Builder
 	budget := MaxDiffBytes
 	overallTruncated := false
+	// shown is every changed path whose diff made it into Text, keyed the way
+	// out.Paths is. When the overall cap fires, the difference between
+	// out.Paths and shown is the list of files the reviewer has to open for
+	// itself — see notShownMarker.
+	shown := map[string]bool{}
 
 	for _, dir := range dirs {
 		repoPath := filepath.Join(workDir, dir)
@@ -135,10 +140,15 @@ func Compute(workDir string, baseCommits map[string]string) (Diff, error) {
 			if len(capped) > budget {
 				overallTruncated = true
 				b.WriteString(truncateBytesOnRuneBoundary(capped, budget))
+				// A file cut mid-diff is still on the page: the reviewer can
+				// see its name and the elision marker and open it. Only files
+				// that never appear go on the not-shown list.
+				markShown(shown, dir, chunk)
 				budget = 0
 				break
 			}
 			b.WriteString(capped)
+			markShown(shown, dir, chunk)
 			budget -= len(capped)
 		}
 		if budget <= 0 {
@@ -151,9 +161,77 @@ func Compute(workDir string, baseCommits map[string]string) (Diff, error) {
 		b.WriteString(fmt.Sprintf(
 			"\n[… diff truncated: the overall cap of %d bytes was reached; later files are not shown]\n",
 			MaxDiffBytes))
+		b.WriteString(notShownMarker(out.Paths, shown))
 	}
 	out.Text = b.String()
 	return out, nil
+}
+
+// maxNotShownListBytes bounds the list of files the cap dropped. It rides
+// OUTSIDE MaxDiffBytes — it is the one thing worth spending over budget on,
+// because it turns "later files are not shown" from a shrug into a to-do list
+// the reviewer can work through with Read and git diff — but it is bounded so
+// the whole prompt still clears MaxPromptBytes with the spec and briefs.
+const maxNotShownListBytes = 1200
+
+// notShownMarker names the changed files whose diff did not make it into
+// Text, so the reviewer knows what to open rather than what it missed. Empty
+// when every changed file was shown.
+func notShownMarker(paths []string, shown map[string]bool) string {
+	var missing []string
+	for _, p := range paths {
+		if !shown[p] {
+			missing = append(missing, p)
+		}
+	}
+	if len(missing) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("[Changed files NOT shown above — open them directly with Read or git diff before reporting coverage:")
+	listed := 0
+	for _, p := range missing {
+		entry := " " + p
+		if b.Len()+len(entry) > maxNotShownListBytes {
+			break
+		}
+		b.WriteString(entry)
+		listed++
+	}
+	if rest := len(missing) - listed; rest > 0 {
+		b.WriteString(fmt.Sprintf(" (and %d more)", rest))
+	}
+	b.WriteString("]\n")
+	return b.String()
+}
+
+// markShown records the file a chunk belongs to, keyed like Diff.Paths. A
+// chunk's first line is git's "diff --git a/<path> b/<path>" header; the
+// b/ side is the path as it exists in the working tree, which is the one the
+// reviewer would open. A chunk with no recognisable header marks nothing —
+// it is still on the page, and an unknown key would never match a path.
+func markShown(shown map[string]bool, dir, chunk string) {
+	if path, ok := chunkPath(chunk); ok {
+		shown[filepath.Join(dir, path)] = true
+	}
+}
+
+// chunkPath extracts the b/ path from a chunk's "diff --git" header.
+func chunkPath(chunk string) (string, bool) {
+	line := chunk
+	if i := strings.IndexByte(line, '\n'); i >= 0 {
+		line = line[:i]
+	}
+	const prefix = "diff --git "
+	if !strings.HasPrefix(line, prefix) {
+		return "", false
+	}
+	rest := line[len(prefix):]
+	i := strings.LastIndex(rest, " b/")
+	if i < 0 {
+		return "", false
+	}
+	return strings.TrimSpace(rest[i+len(" b/"):]), true
 }
 
 // verifyBaseCommit fails fast when the recorded baseline is not a commit this
