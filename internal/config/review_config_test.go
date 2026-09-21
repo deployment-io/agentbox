@@ -110,6 +110,75 @@ func TestLoadReviewModeDefaultsThePassList(t *testing.T) {
 	}
 }
 
+// A pass name this image cannot run is DROPPED, not carried. Carried through,
+// it reaches the prompt as a pass the agent is asked to run and the trailer
+// instruction as a parameter it may report against — producing findings under
+// a parameter no consumer can map. This is the newer-runner / older-image
+// shape, and it has to stay visible rather than quiet.
+func TestLoadReviewModeDropsUnknownPasses(t *testing.T) {
+	setEnv(t, map[string]string{
+		"WORK_DIR":            t.TempDir(),
+		"ANTHROPIC_API_KEY":   "sk-ant-test",
+		"AGENT_MODE":          ModeReview,
+		"REVIEW_BASE_COMMITS": `{"0-acme/api":"abc123"}`,
+		"REVIEW_PASSES":       "security,performance,correctness",
+	})
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %s", err)
+	}
+	for _, p := range cfg.ReviewPasses {
+		if !knownReviewPasses[p] {
+			t.Errorf("ReviewPasses carries %q, which maps to no parameter this image can report", p)
+		}
+	}
+	if len(cfg.ReviewPasses) != 2 {
+		t.Errorf("ReviewPasses = %v, want the two runnable passes", cfg.ReviewPasses)
+	}
+}
+
+// Every name unknown is the same as none supplied: the shipped default, not a
+// review that runs nothing and looks clean.
+func TestLoadReviewModeFallsBackWhenEveryPassIsUnknown(t *testing.T) {
+	setEnv(t, map[string]string{
+		"WORK_DIR":            t.TempDir(),
+		"ANTHROPIC_API_KEY":   "sk-ant-test",
+		"AGENT_MODE":          ModeReview,
+		"REVIEW_BASE_COMMITS": `{"0-acme/api":"abc123"}`,
+		"REVIEW_PASSES":       "performance,maintainability",
+	})
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %s", err)
+	}
+	if len(cfg.ReviewPasses) != len(defaultReviewPasses) {
+		t.Errorf("ReviewPasses = %v, want the default pair", cfg.ReviewPasses)
+	}
+}
+
+// Every key is joined onto WORK_DIR and handed to git -C. A key that escapes
+// the work dir would point the review at a repository outside the Step's
+// workspace, so it is rejected rather than resolved.
+func TestLoadReviewModeRejectsBaseCommitKeysOutsideTheWorkDir(t *testing.T) {
+	for _, key := range []string{"../elsewhere", "/etc", "0-acme/../../etc"} {
+		t.Run(key, func(t *testing.T) {
+			setEnv(t, map[string]string{
+				"WORK_DIR":            t.TempDir(),
+				"ANTHROPIC_API_KEY":   "sk-ant-test",
+				"AGENT_MODE":          ModeReview,
+				"REVIEW_BASE_COMMITS": `{"` + key + `":"abc123"}`,
+			})
+			if _, err := Load(); err == nil {
+				t.Fatalf("Load accepted the escaping key %q", key)
+			} else if !strings.Contains(err.Error(), "WORK_DIR") {
+				t.Errorf("error %q should say the key must sit inside WORK_DIR", err)
+			}
+		})
+	}
+}
+
 // A value that is not a mode must still fail at startup — the point of the
 // switch is that a typo is caught before a container does an hour of work in
 // the wrong mode.

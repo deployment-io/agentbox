@@ -12,11 +12,11 @@ import (
 )
 
 // readOnlyAllowedTools is the tool + Bash sub-command allowlist for
-// read-only investigation sessions. In headless (-p) mode WITHOUT
-// --dangerously-skip-permissions, a tool call that matches nothing here
-// is denied outright (there is no human to prompt), which is exactly the
-// read-only behavior we want. The space before `*` enforces a word
-// boundary, so "Bash(git log *)" matches `git log --oneline` but not a
+// read-only investigation sessions AND for review runs. In headless (-p)
+// mode WITHOUT --dangerously-skip-permissions, a tool call that matches
+// nothing here is denied outright (there is no human to prompt), which is
+// exactly the read-only behavior we want. The space before `*` enforces a
+// word boundary, so "Bash(git log *)" matches `git log --oneline` but not a
 // command merely starting with "git log"-something.
 //
 // This is the safety floor; the system prompt is the policy ceiling.

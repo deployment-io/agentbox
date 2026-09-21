@@ -151,14 +151,27 @@ func (d *Driver) Binary() string {
 	return "claude"
 }
 
+// BuildArgs assembles the headless `claude -p` invocation.
+//
+// A REVIEW run is held to the read-only allowlist instead of
+// --dangerously-skip-permissions. The prompt tells the reviewer not to edit
+// anything, but a prompt is a request and an allowlist is a guarantee: a
+// reviewer that edits the code it is reviewing produces a diff nobody
+// authorised, inside a stage whose whole job is to judge the diff it was given.
+// It also gets no MCP tools — review needs none, and a tool channel the
+// reviewer cannot use is a channel it cannot misuse.
 func (d *Driver) BuildArgs(cfg *config.Config) []string {
+	reviewing := cfg.Mode == config.ModeReview
+
 	// Claude Code rejects --output-format=stream-json + -p without --verbose.
 	args := []string{
 		"-p", cfg.StepPrompt,
 		"--append-system-prompt", trailingInstruction(cfg),
 		"--output-format", "stream-json",
 		"--verbose",
-		"--dangerously-skip-permissions",
+	}
+	if !reviewing {
+		args = append(args, "--dangerously-skip-permissions")
 	}
 	if cfg.MaxTurns != "" {
 		args = append(args, "--max-turns", cfg.MaxTurns)
@@ -166,12 +179,19 @@ func (d *Driver) BuildArgs(cfg *config.Config) []string {
 	if cfg.Model != "" {
 		args = append(args, "--model", cfg.Model)
 	}
-	if cfg.MCPSocket != "" {
+	if cfg.MCPSocket != "" && !reviewing {
 		// Point Claude Code's MCP client at the runner's tool socket via the
 		// `agentbox mcp-bridge` stdio bridge. --dangerously-skip-permissions
 		// (set above) also auto-allows these tools, so the agent invokes them
 		// without a permission prompt.
 		args = append(args, "--mcp-config", mcpConfigJSON(cfg.MCPSocket))
+	}
+	if reviewing {
+		// Appended LAST: --allowedTools is variadic and consumes every
+		// following token. Same list and same reasoning as the read-only
+		// interactive path.
+		args = append(args, "--allowedTools")
+		args = append(args, readOnlyAllowedTools...)
 	}
 	return args
 }

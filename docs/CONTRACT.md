@@ -101,8 +101,8 @@ the guarantee does not rest on agentbox's restraint alone.
 |---|---|
 | `AGENT_MODE` | `batch` (default), `interactive` or `review`. Any other value is rejected at startup. |
 | `REVIEW_SPEC` | What the change is meant to achieve — JSON of the task spec, or the prose description when there is no structured spec. Passed into the prompt verbatim; agentbox does not parse it. Optional: without it the change is judged on its own terms. |
-| `REVIEW_PASSES` | Comma-separated focused passes to run, e.g. `security,correctness`. Order is honoured. Empty / unset means `security,correctness`, the set this release ships. |
-| `REVIEW_BASE_COMMITS` | **Required in review mode.** JSON object mapping each repository directory relative to `WORK_DIR` to the commit it was checked out at when the Step began, e.g. `{"0-acme/api":"9fceb02…"}`. THE BASELINE IS NOT HEAD: an agent may commit its own work, and diffing against HEAD on that path shows nothing at all. |
+| `REVIEW_PASSES` | Comma-separated focused passes to run, e.g. `security,correctness`. Order is honoured. A name this image cannot run is dropped with a warning on stderr — every accepted pass must map to a review parameter, or its findings would arrive under a parameter no consumer can read. Empty / unset — or emptied by that filter — means `security,correctness`, the set this release ships. |
+| `REVIEW_BASE_COMMITS` | **Required in review mode.** JSON object mapping each repository directory relative to `WORK_DIR` to the commit it was checked out at when the Step began, e.g. `{"0-acme/api":"9fceb02…"}`. Each key must be a relative path that stays inside `WORK_DIR`; `..` and absolute paths are rejected at startup. THE BASELINE IS NOT HEAD: an agent may commit its own work, and diffing against HEAD on that path shows nothing at all. |
 | `REVIEW_ROUND` | 1-based round number within one Step's review. Optional; absent or unreadable means `1`. |
 
 **Pass selection is cost-gated by what the diff touches.** A diff whose every
@@ -115,10 +115,31 @@ is recorded in `coverage` with its reason — never silently omitted. When every
 pass is skipped, no agent is spawned at all and the run succeeds with the
 coverage record alone.
 
-**The diff is capped** at 400000 bytes overall and 60000 bytes per file, with
-explicit elision markers where content was dropped. Truncation is recorded in
-the `coverage` reason of every pass that ran, because a pass that saw part of
-a change reached a partial verdict and must not be reported as complete.
+**The prompt is capped** at 100000 bytes overall — 88000 for the diff, 8000
+for the spec, 60000 for any one file's hunk — with explicit elision markers
+where content was dropped. The overall number is set by a hard limit, not by
+taste: the prompt is passed as a single argv element and Linux refuses to exec
+an argument over `MAX_ARG_STRLEN` (128 KiB), so overrunning it would stop the
+agent from starting rather than merely shorten its input. Truncation is
+recorded in the `coverage` reason of every pass that ran, because a pass that
+saw part of a change reached a partial verdict and must not be reported as
+complete.
+
+**A review run cannot write.** The read-only path each harness already has is
+used instead of its autonomy flag: `claude` gets `--allowedTools` with the
+read-only allowlist and no `--dangerously-skip-permissions`, `codex` gets
+`--sandbox read-only` without `--dangerously-bypass-approvals-and-sandbox`,
+and `opencode` gets a config denying `edit` and `bash`. The prompt also says
+not to touch the tree, but a prompt is a request and this is the guarantee.
+No MCP tool channel is wired in review mode either — a reviewer needs none.
+
+**A git failure fails the round.** Each base commit is verified with
+`git rev-parse --verify <sha>^{commit}` before anything is diffed, and any git
+error — an unknown base commit, a key naming a directory that is not a
+checkout — ends the run with `status: failure` and a `review_result` whose
+every parameter is `not checked` with the reason. It is never reported as a
+clean review: "I could not see the change" and "the change is fine" must not
+be the same answer.
 
 ### Not in the contract
 
@@ -393,7 +414,15 @@ The `<review>` block is extracted by the same machine-owned-block rules as the
 interactive task-spec: the tag must be on a line of its own, openings pair
 with the nearest following close scanning newest-first (so a prose mention
 cannot swallow a real block), the latest valid block wins, and every block is
-stripped from `changes_summary` so it can never leak into a pull-request body.
+stripped from `changes_summary` — and from `error` — so it can never leak into
+a pull-request body.
+
+**`review_result` is present on every review-mode outcome**, including a run
+that failed, was cancelled by SIGTERM, hit the no-activity timeout or hit the
+turn cap. On any outcome other than `success` the coverage is rewritten to
+`not checked` for every parameter with the reason: the planned record says a
+pass RAN, and once the run is killed that is no longer a claim agentbox can
+stand behind. `findings` is always an array, `[]` when there are none.
 
 To read the result file from the host, bind-mount a path and point
 `RESULT_PATH` at it, or `docker cp` the default path after exit.

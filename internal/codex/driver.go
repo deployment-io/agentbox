@@ -143,12 +143,27 @@ func (d *Driver) Binary() string {
 // set by the orchestrator), so no --cd is needed. Codex has no turn-cap or
 // token-budget flag — those limits are enforced agentbox-side from the
 // JSON event stream (see agent.Run's limit watcher).
+// A REVIEW run swaps danger-full-access for --sandbox read-only and drops
+// --dangerously-bypass-approvals-and-sandbox, so the sandbox is enforced rather
+// than bypassed. `codex exec` is non-interactive and never prompts, so a write
+// the reviewer attempts is refused rather than escalated. The prompt already
+// forbids edits; this makes it a guarantee instead of a request.
 func (d *Driver) BuildArgs(cfg *config.Config) []string {
+	reviewing := cfg.Mode == config.ModeReview
+
 	args := []string{
 		"exec",
 		"--json",
-		"--sandbox", "danger-full-access",
-		"--dangerously-bypass-approvals-and-sandbox",
+	}
+	if reviewing {
+		args = append(args, "--sandbox", "read-only")
+	} else {
+		args = append(args,
+			"--sandbox", "danger-full-access",
+			"--dangerously-bypass-approvals-and-sandbox",
+		)
+	}
+	args = append(args,
 		"--skip-git-repo-check",
 		// Silence the non-essential outbound calls the agentbox proxy
 		// blocks anyway, so they don't add deny-log noise or latency: the
@@ -158,11 +173,11 @@ func (d *Driver) BuildArgs(cfg *config.Config) []string {
 		"-c", "analytics.enabled=false",
 		"-c", "otel.exporter=none",
 		"-c", "otel.metrics_exporter=none",
-	}
+	)
 	if cfg.Model != "" {
 		args = append(args, "--model", cfg.Model)
 	}
-	if cfg.MCPSocket != "" {
+	if cfg.MCPSocket != "" && !reviewing {
 		// Register the runner's tool socket as a stdio MCP server — the same
 		// bridge the claude driver uses (`agentbox mcp-bridge <socket>`). Codex
 		// has no --mcp-config flag; MCP servers live under mcp_servers.<name> in

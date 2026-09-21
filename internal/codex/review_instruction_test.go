@@ -45,3 +45,53 @@ func TestBuildArgsKeepsTheImplementerContractInBatchMode(t *testing.T) {
 		t.Error("batch mode asks for a <review> trailer")
 	}
 }
+
+// The reviewer must not be ABLE to write. codex enforces that with its own
+// sandbox, so review mode asks for read-only and — critically — drops the flag
+// that bypasses the sandbox entirely.
+func TestBuildArgsMakesReviewReadOnly(t *testing.T) {
+	d := &Driver{}
+	args := d.BuildArgs(&config.Config{
+		Mode:         config.ModeReview,
+		StepPrompt:   "the diff and the spec",
+		ReviewPasses: []string{"security"},
+		MCPSocket:    "/run/agentbox/tool-rpc.sock",
+	})
+
+	if !hasPair(args, "--sandbox", "read-only") {
+		t.Errorf("review mode does not request the read-only sandbox: %v", args)
+	}
+	for _, arg := range args {
+		switch arg {
+		case "--dangerously-bypass-approvals-and-sandbox":
+			t.Error("review mode bypasses the sandbox, so read-only buys nothing")
+		case "danger-full-access":
+			t.Error("review mode still asks for full filesystem access")
+		}
+		if strings.HasPrefix(arg, "mcp_servers.") {
+			t.Errorf("review mode wires MCP tools (%s); a reviewer needs none", arg)
+		}
+	}
+}
+
+// Batch mode keeps full autonomy — the Review stage must not quietly restrict
+// the implementer.
+func TestBuildArgsKeepsBatchModeAutonomous(t *testing.T) {
+	d := &Driver{}
+	args := d.BuildArgs(&config.Config{Mode: config.ModeBatch, StepPrompt: "do the thing"})
+	if !hasPair(args, "--sandbox", "danger-full-access") {
+		t.Errorf("batch mode lost danger-full-access: %v", args)
+	}
+	if !strings.Contains(strings.Join(args, "\n"), "--dangerously-bypass-approvals-and-sandbox") {
+		t.Errorf("batch mode lost its approval bypass: %v", args)
+	}
+}
+
+func hasPair(args []string, flag, value string) bool {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == flag && args[i+1] == value {
+			return true
+		}
+	}
+	return false
+}

@@ -200,9 +200,16 @@ func (d *Driver) Ensure(ctx context.Context) error {
 // external_directory, which matters because the repo is checked out into a
 // subdir of WORK_DIR). agent.Run snapshots os.Environ() after Ensure, so the
 // exported var reaches the opencode subprocess.
+// A REVIEW run gets the read-only config instead: edits and shell commands are
+// denied outright, leaving opencode's own read / grep / glob tools, which is
+// everything a reviewer needs. AGENT_MODE is read from the env for the same
+// reason the socket is — Ensure takes no *config.Config, and this file must be
+// written here so agent.Run's post-Ensure os.Environ() snapshot carries
+// OPENCODE_CONFIG.
 func writeAutonomousConfig() error {
 	path := filepath.Join(os.TempDir(), "opencode-agentbox.json")
-	cfg, err := json.Marshal(autonomousConfig(os.Getenv(config.MCPSocketEnv)))
+	reviewing := strings.TrimSpace(os.Getenv("AGENT_MODE")) == config.ModeReview
+	cfg, err := json.Marshal(agentConfig(os.Getenv(config.MCPSocketEnv), reviewing))
 	if err != nil {
 		return fmt.Errorf("building opencode config: %w", err)
 	}
@@ -228,15 +235,28 @@ func writeAutonomousConfig() error {
 // local server is {"type":"local","command":[...]} with command and args in
 // one array. Registering nothing when the socket is absent keeps a plain
 // agent run free of a dangling bridge.
-func autonomousConfig(socket string) map[string]any {
+// A reviewing run denies edit and bash rather than allowing everything. The
+// review prompt already says not to touch the tree, but a prompt is a request;
+// this is the guarantee. opencode's read, grep, glob and list tools are
+// unaffected by these two denials, so the reviewer keeps everything it needs to
+// read the change.
+func agentConfig(socket string, reviewing bool) map[string]any {
 	cfg := map[string]any{
 		"$schema": "https://opencode.ai/config.json",
 		// Headless runs must never block on a permission prompt — the
 		// container sandbox and network allowlist are the real guardrails.
 		"permission": "allow",
 	}
+	if reviewing {
+		cfg["permission"] = map[string]any{
+			"edit": "deny",
+			"bash": "deny",
+		}
+	}
 	socket = strings.TrimSpace(socket)
-	if socket == "" {
+	if socket == "" || reviewing {
+		// A reviewer needs no runner tools, and a tool channel it cannot use
+		// is a channel it cannot misuse.
 		return cfg
 	}
 	command, args := agent.BridgeCommand(socket)

@@ -31,18 +31,44 @@ func (p Plan) NothingToReview() bool {
 }
 
 // Build computes the diff, applies the cost gate, and assembles the prompt.
-func Build(cfg *config.Config) Plan {
-	diff := Compute(cfg.WorkDir, cfg.ReviewBaseCommits)
+//
+// An error here means the DIFF could not be computed — a base commit this clone
+// does not have, a repository key that names no checkout, git missing. The
+// caller must turn that into a FAILED review, never a clean one: the whole
+// point of the round is to look at the change, and a round that could not look
+// has found nothing because it saw nothing.
+func Build(cfg *config.Config) (Plan, error) {
+	diff, err := Compute(cfg.WorkDir, cfg.ReviewBaseCommits)
+	if err != nil {
+		return Plan{}, err
+	}
 	passes, skipped := SelectPasses(cfg.ReviewPasses, diff)
-	plan := Plan{
-		Passes:   passes,
-		Coverage: BuildCoverage(passes, skipped, diff.Truncated),
-		Diff:     diff,
+	plan := Plan{Passes: passes, Diff: diff}
+	truncated := diff.Truncated
+	if len(passes) > 0 {
+		prompt, promptTruncated := buildPrompt(cfg, plan)
+		plan.Prompt = prompt
+		truncated = truncated || promptTruncated
 	}
-	if !plan.NothingToReview() {
-		plan.Prompt = buildPrompt(cfg, plan)
+	// Coverage is built LAST, from the prompt that actually went out: a
+	// truncation applied while assembling the prompt is as much a gap in what
+	// the pass saw as one applied while assembling the diff.
+	plan.Coverage = BuildCoverage(passes, skipped, truncated)
+	return plan, nil
+}
+
+// FailedCoverage is the coverage record for a round that could not run: every
+// parameter NotChecked, each carrying the same reason. Used when the diff
+// itself could not be computed, so the result still says what was examined —
+// nothing — and why, rather than arriving as an empty findings list that reads
+// like a clean bill of health.
+func FailedCoverage(reason string) []Coverage {
+	reason = truncateRunes(reason, MaxReasonRunes)
+	out := make([]Coverage, 0, len(allParameters))
+	for _, parameter := range allParameters {
+		out = append(out, Coverage{Parameter: parameter, State: stateNotChecked, Reason: reason})
 	}
-	return plan
+	return out
 }
 
 // LiftResult turns the agent's final message into the review half of
@@ -122,15 +148,28 @@ var passBriefs = map[string]string{
 // against the code. The runner enforces the same boundary structurally by
 // moving the implementer's output directory out of the work dir before the
 // round starts, so this is belt and braces rather than the only guard.
-func buildPrompt(cfg *config.Config, plan Plan) string {
+//
+// The assembled prompt is capped at MaxPromptBytes. That cap is not taste: the
+// prompt is one argv element for every driver, and Linux refuses to exec an
+// argument over MAX_ARG_STRLEN (128 KiB). Overrunning it does not degrade the
+// review, it prevents the agent from starting at all — so the cap is enforced
+// here, once, on the finished string, and reported so the coverage record says
+// the pass saw a partial change.
+func buildPrompt(cfg *config.Config, plan Plan) (string, bool) {
+	truncated := false
 	var b strings.Builder
 	b.WriteString("You are reviewing a code change. You are NOT implementing anything: do not edit, create or delete any file, and do not run any command that changes the working tree.\n\n")
 	if cfg.ReviewRound > 1 {
 		b.WriteString(fmt.Sprintf("This is review round %d. The diff below is the CURRENT state of the change, including fixes made since the previous round. Judge what you see now; you have not been shown the earlier round's findings and should not try to reconstruct them.\n\n", cfg.ReviewRound))
 	}
 	b.WriteString("[What the change is meant to achieve]\n")
-	if strings.TrimSpace(cfg.ReviewSpec) != "" {
-		b.WriteString(cfg.ReviewSpec)
+	if spec := strings.TrimSpace(cfg.ReviewSpec); spec != "" {
+		if len(spec) > MaxSpecBytes {
+			spec = truncateBytesOnRuneBoundary(spec, MaxSpecBytes) +
+				"\n[… spec truncated at its size cap]"
+			truncated = true
+		}
+		b.WriteString(spec)
 	} else {
 		b.WriteString("(no spec was supplied — judge the change on its own terms)")
 	}
@@ -146,7 +185,14 @@ func buildPrompt(cfg *config.Config, plan Plan) string {
 		}
 		b.WriteString(fmt.Sprintf("\n%d. %s pass — %s\n", i+1, pass, brief))
 	}
-	return b.String()
+
+	prompt := b.String()
+	if len(prompt) > MaxPromptBytes {
+		const marker = "\n[… review prompt truncated at its overall size cap; later content is not shown]\n"
+		prompt = truncateBytesOnRuneBoundary(prompt, MaxPromptBytes-len(marker)) + marker
+		truncated = true
+	}
+	return prompt, truncated
 }
 
 // Instruction is the machine-readable half of the ask: how to report what the

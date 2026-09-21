@@ -159,8 +159,12 @@ func Strip(text string) string {
 // capFindings applies the caps and stamps the stage. A finding with no what
 // and no location says nothing a reader can act on, so it is dropped rather
 // than carried as an empty row.
+//
+// Returns an EMPTY SLICE, never nil, so "the review ran and found nothing"
+// serialises as `"findings": []` rather than `"findings": null`. The two mean
+// the same thing to a Go consumer and different things to everyone else.
 func capFindings(in []parsedFinding) []Finding {
-	var out []Finding
+	out := []Finding{}
 	for _, f := range in {
 		what := strings.TrimSpace(f.What)
 		location := strings.TrimSpace(f.Location)

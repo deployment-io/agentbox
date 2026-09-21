@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -221,6 +222,20 @@ func Load() (*Config, error) {
 // no pass and are reported NotChecked rather than silently omitted.
 var defaultReviewPasses = []string{"security", "correctness"}
 
+// knownReviewPasses is every pass name this release can actually run. A pass
+// must map to a review parameter, because the coverage record is per parameter:
+// a pass with no parameter would run, cost a model call, and then have nowhere
+// to report what it covered.
+//
+// Deliberately duplicated rather than imported from internal/review — review
+// imports config, so the dependency cannot go the other way. Two names is a
+// small enough mirror to keep by hand; adding a pass means adding it here and
+// to internal/review's parameterForPass, and the config test pins that.
+var knownReviewPasses = map[string]bool{
+	"security":    true,
+	"correctness": true,
+}
+
 // loadReviewInputs reads and validates the REVIEW_* half of the contract.
 //
 // Only REVIEW_BASE_COMMITS is strictly required: without a baseline there is
@@ -243,6 +258,13 @@ func (c *Config) loadReviewInputs() error {
 		if strings.TrimSpace(dir) == "" || strings.TrimSpace(sha) == "" {
 			return fmt.Errorf("REVIEW_BASE_COMMITS has an empty repository directory or commit")
 		}
+		// Every key is joined onto WORK_DIR and handed to git -C. A key
+		// that escapes the work dir ("..", an absolute path) would point
+		// the review at a repository outside the Step's workspace, so it
+		// is rejected here rather than resolved.
+		if !filepath.IsLocal(dir) {
+			return fmt.Errorf("REVIEW_BASE_COMMITS key %q must be a path inside WORK_DIR", dir)
+		}
 	}
 	if len(commits) == 0 {
 		return fmt.Errorf("REVIEW_BASE_COMMITS names no repositories")
@@ -258,20 +280,38 @@ func (c *Config) loadReviewInputs() error {
 	return nil
 }
 
-// parseReviewPasses splits the comma-separated pass list, dropping empties and
-// duplicates while preserving order. An empty list is the default set rather
-// than "no passes": a review asked to run with no passes at all would report
-// nothing and look clean.
+// parseReviewPasses splits the comma-separated pass list, dropping empties,
+// duplicates and names this release cannot run, while preserving order.
+//
+// An unknown name is DROPPED WITH A WARNING rather than accepted. Carried
+// through, it would reach the prompt as a pass the agent is asked to run and
+// the trailer instruction as a parameter it may report against — producing
+// findings under a parameter no consumer can map, which the runner then
+// annotates rather than acts on. The warning is what makes a newer runner
+// talking to an older image visible instead of merely quiet.
+//
+// An empty list — whether unset or emptied by the filter — is the default set
+// rather than "no passes": a review asked to run with no passes at all would
+// report nothing and look clean.
 func parseReviewPasses(raw string) []string {
 	seen := map[string]bool{}
 	var out []string
+	var dropped []string
 	for _, p := range strings.Split(raw, ",") {
 		p = strings.ToLower(strings.TrimSpace(p))
 		if p == "" || seen[p] {
 			continue
 		}
 		seen[p] = true
+		if !knownReviewPasses[p] {
+			dropped = append(dropped, p)
+			continue
+		}
 		out = append(out, p)
+	}
+	if len(dropped) > 0 {
+		fmt.Fprintf(os.Stderr, "[agentbox] review: ignoring unknown REVIEW_PASSES %s; this image can run %s\n",
+			strings.Join(dropped, ", "), strings.Join(defaultReviewPasses, ", "))
 	}
 	if len(out) == 0 {
 		return append([]string{}, defaultReviewPasses...)

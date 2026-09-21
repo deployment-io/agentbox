@@ -1,6 +1,7 @@
 package review
 
 import (
+	"errors"
 	"fmt"
 	"os/exec"
 	"path/filepath"
@@ -14,9 +15,23 @@ import (
 // skims, and skimming silently is the worst outcome available here. Truncating
 // with an explicit marker, and recording the truncation in the coverage reason
 // of every pass that ran, at least makes the gap visible in the PR body.
+//
+// The numbers are set by a HARD LIMIT, not by taste. Every driver passes the
+// prompt as a single argv element, and Linux caps one argument at MAX_ARG_STRLEN
+// = 128 KiB; an argument over that makes execve fail with E2BIG, so the agent
+// never starts at all and a large Step would produce a review that could not
+// run. MaxPromptBytes is the whole prompt's ceiling, comfortably under that
+// limit, and the diff and spec budgets are carved out of it.
 const (
-	// MaxDiffBytes caps the whole diff across every repository.
-	MaxDiffBytes = 400000
+	// MaxPromptBytes caps the ENTIRE review prompt — diff, spec, briefs and
+	// boilerplate together. This is the number that keeps execve working.
+	MaxPromptBytes = 100000
+	// MaxDiffBytes caps the diff portion across every repository.
+	MaxDiffBytes = 88000
+	// MaxSpecBytes caps the spec the diff is judged against. A spec is
+	// usually a few hundred bytes; the cap exists so a pathological one
+	// cannot crowd the diff out of the prompt.
+	MaxSpecBytes = 8000
 	// MaxFileDiffBytes caps one file's hunk, so a single generated file
 	// cannot crowd out every other change in the Step.
 	MaxFileDiffBytes = 60000
@@ -54,9 +69,16 @@ func (d Diff) Empty() bool {
 // Untracked files are included: a new file is the most reviewable kind of
 // change there is, and `git diff` alone would not mention it.
 //
+// EVERY GIT FAILURE IS RETURNED, never swallowed. A base commit this clone does
+// not have, or a repository key that names a directory that is not a checkout,
+// used to yield an empty or partial diff — which the passes then reviewed and
+// reported clean. "I could not see the change" and "the change is fine" must
+// never be the same answer, so each base commit is verified up front with
+// `git rev-parse --verify <sha>^{commit}` and any git error fails the round.
+//
 // Repositories are processed in sorted order so two runs over the same working
 // tree produce the same prompt.
-func Compute(workDir string, baseCommits map[string]string) Diff {
+func Compute(workDir string, baseCommits map[string]string) (Diff, error) {
 	dirs := make([]string, 0, len(baseCommits))
 	for dir := range baseCommits {
 		dirs = append(dirs, dir)
@@ -66,79 +88,144 @@ func Compute(workDir string, baseCommits map[string]string) Diff {
 	var out Diff
 	var b strings.Builder
 	budget := MaxDiffBytes
+	overallTruncated := false
+
 	for _, dir := range dirs {
 		repoPath := filepath.Join(workDir, dir)
 		base := baseCommits[dir]
-		paths := changedPaths(repoPath, base)
+		if err := verifyBaseCommit(repoPath, base); err != nil {
+			return Diff{}, err
+		}
+		paths, err := changedPaths(repoPath, base)
+		if err != nil {
+			return Diff{}, err
+		}
 		for _, p := range paths {
 			out.Paths = append(out.Paths, filepath.Join(dir, p))
 		}
-		for _, chunk := range repoDiffChunks(repoPath, base) {
+		chunks, err := repoDiffChunks(repoPath, base)
+		if err != nil {
+			return Diff{}, err
+		}
+		if len(chunks) == 0 {
+			continue
+		}
+		if budget <= 0 {
+			overallTruncated = true
+			break
+		}
+		// ONE header per repository. Emitting it per file made the prompt
+		// read as though each file were its own repo, and spent the budget
+		// on repetition rather than on diff.
+		header := fmt.Sprintf("\n--- repository %s (against %s) ---\n", dir, shortSHA(base))
+		if len(header) >= budget {
+			overallTruncated = true
+			break
+		}
+		b.WriteString(header)
+		budget -= len(header)
+
+		for _, chunk := range chunks {
 			capped, fileTruncated := capFileChunk(chunk)
 			out.Truncated = out.Truncated || fileTruncated
-			header := fmt.Sprintf("\n--- repository %s (against %s) ---\n", dir, shortSHA(base))
 			if budget <= 0 {
-				out.Truncated = true
+				overallTruncated = true
 				break
 			}
-			piece := header + capped
-			if len(piece) > budget {
-				out.Truncated = true
-				b.WriteString(piece[:budget])
-				b.WriteString("\n[… diff truncated: the overall cap of " + fmt.Sprint(MaxDiffBytes) + " bytes was reached; later files are not shown]\n")
+			if len(capped) > budget {
+				overallTruncated = true
+				b.WriteString(truncateBytesOnRuneBoundary(capped, budget))
 				budget = 0
 				break
 			}
-			b.WriteString(piece)
-			budget -= len(piece)
+			b.WriteString(capped)
+			budget -= len(capped)
+		}
+		if budget <= 0 {
+			break
 		}
 	}
+
+	if overallTruncated {
+		out.Truncated = true
+		b.WriteString(fmt.Sprintf(
+			"\n[… diff truncated: the overall cap of %d bytes was reached; later files are not shown]\n",
+			MaxDiffBytes))
+	}
 	out.Text = b.String()
-	return out
+	return out, nil
+}
+
+// verifyBaseCommit fails fast when the recorded baseline is not a commit this
+// clone has. Without this check `git diff <unknown>` errors, the error is
+// discarded, and the review runs on an empty diff and reports it clean.
+func verifyBaseCommit(repoPath, base string) error {
+	// Deliberately NOT --quiet: git's own stderr ("not a git repository",
+	// "Needed a single revision") is the only text that says which of the two
+	// ways this can fail actually happened.
+	if _, err := git(repoPath, "rev-parse", "--verify", base+"^{commit}"); err != nil {
+		return fmt.Errorf("repository %s has no commit %s to review against: %w", repoPath, shortSHA(base), err)
+	}
+	return nil
 }
 
 // changedPaths lists the paths this repository changed since base: tracked
-// changes plus untracked files. Best-effort — a repository whose git commands
-// fail contributes nothing rather than failing the review, and the diff text
-// is built by the same commands, so a repo that reports no paths also
-// contributes no diff.
-func changedPaths(repoPath, base string) []string {
-	var paths []string
-	if out, err := git(repoPath, "diff", "--name-only", base, "--"); err == nil {
-		paths = append(paths, nonEmptyLines(out)...)
+// changes plus untracked files.
+//
+// -z output is NUL-separated and never quoted, so a path with a non-ASCII or
+// shell-special character arrives intact. Without it git renders such a path as
+// an octal-escaped, double-quoted string, which then fails every cost-gate
+// extension check and diffs under the wrong name.
+func changedPaths(repoPath, base string) ([]string, error) {
+	out, err := git(repoPath, "diff", "--name-only", "-z", base, "--")
+	if err != nil {
+		return nil, fmt.Errorf("listing changed paths in %s: %w", repoPath, err)
 	}
-	paths = append(paths, untrackedFiles(repoPath)...)
+	paths := nulFields(out)
+	untracked, err := untrackedFiles(repoPath)
+	if err != nil {
+		return nil, err
+	}
+	paths = append(paths, untracked...)
 	sort.Strings(paths)
-	return paths
+	return paths, nil
 }
 
-func untrackedFiles(repoPath string) []string {
-	out, err := git(repoPath, "ls-files", "--others", "--exclude-standard")
+func untrackedFiles(repoPath string) ([]string, error) {
+	out, err := git(repoPath, "ls-files", "--others", "--exclude-standard", "-z")
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("listing untracked files in %s: %w", repoPath, err)
 	}
-	return nonEmptyLines(out)
+	return nulFields(out), nil
 }
 
 // repoDiffChunks returns the diff of this repository split into per-file
 // chunks: the tracked diff against base, then one synthetic chunk per
 // untracked file. Splitting per file is what lets MaxFileDiffBytes apply to a
 // file rather than to the whole change.
-func repoDiffChunks(repoPath, base string) []string {
+func repoDiffChunks(repoPath, base string) ([]string, error) {
 	var chunks []string
-	if out, err := git(repoPath, "diff", base, "--"); err == nil {
-		chunks = append(chunks, splitPerFile(out)...)
+	out, err := git(repoPath, "diff", base, "--")
+	if err != nil {
+		return nil, fmt.Errorf("diffing %s against %s: %w", repoPath, shortSHA(base), err)
 	}
-	for _, path := range untrackedFiles(repoPath) {
-		// --no-index exits 1 when the files differ, which is always true
-		// here, so the output is taken regardless of the exit status.
-		out, _ := gitAllowFailure(repoPath, "diff", "--no-index", "--", "/dev/null", path)
+	chunks = append(chunks, splitPerFile(out)...)
+
+	untracked, err := untrackedFiles(repoPath)
+	if err != nil {
+		return nil, err
+	}
+	for _, path := range untracked {
+		out, err := gitDiffNoIndex(repoPath, path)
+		if err != nil {
+			return nil, err
+		}
 		if strings.TrimSpace(out) == "" {
 			continue
 		}
 		chunks = append(chunks, out)
 	}
-	return chunks
+	return chunks, nil
 }
 
 // splitPerFile cuts a multi-file diff at each "diff --git" header. The header
@@ -168,38 +255,91 @@ func splitPerFile(diff string) []string {
 // capFileChunk truncates one file's diff to MaxFileDiffBytes, leaving a marker
 // that says how much was dropped. The marker matters more than the bytes: a
 // silently shortened diff reads as a complete one.
+//
+// The cut lands on a rune boundary: slicing bytes would leave a half-character
+// at the seam, and the prompt is JSON-encoded and rendered downstream.
 func capFileChunk(chunk string) (string, bool) {
 	if len(chunk) <= MaxFileDiffBytes {
 		return chunk, false
 	}
-	dropped := len(chunk) - MaxFileDiffBytes
-	return chunk[:MaxFileDiffBytes] +
-		fmt.Sprintf("\n[… %d bytes of this file's diff elided: the per-file cap of %d bytes was reached]\n", dropped, MaxFileDiffBytes), true
+	kept := truncateBytesOnRuneBoundary(chunk, MaxFileDiffBytes)
+	dropped := len(chunk) - len(kept)
+	return kept + fmt.Sprintf(
+		"\n[… %d bytes of this file's diff elided: the per-file cap of %d bytes was reached]\n",
+		dropped, MaxFileDiffBytes), true
 }
 
+// truncateBytesOnRuneBoundary returns the longest prefix of s that is at most
+// max bytes and does not split a multi-byte rune.
+func truncateBytesOnRuneBoundary(s string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	if len(s) <= max {
+		return s
+	}
+	cut := max
+	// A continuation byte is 10xxxxxx; back up until the byte at cut starts
+	// a rune (or we reach the beginning).
+	for cut > 0 && s[cut]&0xC0 == 0x80 {
+		cut--
+	}
+	return s[:cut]
+}
+
+// git runs a read-only git command and returns its stdout. core.quotePath=false
+// keeps non-ASCII paths readable and unescaped everywhere git prints one.
 func git(repoPath string, args ...string) (string, error) {
-	full := append([]string{"-C", repoPath}, args...)
+	full := append([]string{"-C", repoPath, "-c", "core.quotePath=false"}, args...)
 	out, err := exec.Command("git", full...).Output()
 	if err != nil {
-		return "", err
+		return "", gitError(err)
 	}
 	return string(out), nil
 }
 
-// gitAllowFailure runs git and returns whatever it printed even when it exits
-// non-zero, for the commands whose non-zero exit IS the expected answer
-// (`diff --no-index` exits 1 when the files differ).
-func gitAllowFailure(repoPath string, args ...string) (string, error) {
-	full := append([]string{"-C", repoPath}, args...)
+// gitDiffNoIndex renders an untracked file as a diff against /dev/null.
+// `diff --no-index` exits 1 when the two inputs differ, which is always true
+// here, so exit 1 is the SUCCESS case; any other failure is a real error and is
+// returned rather than swallowed.
+func gitDiffNoIndex(repoPath, path string) (string, error) {
+	full := []string{"-C", repoPath, "-c", "core.quotePath=false", "diff", "--no-index", "--", "/dev/null", path}
 	out, err := exec.Command("git", full...).Output()
-	return string(out), err
+	if err == nil {
+		return string(out), nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		return string(out), nil
+	}
+	return "", fmt.Errorf("diffing untracked file %s in %s: %w", path, repoPath, gitError(err))
 }
 
-func nonEmptyLines(s string) []string {
+// gitError folds git's stderr into the error. Without it every git failure
+// reads as a bare "exit status 128", which names nothing a reader can act on.
+func gitError(err error) error {
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		if detail := strings.TrimSpace(string(exitErr.Stderr)); detail != "" {
+			return fmt.Errorf("%w: %s", err, firstLine(detail))
+		}
+	}
+	return err
+}
+
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return s[:i]
+	}
+	return s
+}
+
+// nulFields splits git's -z output on NUL, dropping the trailing empty field.
+func nulFields(s string) []string {
 	var out []string
-	for _, line := range strings.Split(s, "\n") {
-		if line = strings.TrimSpace(line); line != "" {
-			out = append(out, line)
+	for _, field := range strings.Split(s, "\x00") {
+		if field != "" {
+			out = append(out, field)
 		}
 	}
 	return out

@@ -45,3 +45,33 @@ func TestBuildArgsKeepsTheImplementerContractInBatchMode(t *testing.T) {
 		t.Error("batch mode asks for a <review> trailer")
 	}
 }
+
+// opencode takes its permissions from the config file the driver writes, not
+// from a flag, so that is where review mode's read-only guarantee lives. Edit
+// and bash are denied; opencode's read / grep / glob tools are untouched, which
+// is everything a reviewer needs.
+func TestAgentConfigDeniesWritesInReviewMode(t *testing.T) {
+	cfg := agentConfig("/run/agentbox/tool-rpc.sock", true)
+
+	perms, ok := cfg["permission"].(map[string]any)
+	if !ok {
+		t.Fatalf("permission = %#v, want a per-tool map denying writes", cfg["permission"])
+	}
+	for _, tool := range []string{"edit", "bash"} {
+		if perms[tool] != "deny" {
+			t.Errorf("permission[%q] = %v, want \"deny\"", tool, perms[tool])
+		}
+	}
+	if _, wired := cfg["mcp"]; wired {
+		t.Error("review mode wires MCP tools; a reviewer needs none")
+	}
+}
+
+// Batch mode keeps full autonomy — a headless implement run must never block
+// on a permission prompt.
+func TestAgentConfigKeepsBatchModeAutonomous(t *testing.T) {
+	cfg := agentConfig("", false)
+	if cfg["permission"] != "allow" {
+		t.Errorf("permission = %v, want \"allow\" for an implement run", cfg["permission"])
+	}
+}
