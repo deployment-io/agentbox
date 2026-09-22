@@ -11,14 +11,17 @@ import (
 // asked for a <review> trailer and is NOT asked for <verify> or <pr_title>.
 // Asking for those would invite a review to report a build it never ran and a
 // PR title for a change it did not write.
+//
+// In review mode the prompt and its instruction travel on STDIN (see
+// TestReviewPromptGoesOnStdin), so the contract is asserted there.
 func TestBuildArgsSwapsTheInstructionInReviewMode(t *testing.T) {
 	d := &Driver{}
-	args := d.BuildArgs(&config.Config{
+	cfg := &config.Config{
 		Mode:         config.ModeReview,
 		StepPrompt:   "the diff and the spec",
 		ReviewPasses: []string{"security", "correctness"},
-	})
-	joined := strings.Join(args, "\n")
+	}
+	joined := strings.Join(d.BuildArgs(cfg), "\n") + "\n" + d.Stdin(cfg)
 
 	if !strings.Contains(joined, "<review>") {
 		t.Error("review mode did not ask for a <review> trailer")
@@ -86,5 +89,34 @@ func TestAgentConfigKeepsBatchModeAutonomous(t *testing.T) {
 	cfg := agentConfig("", false)
 	if cfg["permission"] != "allow" {
 		t.Errorf("permission = %v, want \"allow\" for an implement run", cfg["permission"])
+	}
+}
+
+// A review prompt carries the whole change index and is delivered on stdin,
+// where no argv limit applies; the args carry no prompt at all, so the CLI
+// reads its instructions from stdin. An implement run is unchanged: prompt in
+// the args, nothing on stdin.
+func TestReviewPromptGoesOnStdin(t *testing.T) {
+	d := &Driver{}
+	review := &config.Config{
+		Mode:         config.ModeReview,
+		StepPrompt:   "the change index and the spec",
+		ReviewPasses: []string{"security"},
+	}
+	if in := d.Stdin(review); !strings.HasPrefix(in, review.StepPrompt) || !strings.Contains(in, "<review>") {
+		t.Errorf("review stdin = %q, want the prompt followed by the trailer instruction", in)
+	}
+	for _, arg := range d.BuildArgs(review) {
+		if strings.Contains(arg, review.StepPrompt) || strings.Contains(arg, "<review>") {
+			t.Errorf("review args carry the prompt (%q); it must travel on stdin only", arg)
+		}
+	}
+
+	batch := &config.Config{Mode: config.ModeBatch, StepPrompt: "do the thing"}
+	if in := d.Stdin(batch); in != "" {
+		t.Errorf("batch stdin = %q, want nothing", in)
+	}
+	if !strings.Contains(strings.Join(d.BuildArgs(batch), "\n"), "do the thing") {
+		t.Error("batch args no longer carry the prompt")
 	}
 }

@@ -2,6 +2,7 @@ package review
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/deployment-io/agentbox/internal/config"
@@ -12,10 +13,10 @@ import (
 // to run, the passes that will run, and the coverage record that describes
 // what was and was not examined.
 //
-// Coverage is built BEFORE the agent runs, from facts agentbox knows —
-// which passes the gate stood down and why, and whether the diff was
-// truncated — rather than from what the agent says afterwards. A reviewer
-// asked to report its own coverage will report that it covered everything.
+// Coverage is built BEFORE the agent runs, from facts agentbox knows — which
+// passes the gate stood down and why — rather than from what the agent says
+// afterwards. A reviewer asked to report its own coverage will report that it
+// covered everything.
 type Plan struct {
 	Prompt   string
 	Passes   []string
@@ -44,16 +45,16 @@ func Build(cfg *config.Config) (Plan, error) {
 	}
 	passes, skipped := SelectPasses(cfg.ReviewPasses, diff)
 	plan := Plan{Passes: passes, Diff: diff}
-	truncated := diff.Truncated
 	if len(passes) > 0 {
-		prompt, promptTruncated := buildPrompt(cfg, plan)
-		plan.Prompt = prompt
-		truncated = truncated || promptTruncated
+		// The diff files are the change the reviewer reads. A round that
+		// cannot write them has nothing to hand the reviewer, so it fails
+		// the same way a round that could not compute the diff does.
+		if err := Write(cfg.WorkDir, &plan.Diff); err != nil {
+			return Plan{}, err
+		}
+		plan.Prompt = buildPrompt(cfg, plan)
 	}
-	// Coverage is built LAST, from the prompt that actually went out: a
-	// truncation applied while assembling the prompt is as much a gap in what
-	// the pass saw as one applied while assembling the diff.
-	plan.Coverage = BuildCoverage(passes, skipped, truncated)
+	plan.Coverage = BuildCoverage(passes, skipped)
 	return plan, nil
 }
 
@@ -139,46 +140,53 @@ var passBriefs = map[string]string{
 	PassCorrectness: `Look ONLY for correctness problems this diff introduces: logic that does not do what the surrounding code and the spec say it should, off-by-one and boundary errors, nil or null dereferences, unhandled errors and swallowed failures, race conditions and unsynchronised shared state, resource leaks, and behaviour changes the spec did not ask for. When the diff changes a function signature, a wire shape or an API contract, check every caller and consumer across the repositories in the workspace, and report a contract change whose other side is not part of this change. Report a finding only when you can point at the line in the diff that causes it, and say what input or state makes it go wrong.`,
 }
 
-// buildPrompt assembles the review prompt: the spec, the diff, one focused
-// brief per pass, and the trailer format.
+// buildPrompt assembles the review prompt: the spec, an index of the change
+// with the diff file each repository's part was written to, and one focused
+// brief per pass. The trailer format is appended by the driver.
 //
-// It contains the diff, the spec and the pass list AND NOTHING ELSE. No
-// previous result.json, no progress file, no transcript, no earlier round's
+// It contains the spec, the change index and the pass list AND NOTHING ELSE.
+// No previous result.json, no progress file, no transcript, no earlier round's
 // findings: a reviewer shown last round's verdict grades against it instead of
 // against the code. The runner enforces the same boundary structurally by
 // moving the implementer's output directory out of the work dir before the
 // round starts, so this is belt and braces rather than the only guard.
 //
-// The assembled prompt is capped at MaxPromptBytes. That cap is not taste: the
-// prompt is one argv element for every driver, and Linux refuses to exec an
-// argument over MAX_ARG_STRLEN (128 KiB). Overrunning it does not degrade the
-// review, it prevents the agent from starting at all — so the cap is enforced
-// here, once, on the finished string, and reported so the coverage record says
-// the pass saw a partial change.
-func buildPrompt(cfg *config.Config, plan Plan) (string, bool) {
-	truncated := false
+// The diff itself is NOT here. It is on disk (see Diff), and the prompt tells
+// the reviewer where and insists it is read in full before the first pass.
+// The prompt therefore stays small whatever the change's size; the drivers
+// deliver it on stdin regardless, so nothing about its size is load-bearing.
+func buildPrompt(cfg *config.Config, plan Plan) string {
 	var b strings.Builder
 	b.WriteString("You are reviewing a code change. You are NOT implementing anything: do not edit, create or delete any file, and do not run any command that changes the working tree.\n\n")
 	if cfg.ReviewRound > 1 {
-		b.WriteString(fmt.Sprintf("This is review round %d. The diff below is the CURRENT state of the change, including fixes made since the previous round. Judge what you see now; you have not been shown the earlier round's findings and should not try to reconstruct them.\n\n", cfg.ReviewRound))
+		b.WriteString(fmt.Sprintf("This is review round %d. The diff files describe the CURRENT state of the change, including fixes made since the previous round. Judge what you see now; you have not been shown the earlier round's findings and should not try to reconstruct them.\n\n", cfg.ReviewRound))
 	}
 	b.WriteString("[What the change is meant to achieve]\n")
 	if spec := strings.TrimSpace(cfg.ReviewSpec); spec != "" {
 		if len(spec) > MaxSpecBytes {
 			spec = truncateBytesOnRuneBoundary(spec, MaxSpecBytes) +
 				"\n[… spec truncated at its size cap]"
-			truncated = true
 		}
 		b.WriteString(spec)
 	} else {
 		b.WriteString("(no spec was supplied — judge the change on its own terms)")
 	}
-	// Passes BEFORE the diff. The overall cap truncates from the tail, so
-	// whatever sits last is what an oversized prompt loses — and losing the
-	// instructions to a large diff would be losing the review. The diff is
-	// the only part that can be cut and still leave a review worth running.
-	b.WriteString("\n\n[Passes]\n")
-	b.WriteString("Run these passes ONE AT A TIME, in order, over the change shown after them. Each is a separate, focused examination of the same diff — finish one before starting the next, and do not merge them into a single sweep.\n")
+
+	b.WriteString("\n\n[The change under review]\n")
+	b.WriteString(fmt.Sprintf("The complete diff of each repository against the commit it was checked out at when the Step began has been written to a file under %s. READ EVERY DIFF FILE IN FULL, with your file-reading tool, before starting the first pass: the file IS the change, and a pass that has not read it has reviewed nothing. Read a large file in pages rather than skipping it. These files sit outside every repository and are not part of the change. The repositories themselves are checked out under %s, so open any file the diff touches when you need its surroundings, and search the workspace for the callers of anything the diff changes.\n", filepath.Join(cfg.WorkDir, DirName), cfg.WorkDir))
+	for _, r := range plan.Diff.Repos {
+		b.WriteString(fmt.Sprintf("\n- repository %s (against %s): %s (%d bytes), %d changed file(s)\n", r.Dir, shortSHA(r.Base), r.File, len(r.Text), len(r.Paths)))
+		for i, p := range r.Paths {
+			if i == MaxIndexPathsPerRepo {
+				b.WriteString(fmt.Sprintf("    (and %d more — every path is in the diff file)\n", len(r.Paths)-i))
+				break
+			}
+			b.WriteString("    " + p + "\n")
+		}
+	}
+
+	b.WriteString("\n[Passes]\n")
+	b.WriteString("Run these passes ONE AT A TIME, in order, over the change in the diff files. Each is a separate, focused examination of the same change — finish one before starting the next, and do not merge them into a single sweep.\n")
 	for i, pass := range plan.Passes {
 		brief := passBriefs[pass]
 		if brief == "" {
@@ -186,17 +194,7 @@ func buildPrompt(cfg *config.Config, plan Plan) (string, bool) {
 		}
 		b.WriteString(fmt.Sprintf("\n%d. %s pass — %s\n", i+1, pass, brief))
 	}
-	b.WriteString("\n[The change under review]\n")
-	b.WriteString("Each section below is one repository's diff against the commit it was checked out at when the Step began. Elision markers say where content was dropped.\n")
-	b.WriteString(plan.Diff.Text)
-
-	prompt := b.String()
-	if len(prompt) > MaxPromptBytes {
-		const marker = "\n[… review prompt truncated at its overall size cap; later content is not shown]\n"
-		prompt = truncateBytesOnRuneBoundary(prompt, MaxPromptBytes-len(marker)) + marker
-		truncated = true
-	}
-	return prompt, truncated
+	return b.String()
 }
 
 // Instruction is the machine-readable half of the ask: how to report what the

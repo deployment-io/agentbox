@@ -105,3 +105,36 @@ func indexOf(args []string, want string) int {
 	}
 	return -1
 }
+
+// A review prompt is delivered on stdin, where no argv limit applies: -p is
+// left bare so claude reads the prompt from stdin, and the trailer instruction
+// still rides --append-system-prompt. An implement run is unchanged: prompt
+// after -p, nothing on stdin.
+func TestReviewPromptGoesOnStdin(t *testing.T) {
+	d := &Driver{}
+	review := &config.Config{
+		Mode:         config.ModeReview,
+		StepPrompt:   "the change index and the spec",
+		ReviewPasses: []string{"security"},
+	}
+	if in := d.Stdin(review); in != review.StepPrompt {
+		t.Errorf("review stdin = %q, want the prompt", in)
+	}
+	args := d.BuildArgs(review)
+	if len(args) < 2 || args[0] != "-p" || args[1] != "--append-system-prompt" {
+		t.Errorf("review args = %v, want a bare -p followed by --append-system-prompt", args[:min(len(args), 3)])
+	}
+	for _, arg := range args {
+		if strings.Contains(arg, review.StepPrompt) {
+			t.Errorf("review args carry the prompt (%q); it must travel on stdin only", arg)
+		}
+	}
+
+	batch := &config.Config{Mode: config.ModeBatch, StepPrompt: "do the thing"}
+	if in := d.Stdin(batch); in != "" {
+		t.Errorf("batch stdin = %q, want nothing", in)
+	}
+	if bargs := d.BuildArgs(batch); len(bargs) < 2 || bargs[0] != "-p" || bargs[1] != "do the thing" {
+		t.Errorf("batch args = %v, want the prompt right after -p", bargs[:min(len(bargs), 2)])
+	}
+}

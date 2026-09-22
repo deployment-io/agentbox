@@ -77,6 +77,10 @@ func Run(ctx context.Context, cfg *config.Config, driver Driver) (outcome result
 			return failedReviewOutcome(cfg, agentVersion, err)
 		}
 		reviewPlan = plan
+		// The diff files are this round's input and nobody else's: a fix
+		// run that followed would otherwise find last round's change on
+		// disk, and the next round rewrites them anyway.
+		defer review.Cleanup(cfg.WorkDir)
 		if reviewPlan.NothingToReview() {
 			return skippedReviewOutcome(cfg, agentVersion, reviewPlan)
 		}
@@ -103,6 +107,9 @@ func Run(ctx context.Context, cfg *config.Config, driver Driver) (outcome result
 	cmd := exec.Command(driver.Binary(), driver.BuildArgs(cfg)...)
 	cmd.Dir = cfg.WorkDir
 	cmd.Env = buildEnv()
+	if in := driver.Stdin(cfg); in != "" {
+		cmd.Stdin = strings.NewReader(in)
+	}
 
 	parser := driver.NewOutputParser()
 	pr, pw := io.Pipe()

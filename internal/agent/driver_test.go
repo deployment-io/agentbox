@@ -15,6 +15,7 @@ type fakeDriver struct{ version string }
 func (f *fakeDriver) Ensure(context.Context) error      { return nil }
 func (f *fakeDriver) Binary() string                    { return "fake-agent" }
 func (f *fakeDriver) BuildArgs(*config.Config) []string { return nil }
+func (f *fakeDriver) Stdin(*config.Config) string       { return "" }
 func (f *fakeDriver) DetectVersion() string             { return f.version }
 func (f *fakeDriver) NewOutputParser() OutputParser     { return &fakeParser{} }
 func (f *fakeDriver) Capabilities() Capabilities        { return Capabilities{} }

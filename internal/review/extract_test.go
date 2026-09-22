@@ -174,7 +174,7 @@ func TestExtractDropsAFindingWithNoWhatAndNoLocation(t *testing.T) {
 // LiftResult ships agentbox's coverage, not the agent's — except where the
 // agent admits a gap agentbox could not see.
 func TestLiftResultKeepsAgentboxCoverageAndHonoursAnAdmittedGap(t *testing.T) {
-	planned := BuildCoverage([]string{PassSecurity, PassCorrectness}, nil, false)
+	planned := BuildCoverage([]string{PassSecurity, PassCorrectness}, nil)
 	text := `<review>
 {"findings":[],"coverage":[{"parameter":"security","state":"checked"},{"parameter":"correctness","state":"skipped","reason":"the diff was too large to read fully"},{"parameter":"performance","state":"checked"}]}
 </review>`
@@ -200,7 +200,7 @@ func TestLiftResultKeepsAgentboxCoverageAndHonoursAnAdmittedGap(t *testing.T) {
 // A review whose trailer never arrived still has to report what it examined:
 // the run happened, and "nothing reported" is not the same as "nothing ran".
 func TestLiftResultKeepsCoverageWhenTheTrailerIsMissing(t *testing.T) {
-	planned := BuildCoverage([]string{PassSecurity}, map[string]string{PassCorrectness: ReasonLockfileOnly}, false)
+	planned := BuildCoverage([]string{PassSecurity}, map[string]string{PassCorrectness: ReasonLockfileOnly})
 
 	result, stripped := LiftResult("I looked at the diff but forgot the block.", planned)
 	if len(result.Coverage) != len(allParameters) {

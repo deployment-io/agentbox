@@ -164,12 +164,18 @@ func (d *Driver) BuildArgs(cfg *config.Config) []string {
 	reviewing := cfg.Mode == config.ModeReview
 
 	// Claude Code rejects --output-format=stream-json + -p without --verbose.
-	args := []string{
-		"-p", cfg.StepPrompt,
+	//
+	// A review's prompt travels on stdin (see Stdin), so -p is left bare:
+	// with no positional prompt, claude -p reads the prompt from stdin.
+	args := []string{"-p"}
+	if !reviewing {
+		args = append(args, cfg.StepPrompt)
+	}
+	args = append(args,
 		"--append-system-prompt", trailingInstruction(cfg),
 		"--output-format", "stream-json",
 		"--verbose",
-	}
+	)
 	if !reviewing {
 		args = append(args, "--dangerously-skip-permissions")
 	}
@@ -216,6 +222,18 @@ func mcpConfigJSON(socket string) string {
 		`{"mcpServers":{"deployment-io":{"command":%q,"args":[%s]}}}`,
 		command, strings.Join(quoted, ","),
 	)
+}
+
+// Stdin carries the review prompt. As an argv element a prompt is capped at
+// 128 KiB by the kernel, and a review prompt indexes a change of any size; on
+// stdin nothing about its size is load-bearing. An implement run keeps its
+// prompt in the args: that path is exercised by every Task today and its
+// prompt is a description, not an index.
+func (d *Driver) Stdin(cfg *config.Config) string {
+	if cfg.Mode == config.ModeReview {
+		return cfg.StepPrompt
+	}
+	return ""
 }
 
 func (d *Driver) DetectVersion() string {

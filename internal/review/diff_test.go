@@ -72,8 +72,8 @@ func TestComputeDiffsAgainstTheStartCommitEvenWhenTheAgentCommitted(t *testing.T
 	if diff.Empty() {
 		t.Fatal("diff is empty — the agent's committed work was invisible to the review")
 	}
-	if !strings.Contains(diff.Text, "panic") {
-		t.Errorf("diff does not carry the change:\n%s", diff.Text)
+	if !strings.Contains(allText(diff), "panic") {
+		t.Errorf("diff does not carry the change:\n%s", allText(diff))
 	}
 	if !contains(diff.Paths, "0-acme/api/main.go") {
 		t.Errorf("paths = %v, want the changed file", diff.Paths)
@@ -90,15 +90,18 @@ func TestComputeIncludesUntrackedFiles(t *testing.T) {
 	write(t, filepath.Join(repo, "secrets.go"), "package main\n\nconst token = \"hunter2\"\n")
 
 	diff := mustCompute(t, workDir, map[string]string{"0-acme/api": base})
-	if !strings.Contains(diff.Text, "hunter2") {
-		t.Errorf("untracked file is missing from the diff:\n%s", diff.Text)
+	if !strings.Contains(allText(diff), "hunter2") {
+		t.Errorf("untracked file is missing from the diff:\n%s", allText(diff))
 	}
 	if !contains(diff.Paths, "0-acme/api/secrets.go") {
 		t.Errorf("paths = %v, want the untracked file", diff.Paths)
 	}
+	if len(diff.Repos) != 1 || !contains(diff.Repos[0].Paths, "secrets.go") {
+		t.Errorf("repos = %+v, want the untracked file on the repository's own path list", diff.Repos)
+	}
 }
 
-func TestComputeCoversEveryRepository(t *testing.T) {
+func TestComputeCoversEveryRepositoryInSortedOrder(t *testing.T) {
 	workDir := t.TempDir()
 	api := filepath.Join(workDir, "0-acme", "api")
 	web := filepath.Join(workDir, "1-acme", "web")
@@ -107,36 +110,72 @@ func TestComputeCoversEveryRepository(t *testing.T) {
 	write(t, filepath.Join(api, "main.go"), "package main\n\n// api change\n")
 	write(t, filepath.Join(web, "main.go"), "package main\n\n// web change\n")
 
-	diff := mustCompute(t, workDir, map[string]string{"0-acme/api": apiBase, "1-acme/web": webBase})
-	for _, want := range []string{"api change", "web change", "repository 0-acme/api", "repository 1-acme/web"} {
-		if !strings.Contains(diff.Text, want) {
-			t.Errorf("diff is missing %q:\n%s", want, diff.Text)
-		}
+	diff := mustCompute(t, workDir, map[string]string{"1-acme/web": webBase, "0-acme/api": apiBase})
+	if len(diff.Repos) != 2 || diff.Repos[0].Dir != "0-acme/api" || diff.Repos[1].Dir != "1-acme/web" {
+		t.Fatalf("repos = %+v, want api then web", diff.Repos)
+	}
+	if !strings.Contains(diff.Repos[0].Text, "api change") || !strings.Contains(diff.Repos[1].Text, "web change") {
+		t.Errorf("each repository must carry its own change: %+v", diff.Repos)
+	}
+	if diff.Repos[0].Base != apiBase || diff.Repos[1].Base != webBase {
+		t.Errorf("bases = %s / %s, want %s / %s", diff.Repos[0].Base, diff.Repos[1].Base, apiBase, webBase)
 	}
 }
 
-// A single generated file must not crowd out every other change, and the
-// elision has to be VISIBLE: a silently shortened diff reads as a complete one.
-func TestComputeCapsOneFileAndSaysSo(t *testing.T) {
+// A repository with no change contributes no entry: the reviewer is not sent
+// to read an empty file, and the index does not list a repository as changed.
+func TestComputeSkipsAnUntouchedRepository(t *testing.T) {
 	workDir := t.TempDir()
-	repo := filepath.Join(workDir, "0-acme", "api")
-	base := initRepo(t, repo)
+	api := filepath.Join(workDir, "0-acme", "api")
+	web := filepath.Join(workDir, "1-acme", "web")
+	apiBase := initRepo(t, api)
+	webBase := initRepo(t, web)
+	write(t, filepath.Join(api, "main.go"), "package main\n\n// api change\n")
+
+	diff := mustCompute(t, workDir, map[string]string{"0-acme/api": apiBase, "1-acme/web": webBase})
+	if len(diff.Repos) != 1 || diff.Repos[0].Dir != "0-acme/api" {
+		t.Errorf("repos = %+v, want only the changed repository", diff.Repos)
+	}
+}
+
+// NOTHING IS CAPPED. The diff used to be folded into the prompt under a byte
+// budget that dropped later files and later repositories on the floor; now it
+// goes to a file, and a file has no budget. A change several times the old cap
+// arrives whole, every file and every repository.
+func TestComputeNeverTruncates(t *testing.T) {
+	workDir := t.TempDir()
+	a := filepath.Join(workDir, "0-acme", "a")
+	c := filepath.Join(workDir, "1-acme", "c")
+	aBase := initRepo(t, a)
+	cBase := initRepo(t, c)
 
 	var b strings.Builder
-	for b.Len() < MaxFileDiffBytes*2 {
+	for b.Len() < 60000 {
 		b.WriteString("// a line of generated nonsense that exists only to be long\n")
 	}
-	write(t, filepath.Join(repo, "generated.go"), "package main\n"+b.String())
+	for i := 0; i < 8; i++ {
+		write(t, filepath.Join(a, fmt.Sprintf("generated%d.go", i)), "package a\n"+b.String())
+	}
+	write(t, filepath.Join(c, "late.go"), "package c\n// tiny change that used to fall off the page\n")
 
-	diff := mustCompute(t, workDir, map[string]string{"0-acme/api": base})
-	if !diff.Truncated {
-		t.Error("Truncated = false, want true — the per-file cap fired")
+	diff := mustCompute(t, workDir, map[string]string{"0-acme/a": aBase, "1-acme/c": cBase})
+	text := allText(diff)
+	if len(text) < 8*60000 {
+		t.Errorf("diff is %d bytes, want every one of the eight large files in full", len(text))
 	}
-	if !strings.Contains(diff.Text, "elided") {
-		t.Errorf("no elision marker in the diff — truncation must be visible:\n%s", firstBytes(diff.Text))
+	for i := 0; i < 8; i++ {
+		if !strings.Contains(text, fmt.Sprintf("b/generated%d.go", i)) {
+			t.Errorf("generated%d.go is missing from the diff", i)
+		}
 	}
-	if len(diff.Text) > MaxDiffBytes+1000 {
-		t.Errorf("diff is %d bytes, want it held near the %d cap", len(diff.Text), MaxDiffBytes)
+	if !strings.Contains(text, "used to fall off the page") {
+		t.Error("the second repository's change is missing")
+	}
+	if strings.Contains(text, "elided") || strings.Contains(text, "truncated") {
+		t.Error("the diff carries an elision marker; nothing should be cut")
+	}
+	if !contains(diff.Paths, "1-acme/c/late.go") {
+		t.Errorf("paths = %v, want the second repository's file", diff.Paths)
 	}
 }
 
@@ -190,150 +229,196 @@ func TestComputeFailsWhenTheBaseCommitIsUnknown(t *testing.T) {
 	}
 }
 
-// The OVERALL cap, not the per-file one. It exists because the prompt is a
-// single argv element and Linux refuses to exec one over 128 KiB: overrunning
-// it does not shorten the review, it stops the agent from starting.
-func TestComputeCapsTheWholeDiffAcrossFiles(t *testing.T) {
+// Write puts one file per repository under <workDir>/.review, BESIDE the
+// checkouts and never inside one, and replaces whatever a previous round left
+// there. The file is byte-for-byte the repository's diff.
+func TestWriteWritesOneFilePerRepositoryAndReplacesTheLastRound(t *testing.T) {
 	workDir := t.TempDir()
-	repo := filepath.Join(workDir, "0-acme", "api")
-	base := initRepo(t, repo)
+	api := filepath.Join(workDir, "0-acme", "api")
+	web := filepath.Join(workDir, "1-acme", "web")
+	apiBase := initRepo(t, api)
+	webBase := initRepo(t, web)
+	write(t, filepath.Join(api, "main.go"), "package main\n\n// api change\n")
+	write(t, filepath.Join(web, "main.go"), "package main\n\n// web change\n")
+	stale := filepath.Join(workDir, DirName, "2-acme", "gone.diff")
+	write(t, stale, "a diff from a round that was killed before it cleaned up")
 
-	// Several files, each comfortably under the per-file cap, together well
-	// over the overall one — so only the overall cap can fire.
-	var b strings.Builder
-	for b.Len() < MaxFileDiffBytes/2 {
-		b.WriteString("// a line of generated nonsense that exists only to be long\n")
+	diff := mustCompute(t, workDir, map[string]string{"0-acme/api": apiBase, "1-acme/web": webBase})
+	if err := Write(workDir, &diff); err != nil {
+		t.Fatalf("Write: %v", err)
 	}
-	body := b.String()
-	for i := 0; i < 6; i++ {
-		write(t, filepath.Join(repo, fmt.Sprintf("generated%d.go", i)), "package main\n"+body)
+	for _, r := range diff.Repos {
+		want := filepath.Join(workDir, DirName, r.Dir+".diff")
+		if r.File != want {
+			t.Errorf("repo %s File = %s, want %s", r.Dir, r.File, want)
+		}
+		got, err := os.ReadFile(r.File)
+		if err != nil {
+			t.Fatalf("diff file for %s was not written: %v", r.Dir, err)
+		}
+		if string(got) != r.Text {
+			t.Errorf("diff file for %s differs from the computed diff", r.Dir)
+		}
+		if strings.HasPrefix(r.File, api+string(filepath.Separator)) || strings.HasPrefix(r.File, web+string(filepath.Separator)) {
+			t.Errorf("diff file %s is inside a repository checkout", r.File)
+		}
 	}
-
-	diff := mustCompute(t, workDir, map[string]string{"0-acme/api": base})
-	if !diff.Truncated {
-		t.Error("Truncated = false, want true — the overall cap fired")
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Error("a stale diff file from a previous round survived Write")
 	}
-	if !strings.Contains(diff.Text, "diff truncated") {
-		t.Errorf("no overall elision marker:\n%s", lastBytes(diff.Text))
-	}
-	if len(diff.Text) > MaxPromptBytes {
-		t.Errorf("diff is %d bytes, over the %d prompt cap that keeps execve working",
-			len(diff.Text), MaxPromptBytes)
-	}
-	if !strings.Contains(diff.Text, "generated0.go") {
-		t.Error("the first file was dropped; truncation must keep the earliest content")
+	// The written files must not themselves become part of the change.
+	again := mustCompute(t, workDir, map[string]string{"0-acme/api": apiBase, "1-acme/web": webBase})
+	if len(again.Paths) != len(diff.Paths) {
+		t.Errorf("paths after Write = %v, want unchanged %v", again.Paths, diff.Paths)
 	}
 }
 
-// When the overall cap drops files, the reviewer is told WHICH files, so the
-// marker is a to-do list it can work through with Read and git diff rather
-// than a shrug. Files that made it onto the page — including one cut
-// mid-diff — are not listed; files it never saw are.
-func TestComputeListsTheFilesTheCapDropped(t *testing.T) {
+func TestCleanupRemovesTheDiffDirectoryAndTolerateItsAbsence(t *testing.T) {
 	workDir := t.TempDir()
-	repo := filepath.Join(workDir, "0-acme", "api")
-	base := initRepo(t, repo)
+	if err := Cleanup(workDir); err != nil {
+		t.Fatalf("Cleanup on a work dir with no diff directory: %v", err)
+	}
+	write(t, filepath.Join(workDir, DirName, "0-acme", "api.diff"), "x")
+	if err := Cleanup(workDir); err != nil {
+		t.Fatalf("Cleanup: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(workDir, DirName)); !os.IsNotExist(err) {
+		t.Error("the diff directory survived Cleanup")
+	}
+}
 
-	var b strings.Builder
-	for b.Len() < MaxFileDiffBytes/2 {
-		b.WriteString("// a line of generated nonsense that exists only to be long\n")
+// Build writes the diff files and the prompt names every one of them, with
+// the instruction to read them in full before the first pass. The prompt
+// carries the index, never the diff: its size does not grow with the change.
+func TestBuildNamesEveryDiffFileAndKeepsTheDiffOutOfThePrompt(t *testing.T) {
+	workDir := t.TempDir()
+	api := filepath.Join(workDir, "0-acme", "api")
+	web := filepath.Join(workDir, "1-acme", "web")
+	apiBase := initRepo(t, api)
+	webBase := initRepo(t, web)
+	var big strings.Builder
+	for big.Len() < 200000 {
+		big.WriteString("// a line of generated nonsense that exists only to be long\n")
 	}
-	body := b.String()
-	for i := 0; i < 6; i++ {
-		write(t, filepath.Join(repo, fmt.Sprintf("generated%d.go", i)), "package main\n"+body)
-	}
+	write(t, filepath.Join(api, "generated.go"), "package api\n"+big.String())
+	write(t, filepath.Join(web, "handler.go"), "package web\n// sentinel-change-text\n")
 
-	diff := mustCompute(t, workDir, map[string]string{"0-acme/api": base})
-	idx := strings.Index(diff.Text, "Changed files NOT shown above")
-	if idx < 0 {
-		t.Fatalf("no not-shown list after the overall cap fired:\n%s", lastBytes(diff.Text))
+	plan, err := Build(&config.Config{
+		WorkDir:           workDir,
+		ReviewBaseCommits: map[string]string{"0-acme/api": apiBase, "1-acme/web": webBase},
+		ReviewPasses:      []string{PassSecurity, PassCorrectness},
+		ReviewRound:       1,
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
 	}
-	list := diff.Text[idx:]
-	if !strings.Contains(list, "0-acme/api/generated5.go") {
-		t.Errorf("the last file was dropped but is not listed:\n%s", list)
-	}
-	if strings.Contains(list, "0-acme/api/generated0.go") {
-		t.Errorf("the first file was shown but is listed as not shown:\n%s", list)
-	}
-	if len(list) > maxNotShownListBytes+64 {
-		t.Errorf("not-shown list is %d bytes, over its %d cap", len(list), maxNotShownListBytes)
-	}
-	// Every listed file really is absent from the diff body above the list.
-	body2 := diff.Text[:idx]
-	for _, p := range strings.Fields(strings.TrimSuffix(strings.SplitN(list, ":", 2)[1], "]\n")) {
-		if strings.HasPrefix(p, "(") {
-			break
+	for _, r := range plan.Diff.Repos {
+		if r.File == "" {
+			t.Fatalf("repo %s has no diff file after Build", r.Dir)
 		}
-		if strings.Contains(body2, "b/"+strings.TrimPrefix(p, "0-acme/api/")) {
-			t.Errorf("%s is listed as not shown but its header is on the page", p)
+		if _, err := os.Stat(r.File); err != nil {
+			t.Errorf("diff file %s missing: %v", r.File, err)
+		}
+		if !strings.Contains(plan.Prompt, r.File) {
+			t.Errorf("prompt does not name the diff file %s:\n%s", r.File, firstBytes(plan.Prompt))
+		}
+	}
+	if !strings.Contains(plan.Prompt, "READ EVERY DIFF FILE IN FULL") {
+		t.Error("prompt does not insist the diff files are read before the passes")
+	}
+	if strings.Contains(plan.Prompt, "sentinel-change-text") {
+		t.Error("the diff text itself is in the prompt; only the index should be")
+	}
+	if len(plan.Prompt) > 8000 {
+		t.Errorf("prompt is %d bytes for a two-file change; it must not scale with the diff", len(plan.Prompt))
+	}
+	if !strings.Contains(plan.Prompt, "handler.go") || !strings.Contains(plan.Prompt, "generated.go") {
+		t.Error("the index does not list the changed paths")
+	}
+	for _, c := range plan.Coverage {
+		if c.State == stateChecked && c.Reason != "" {
+			t.Errorf("parameter %q checked with reason %q; nothing was truncated", c.Parameter, c.Reason)
 		}
 	}
 }
 
-func TestComputeListsNothingWhenEverythingFit(t *testing.T) {
+// The index caps the paths it lists per repository and says how many more
+// there are; the diff file still carries every one.
+func TestBuildPromptCapsThePathIndexPerRepository(t *testing.T) {
+	workDir := t.TempDir()
+	repo := filepath.Join(workDir, "0-acme", "api")
+	base := initRepo(t, repo)
+	for i := 0; i < MaxIndexPathsPerRepo+25; i++ {
+		write(t, filepath.Join(repo, fmt.Sprintf("f%03d.go", i)), "package api\n")
+	}
+	plan, err := Build(&config.Config{
+		WorkDir:           workDir,
+		ReviewBaseCommits: map[string]string{"0-acme/api": base},
+		ReviewPasses:      []string{PassSecurity, PassCorrectness},
+		ReviewRound:       1,
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if !strings.Contains(plan.Prompt, "(and 25 more") {
+		t.Errorf("prompt does not say how many paths the index left out:\n%s", plan.Prompt[len(plan.Prompt)-1500:])
+	}
+	if strings.Contains(plan.Prompt, fmt.Sprintf("f%03d.go", MaxIndexPathsPerRepo+10)) {
+		t.Error("the index lists a path past its cap")
+	}
+	if len(plan.Diff.Repos[0].Paths) != MaxIndexPathsPerRepo+25 {
+		t.Errorf("the repository's own path list was capped: %d", len(plan.Diff.Repos[0].Paths))
+	}
+}
+
+// Build writes nothing when the cost gate stands every pass down: a docs-only
+// change needs no reviewer and must not leave files for one.
+func TestBuildWritesNoFilesWhenNothingWillRun(t *testing.T) {
+	workDir := t.TempDir()
+	repo := filepath.Join(workDir, "0-acme", "api")
+	base := initRepo(t, repo)
+	write(t, filepath.Join(repo, "README.md"), "# docs only\n")
+	plan, err := Build(&config.Config{
+		WorkDir:           workDir,
+		ReviewBaseCommits: map[string]string{"0-acme/api": base},
+		ReviewPasses:      []string{PassSecurity, PassCorrectness},
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if !plan.NothingToReview() {
+		t.Fatalf("passes = %v, want none for a docs-only change", plan.Passes)
+	}
+	if _, err := os.Stat(filepath.Join(workDir, DirName)); !os.IsNotExist(err) {
+		t.Error("diff files were written for a round that runs no pass")
+	}
+}
+
+// A huge spec is cut on a rune boundary; the prompt stays valid UTF-8 and the
+// change index still follows it.
+func TestBuildPromptCapsTheSpecWithoutBreakingUTF8(t *testing.T) {
 	workDir := t.TempDir()
 	repo := filepath.Join(workDir, "0-acme", "api")
 	base := initRepo(t, repo)
 	write(t, filepath.Join(repo, "main.go"), "package main\n// changed\n")
-	diff := mustCompute(t, workDir, map[string]string{"0-acme/api": base})
-	if strings.Contains(diff.Text, "NOT shown above") {
-		t.Errorf("a diff that fit carries a not-shown list:\n%s", diff.Text)
-	}
-}
-
-func TestChunkPath(t *testing.T) {
-	for in, want := range map[string]string{
-		"diff --git a/main.go b/main.go\nindex 1..2":    "main.go",
-		"diff --git a/dir/a b.go b/dir/a b.go\n":        "dir/a b.go",
-		"diff --git a/dev/null b/new.go\nnew file mode": "new.go",
-	} {
-		if got, ok := chunkPath(in); !ok || got != want {
-			t.Errorf("chunkPath(%q) = %q,%v want %q", in, got, ok, want)
-		}
-	}
-	if _, ok := chunkPath("not a header\n"); ok {
-		t.Error("a chunk with no header must not resolve to a path")
-	}
-}
-
-// The whole prompt — diff, spec, briefs — must stay under the argv limit, so
-// the review of a very large change still starts.
-func TestBuildPromptStaysUnderTheArgvLimit(t *testing.T) {
-	workDir := t.TempDir()
-	repo := filepath.Join(workDir, "0-acme", "api")
-	base := initRepo(t, repo)
-
-	var b strings.Builder
-	for b.Len() < MaxFileDiffBytes/2 {
-		b.WriteString("// a line of generated nonsense that exists only to be long\n")
-	}
-	body := b.String()
-	for i := 0; i < 8; i++ {
-		write(t, filepath.Join(repo, fmt.Sprintf("generated%d.go", i)), "package main\n"+body)
-	}
-
-	cfg := &config.Config{
+	plan, err := Build(&config.Config{
 		WorkDir:           workDir,
 		ReviewBaseCommits: map[string]string{"0-acme/api": base},
 		ReviewPasses:      []string{PassSecurity, PassCorrectness},
-		ReviewSpec:        strings.Repeat("a very long spec sentence that goes on. ", 1000),
+		ReviewSpec:        strings.Repeat("café spec sentence that goes on. ", 1000),
 		ReviewRound:       1,
-	}
-	plan, err := Build(cfg)
+	})
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	if len(plan.Prompt) > MaxPromptBytes {
-		t.Errorf("prompt is %d bytes, over the %d cap", len(plan.Prompt), MaxPromptBytes)
-	}
 	if !utf8.ValidString(plan.Prompt) {
-		t.Error("prompt is not valid UTF-8 — a cap sliced through a rune")
+		t.Error("prompt is not valid UTF-8 — the spec cap sliced through a rune")
 	}
-	// Truncating the change and not saying so is the failure this guards.
-	for _, c := range plan.Coverage {
-		if c.State == stateChecked && c.Reason == "" {
-			t.Errorf("parameter %q is checked with no reason, but the diff was truncated", c.Parameter)
-		}
+	if !strings.Contains(plan.Prompt, "spec truncated") {
+		t.Error("the spec cap fired silently")
+	}
+	if !strings.Contains(plan.Prompt, "[The change under review]") {
+		t.Error("the change index is missing after a capped spec")
 	}
 }
 
@@ -361,22 +446,6 @@ func TestComputeHandlesNonASCIIPaths(t *testing.T) {
 	}
 }
 
-// One header per repository, not one per file. Per-file headers read as though
-// each file were its own repo and spend the byte budget on repetition.
-func TestComputeEmitsOneHeaderPerRepository(t *testing.T) {
-	workDir := t.TempDir()
-	repo := filepath.Join(workDir, "0-acme", "api")
-	base := initRepo(t, repo)
-	write(t, filepath.Join(repo, "a.go"), "package main\n\n// a\n")
-	write(t, filepath.Join(repo, "b.go"), "package main\n\n// b\n")
-	write(t, filepath.Join(repo, "c.go"), "package main\n\n// c\n")
-
-	diff := mustCompute(t, workDir, map[string]string{"0-acme/api": base})
-	if got := strings.Count(diff.Text, "--- repository 0-acme/api"); got != 1 {
-		t.Errorf("repository header appears %d times, want exactly 1:\n%s", got, diff.Text)
-	}
-}
-
 func mustCompute(t *testing.T, workDir string, baseCommits map[string]string) Diff {
 	t.Helper()
 	diff, err := Compute(workDir, baseCommits)
@@ -386,11 +455,14 @@ func mustCompute(t *testing.T, workDir string, baseCommits map[string]string) Di
 	return diff
 }
 
-func lastBytes(s string) string {
-	if len(s) > 500 {
-		return "…" + s[len(s)-500:]
+// allText joins every repository's diff, for assertions about the change as
+// a whole.
+func allText(d Diff) string {
+	var b strings.Builder
+	for _, r := range d.Repos {
+		b.WriteString(r.Text)
 	}
-	return s
+	return b.String()
 }
 
 func contains(haystack []string, needle string) bool {
@@ -407,93 +479,6 @@ func firstBytes(s string) string {
 		return s[:500] + "…"
 	}
 	return s
-}
-
-// REGRESSION: the cost gate must see every repository's changed paths even
-// when an earlier repository exhausts the diff budget. A large docs-only
-// repository followed by a code change must still run both passes — the
-// alternative is a clean review of a change the reviewer never saw.
-func TestComputeCollectsPathsFromEveryRepositoryEvenPastTheCap(t *testing.T) {
-	workDir := t.TempDir()
-	docs := filepath.Join(workDir, "0-acme", "docs")
-	api := filepath.Join(workDir, "1-acme", "api")
-	docsBase := initRepo(t, docs)
-	apiBase := initRepo(t, api)
-
-	var b strings.Builder
-	for b.Len() < MaxFileDiffBytes/2 {
-		b.WriteString("a line of prose that exists only to be long and fill the budget\n")
-	}
-	body := b.String()
-	for i := 0; i < 6; i++ {
-		write(t, filepath.Join(docs, fmt.Sprintf("guide%d.md", i)), body)
-	}
-	write(t, filepath.Join(api, "handler.go"), "package api\n// changed\n")
-
-	diff := mustCompute(t, workDir, map[string]string{"0-acme/docs": docsBase, "1-acme/api": apiBase})
-	if !diff.Truncated {
-		t.Fatal("Truncated = false, want true — the docs repository fills the budget")
-	}
-	if !contains(diff.Paths, "1-acme/api/handler.go") {
-		t.Fatalf("the second repository's change is missing from Paths: %v", diff.Paths)
-	}
-	if !strings.Contains(diff.Text, "1-acme/api/handler.go") {
-		t.Errorf("the dropped code change is not named in the not-shown list:\n%s", lastBytes(diff.Text))
-	}
-	passes, skipped := SelectPasses([]string{PassSecurity, PassCorrectness}, diff)
-	if len(passes) != 2 {
-		t.Errorf("passes = %v (skipped %v), want both — the change is not docs-only", passes, skipped)
-	}
-}
-
-// The overall cap can run out between repositories as well as within one.
-// Whatever was not emitted is truncation and must say so.
-func TestComputeMarksTruncationWhenALaterRepositoryIsDropped(t *testing.T) {
-	workDir := t.TempDir()
-	a := filepath.Join(workDir, "0-acme", "a")
-	c := filepath.Join(workDir, "1-acme", "c")
-	aBase := initRepo(t, a)
-	cBase := initRepo(t, c)
-
-	var b strings.Builder
-	for b.Len() < MaxFileDiffBytes/2 {
-		b.WriteString("// filler\n")
-	}
-	for i := 0; i < 6; i++ {
-		write(t, filepath.Join(a, fmt.Sprintf("f%d.go", i)), "package a\n"+b.String())
-	}
-	write(t, filepath.Join(c, "late.go"), "package c\n// tiny change that never reaches the page\n")
-
-	diff := mustCompute(t, workDir, map[string]string{"0-acme/a": aBase, "1-acme/c": cBase})
-	if !diff.Truncated || !strings.Contains(diff.Text, "diff truncated") {
-		t.Errorf("a dropped repository was not reported as truncation:\n%s", lastBytes(diff.Text))
-	}
-	if !strings.Contains(diff.Text, "1-acme/c/late.go") {
-		t.Errorf("the dropped repository's file is not on the not-shown list:\n%s", lastBytes(diff.Text))
-	}
-}
-
-// The passes are the part of the prompt a tail cut must never remove, so
-// they come before the diff.
-func TestBuildPromptPutsThePassesBeforeTheDiff(t *testing.T) {
-	workDir := t.TempDir()
-	repo := filepath.Join(workDir, "0-acme", "api")
-	base := initRepo(t, repo)
-	write(t, filepath.Join(repo, "main.go"), "package main\n// changed\n")
-	plan, err := Build(&config.Config{
-		WorkDir:           workDir,
-		ReviewBaseCommits: map[string]string{"0-acme/api": base},
-		ReviewPasses:      []string{PassSecurity, PassCorrectness},
-		ReviewRound:       1,
-	})
-	if err != nil {
-		t.Fatalf("Build: %v", err)
-	}
-	passes := strings.Index(plan.Prompt, "[Passes]")
-	change := strings.Index(plan.Prompt, "[The change under review]")
-	if passes < 0 || change < 0 || passes > change {
-		t.Errorf("passes at %d, change at %d — the passes must precede the diff so a tail cut cannot remove them", passes, change)
-	}
 }
 
 // config.knownReviewPasses and review.parameterForPass are a hand-kept

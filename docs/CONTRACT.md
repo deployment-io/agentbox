@@ -92,7 +92,8 @@ asked for a `<review>` block instead — see
 
 A review run reads NOTHING a previous run wrote: not `result.json`, not
 `progress.json`, not the interactive message records, not a transcript. Its
-prompt is the diff, the spec and the pass list. Consumers are expected to
+prompt is the spec, an index of the change and the pass list, and the diff
+files it names are written fresh for the round. Consumers are expected to
 enforce the same boundary structurally (the deployment.io runner moves the
 implementer's `.agentbox-output` out of the work dir before each round), so
 the guarantee does not rest on agentbox's restraint alone.
@@ -115,15 +116,18 @@ is recorded in `coverage` with its reason — never silently omitted. When every
 pass is skipped, no agent is spawned at all and the run succeeds with the
 coverage record alone.
 
-**The prompt is capped** at 100000 bytes overall — 88000 for the diff, 8000
-for the spec, 60000 for any one file's hunk — with explicit elision markers
-where content was dropped. The overall number is set by a hard limit, not by
-taste: the prompt is passed as a single argv element and Linux refuses to exec
-an argument over `MAX_ARG_STRLEN` (128 KiB), so overrunning it would stop the
-agent from starting rather than merely shorten its input. Truncation is
-recorded in the `coverage` reason of every pass that ran, because a pass that
-saw part of a change reached a partial verdict and must not be reported as
-complete.
+**The diff is delivered as files, not prompt text.** Each repository's
+complete diff against its base commit — tracked changes plus untracked files —
+is written to `<WORK_DIR>/.review/<repository dir>.diff` before the agent
+starts and removed when the run ends. The prompt carries the spec (capped at
+8000 bytes), an index of the change — each repository, its diff file and size,
+and up to 200 of its changed paths — and the pass briefs, and it instructs the
+reviewer to read every diff file in full before the first pass. Nothing about
+the change is truncated: a file has no size cap, and a reviewer that needs
+only part of one reads that part. The `.review` directory sits beside the
+checkouts, never inside one, so it is invisible to every repository's diff and
+cannot be committed by a later run. The prompt itself is passed on the agent's
+stdin in review mode, so its size is never bound by the kernel's argv limit.
 
 **A review run cannot write.** The read-only path each harness already has is
 used instead of its autonomy flag: `claude` gets `--allowedTools` with the

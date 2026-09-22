@@ -193,8 +193,23 @@ func (d *Driver) BuildArgs(cfg *config.Config) []string {
 			"-c", "mcp_servers.deployment_io.args="+jsonList(bridgeArgs),
 		)
 	}
-	args = append(args, cfg.StepPrompt+"\n\n"+trailingInstruction(cfg))
+	// A review's prompt travels on stdin (see Stdin). With no PROMPT
+	// argument, codex exec reads its instructions from stdin.
+	if !reviewing {
+		args = append(args, cfg.StepPrompt+"\n\n"+trailingInstruction(cfg))
+	}
 	return args
+}
+
+// Stdin carries the review prompt plus the trailer instruction — codex has
+// no system-prompt flag, so the instruction rides with the prompt exactly as
+// it does in the argument-borne implement path. See the claude driver's
+// Stdin for why a review prompt does not go in the args.
+func (d *Driver) Stdin(cfg *config.Config) string {
+	if cfg.Mode == config.ModeReview {
+		return cfg.StepPrompt + "\n\n" + trailingInstruction(cfg)
+	}
+	return ""
 }
 
 // trailingInstruction picks which contract this run is held to — see the

@@ -49,11 +49,10 @@ const (
 // renders them into a PR body and a human reads them there: "documentation-only
 // change" is an explanation, "skipped" on its own is a shrug.
 const (
-	ReasonNoChanges     = "no changes in the diff"
-	ReasonDocsOnly      = "documentation-only change"
-	ReasonLockfileOnly  = "lockfile-only change"
-	ReasonNoPass        = "no pass for this parameter in this release"
-	ReasonDiffTruncated = "the diff was truncated at its size cap, so this pass did not see every change"
+	ReasonNoChanges    = "no changes in the diff"
+	ReasonDocsOnly     = "documentation-only change"
+	ReasonLockfileOnly = "lockfile-only change"
+	ReasonNoPass       = "no pass for this parameter in this release"
 )
 
 // SelectPasses decides which of the requested passes actually run, and why the
@@ -106,11 +105,8 @@ func SelectPasses(requested []string, diff Diff) (passes []string, skipped map[s
 //
 // A parameter is Checked when a pass ran for it, Skipped when the cost gate
 // stood one down (carrying the gate's reason), and NotChecked when this
-// release ships no pass for it at all. Truncation is appended to the reason of
-// every pass that RAN: those are the passes whose verdict is now partial, and
-// saying so is the difference between a review with a known gap and a review
-// that looks complete.
-func BuildCoverage(passes []string, skipped map[string]string, truncated bool) []Coverage {
+// release ships no pass for it at all.
+func BuildCoverage(passes []string, skipped map[string]string) []Coverage {
 	ran := map[string]bool{}
 	for _, p := range passes {
 		if parameter, ok := parameterForPass[p]; ok {
@@ -128,11 +124,7 @@ func BuildCoverage(passes []string, skipped map[string]string, truncated bool) [
 	for _, parameter := range allParameters {
 		switch {
 		case ran[parameter]:
-			reason := ""
-			if truncated {
-				reason = ReasonDiffTruncated
-			}
-			coverage = append(coverage, Coverage{Parameter: parameter, State: stateChecked, Reason: reason})
+			coverage = append(coverage, Coverage{Parameter: parameter, State: stateChecked})
 		case skippedByParameter[parameter] != "":
 			coverage = append(coverage, Coverage{Parameter: parameter, State: stateSkipped, Reason: skippedByParameter[parameter]})
 		default:

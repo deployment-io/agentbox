@@ -31,7 +31,7 @@ const rawTrailer = "Here is what I found.\n\n<review>\n" +
 // select with no lifting at all.
 func TestLiftReviewStripsTheBlockOnEveryOutcome(t *testing.T) {
 	plan := review.Plan{Coverage: review.BuildCoverage(
-		[]string{review.PassSecurity, review.PassCorrectness}, nil, false)}
+		[]string{review.PassSecurity, review.PassCorrectness}, nil)}
 
 	for _, status := range []result.Status{
 		result.StatusSuccess,
@@ -77,7 +77,7 @@ func TestLiftReviewStripsTheBlockOnEveryOutcome(t *testing.T) {
 // coverage says a pass RAN; once the run is killed that is no longer a claim
 // agentbox can stand behind.
 func TestLiftReviewDowngradesCoverageOnAnUnfinishedRound(t *testing.T) {
-	plan := review.Plan{Coverage: review.BuildCoverage([]string{review.PassSecurity}, nil, false)}
+	plan := review.Plan{Coverage: review.BuildCoverage([]string{review.PassSecurity}, nil)}
 
 	oc := result.Outcome{Status: result.StatusTimeout, ChangesSummary: rawTrailer}
 	liftReview(&oc, plan)
@@ -193,6 +193,7 @@ func (d *recordingDriver) BuildArgs(cfg *config.Config) []string {
 	d.passesAtBuild = append([]string{}, cfg.ReviewPasses...)
 	return nil
 }
+func (d *recordingDriver) Stdin(*config.Config) string   { return "" }
 func (d *recordingDriver) DetectVersion() string         { return "test" }
 func (d *recordingDriver) NewOutputParser() OutputParser { return &fakeParser{} }
 func (d *recordingDriver) Capabilities() Capabilities    { return Capabilities{} }

@@ -3,58 +3,71 @@ package review
 import (
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 )
 
-// Caps on how much diff a review prompt may carry.
-//
-// A review that is handed half a million bytes of diff does not review it — it
-// skims, and skimming silently is the worst outcome available here. Truncating
-// with an explicit marker, and recording the truncation in the coverage reason
-// of every pass that ran, at least makes the gap visible in the PR body.
-//
-// The numbers are set by a HARD LIMIT, not by taste. Every driver passes the
-// prompt as a single argv element, and Linux caps one argument at MAX_ARG_STRLEN
-// = 128 KiB; an argument over that makes execve fail with E2BIG, so the agent
-// never starts at all and a large Step would produce a review that could not
-// run. MaxPromptBytes is the whole prompt's ceiling, comfortably under that
-// limit, and the diff and spec budgets are carved out of it.
-const (
-	// MaxPromptBytes caps the ENTIRE review prompt — diff, spec, briefs and
-	// boilerplate together. This is the number that keeps execve working.
-	MaxPromptBytes = 100000
-	// MaxDiffBytes caps the diff portion across every repository.
-	MaxDiffBytes = 88000
-	// MaxSpecBytes caps the spec the diff is judged against. A spec is
-	// usually a few hundred bytes; the cap exists so a pathological one
-	// cannot crowd the diff out of the prompt.
-	MaxSpecBytes = 8000
-	// MaxFileDiffBytes caps one file's hunk, so a single generated file
-	// cannot crowd out every other change in the Step.
-	MaxFileDiffBytes = 60000
-)
+// DirName is the directory under the work dir that holds the diff files a
+// review round reads. It sits BESIDE the repository checkouts, never inside
+// one, so the files are invisible to every repository's diff and can never be
+// committed by a fix run. Written by Write at the start of a round, removed by
+// Cleanup when the round ends.
+const DirName = ".review"
 
-// Diff is the change under review: the text handed to the agent, the paths it
-// touches (which the cost gate reads), and whether anything was elided.
+// MaxSpecBytes caps the spec the diff is judged against. A spec is usually a
+// few hundred bytes; the cap exists so a pathological one cannot crowd the
+// change index out of the prompt.
+const MaxSpecBytes = 8000
+
+// MaxIndexPathsPerRepo caps how many changed paths the prompt lists per
+// repository. The list is a map of the change, not the change itself — the
+// diff file carries every path — so a Step that touches thousands of files
+// gets a bounded index and a pointer, not a prompt the size of the change.
+const MaxIndexPathsPerRepo = 200
+
+// Diff is the change under review: one COMPLETE diff per repository, handed to
+// the reviewer as a file it reads rather than as text folded into its prompt,
+// plus the paths the cost gate reads.
+//
+// Files, not prompt text, because a prompt has a size and a diff does not: any
+// cap on inlined diff text drops part of the change on the floor, and a review
+// of part of a change reported as a review of the change is the one outcome
+// this stage must not produce. A file has no cap. The reviewer reads it with
+// the same tool it reads the repositories with, in pages if it must, and
+// decides for itself what to skip — a lock file, say — rather than having that
+// decided for it by the order the bytes happened to arrive in.
 type Diff struct {
-	// Text is the concatenated, capped diff across every repository, with
-	// elision markers where content was dropped.
-	Text string
 	// Paths is every changed path, prefixed with its repository directory
-	// so two repos changing "README.md" stay distinguishable.
+	// so two repos changing "README.md" stay distinguishable. The cost gate
+	// reads this list; it is complete regardless of size.
 	Paths []string
-	// Truncated is true when either cap fired. Recorded in the coverage
-	// reason of every pass that ran — a review of a truncated diff is a
-	// partial review and must not be reported as a complete one.
-	Truncated bool
+	// Repos is one entry per repository with a change, sorted by directory
+	// so two runs over the same tree produce the same prompt.
+	Repos []RepoDiff
+}
+
+// RepoDiff is one repository's part of the change.
+type RepoDiff struct {
+	// Dir is the repository directory relative to the work dir.
+	Dir string
+	// Base is the commit the diff is against — the commit the repository was
+	// checked out at when the Step began.
+	Base string
+	// Paths is every changed path relative to the repository, sorted.
+	Paths []string
+	// Text is the complete diff: tracked changes against Base, then one
+	// diff-against-nothing per untracked file.
+	Text string
+	// File is the absolute path the diff was written to. Empty until Write.
+	File string
 }
 
 // Empty reports whether the change under review touches nothing at all.
 func (d Diff) Empty() bool {
-	return len(d.Paths) == 0 && strings.TrimSpace(d.Text) == ""
+	return len(d.Paths) == 0
 }
 
 // Compute builds the diff of each repository's WORKING TREE against the commit
@@ -76,8 +89,8 @@ func (d Diff) Empty() bool {
 // never be the same answer, so each base commit is verified up front with
 // `git rev-parse --verify <sha>^{commit}` and any git error fails the round.
 //
-// Repositories are processed in sorted order so two runs over the same working
-// tree produce the same prompt.
+// Nothing here is capped. The diff goes to a file, and the cost gate needs
+// every path, so every repository is read in full.
 func Compute(workDir string, baseCommits map[string]string) (Diff, error) {
 	dirs := make([]string, 0, len(baseCommits))
 	for dir := range baseCommits {
@@ -85,17 +98,7 @@ func Compute(workDir string, baseCommits map[string]string) (Diff, error) {
 	}
 	sort.Strings(dirs)
 
-	// PASS ONE — every repository, no budget. Paths feed the cost gate
-	// (SelectPasses), so they must be complete regardless of how much diff
-	// text fits: a docs-only repository that fills the budget must not hide a
-	// code change in the repository after it, or the gate skips every pass
-	// and reports a clean review of a change it never saw.
-	type repoDiff struct {
-		dir, base string
-		chunks    []string
-	}
 	var out Diff
-	repos := make([]repoDiff, 0, len(dirs))
 	for _, dir := range dirs {
 		repoPath := filepath.Join(workDir, dir)
 		base := baseCommits[dir]
@@ -106,140 +109,48 @@ func Compute(workDir string, baseCommits map[string]string) (Diff, error) {
 		if err != nil {
 			return Diff{}, err
 		}
-		for _, p := range paths {
-			out.Paths = append(out.Paths, filepath.Join(dir, p))
+		if len(paths) == 0 {
+			continue
 		}
-		chunks, err := repoDiffChunks(repoPath, base)
+		text, err := repoDiffText(repoPath, base)
 		if err != nil {
 			return Diff{}, err
 		}
-		if len(chunks) > 0 {
-			repos = append(repos, repoDiff{dir: dir, base: base, chunks: chunks})
+		for _, p := range paths {
+			out.Paths = append(out.Paths, filepath.Join(dir, p))
 		}
+		out.Repos = append(out.Repos, RepoDiff{Dir: dir, Base: base, Paths: paths, Text: text})
 	}
-
-	// PASS TWO — emit diff text within the budget. Everything not emitted is
-	// truncation, whether the budget ran out mid-file, between files, or
-	// between repositories, and whether it ran out by one byte or by many.
-	var b strings.Builder
-	budget := MaxDiffBytes
-	shown := map[string]bool{} // keyed like out.Paths; see notShownMarker
-	emitted := 0               // chunks fully or partially on the page
-	total := 0
-	for _, r := range repos {
-		total += len(r.chunks)
-	}
-
-emit:
-	for _, r := range repos {
-		// ONE header per repository. Emitting it per file made the prompt
-		// read as though each file were its own repo, and spent the budget
-		// on repetition rather than on diff.
-		header := fmt.Sprintf("\n--- repository %s (against %s) ---\n", r.dir, shortSHA(r.base))
-		if len(header) >= budget {
-			break
-		}
-		b.WriteString(header)
-		budget -= len(header)
-		for _, chunk := range r.chunks {
-			if budget <= 0 {
-				break emit
-			}
-			capped, fileTruncated := capFileChunk(chunk)
-			out.Truncated = out.Truncated || fileTruncated
-			if len(capped) > budget {
-				b.WriteString(truncateBytesOnRuneBoundary(capped, budget))
-				// A file cut mid-diff is still on the page: the reviewer can
-				// see its name and the elision marker and open it. Only files
-				// that never appear go on the not-shown list.
-				markShown(shown, r.dir, chunk)
-				emitted++
-				budget = 0
-				break emit
-			}
-			b.WriteString(capped)
-			markShown(shown, r.dir, chunk)
-			emitted++
-			budget -= len(capped)
-		}
-	}
-
-	if emitted < total {
-		out.Truncated = true
-		b.WriteString(fmt.Sprintf(
-			"\n[… diff truncated: the overall cap of %d bytes was reached; later files are not shown]\n",
-			MaxDiffBytes))
-		b.WriteString(notShownMarker(out.Paths, shown))
-	}
-	out.Text = b.String()
 	return out, nil
 }
 
-// maxNotShownListBytes bounds the list of files the cap dropped. It rides
-// OUTSIDE MaxDiffBytes — it is the one thing worth spending over budget on,
-// because it turns "later files are not shown" from a shrug into a to-do list
-// the reviewer can work through with Read and git diff — but it is bounded so
-// the whole prompt still clears MaxPromptBytes with the spec and briefs.
-const maxNotShownListBytes = 1200
-
-// notShownMarker names the changed files whose diff did not make it into
-// Text, so the reviewer knows what to open rather than what it missed. Empty
-// when every changed file was shown.
-func notShownMarker(paths []string, shown map[string]bool) string {
-	var missing []string
-	for _, p := range paths {
-		if !shown[p] {
-			missing = append(missing, p)
+// Write puts each repository's diff at <workDir>/.review/<dir>.diff and
+// records the path on the RepoDiff. The directory is replaced wholesale, so a
+// file a previous round left behind — a round killed before Cleanup ran, or a
+// repository that has since stopped changing — cannot be mistaken for this
+// round's change.
+func Write(workDir string, d *Diff) error {
+	dir := filepath.Join(workDir, DirName)
+	if err := os.RemoveAll(dir); err != nil {
+		return fmt.Errorf("clearing %s: %w", dir, err)
+	}
+	for i := range d.Repos {
+		r := &d.Repos[i]
+		file := filepath.Join(dir, r.Dir+".diff")
+		if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+			return fmt.Errorf("creating %s: %w", filepath.Dir(file), err)
 		}
-	}
-	if len(missing) == 0 {
-		return ""
-	}
-	var b strings.Builder
-	b.WriteString("[Changed files NOT shown above — open them directly with Read or git diff before reporting coverage:")
-	listed := 0
-	for _, p := range missing {
-		entry := " " + p
-		if b.Len()+len(entry) > maxNotShownListBytes {
-			break
+		if err := os.WriteFile(file, []byte(r.Text), 0o644); err != nil {
+			return fmt.Errorf("writing %s: %w", file, err)
 		}
-		b.WriteString(entry)
-		listed++
+		r.File = file
 	}
-	if rest := len(missing) - listed; rest > 0 {
-		b.WriteString(fmt.Sprintf(" (and %d more)", rest))
-	}
-	b.WriteString("]\n")
-	return b.String()
+	return nil
 }
 
-// markShown records the file a chunk belongs to, keyed like Diff.Paths. A
-// chunk's first line is git's "diff --git a/<path> b/<path>" header; the
-// b/ side is the path as it exists in the working tree, which is the one the
-// reviewer would open. A chunk with no recognisable header marks nothing —
-// it is still on the page, and an unknown key would never match a path.
-func markShown(shown map[string]bool, dir, chunk string) {
-	if path, ok := chunkPath(chunk); ok {
-		shown[filepath.Join(dir, path)] = true
-	}
-}
-
-// chunkPath extracts the b/ path from a chunk's "diff --git" header.
-func chunkPath(chunk string) (string, bool) {
-	line := chunk
-	if i := strings.IndexByte(line, '\n'); i >= 0 {
-		line = line[:i]
-	}
-	const prefix = "diff --git "
-	if !strings.HasPrefix(line, prefix) {
-		return "", false
-	}
-	rest := line[len(prefix):]
-	i := strings.LastIndex(rest, " b/")
-	if i < 0 {
-		return "", false
-	}
-	return strings.TrimSpace(rest[i+len(" b/"):]), true
+// Cleanup removes the diff directory. Safe to call when nothing was written.
+func Cleanup(workDir string) error {
+	return os.RemoveAll(filepath.Join(workDir, DirName))
 }
 
 // verifyBaseCommit fails fast when the recorded baseline is not a commit this
@@ -285,74 +196,34 @@ func untrackedFiles(repoPath string) ([]string, error) {
 	return nulFields(out), nil
 }
 
-// repoDiffChunks returns the diff of this repository split into per-file
-// chunks: the tracked diff against base, then one synthetic chunk per
-// untracked file. Splitting per file is what lets MaxFileDiffBytes apply to a
-// file rather than to the whole change.
-func repoDiffChunks(repoPath, base string) ([]string, error) {
-	var chunks []string
+// repoDiffText returns the complete diff of this repository: the tracked diff
+// against base, then one synthetic diff per untracked file.
+func repoDiffText(repoPath, base string) (string, error) {
+	var b strings.Builder
 	out, err := git(repoPath, "diff", base, "--")
 	if err != nil {
-		return nil, fmt.Errorf("diffing %s against %s: %w", repoPath, shortSHA(base), err)
+		return "", fmt.Errorf("diffing %s against %s: %w", repoPath, shortSHA(base), err)
 	}
-	chunks = append(chunks, splitPerFile(out)...)
+	b.WriteString(out)
 
 	untracked, err := untrackedFiles(repoPath)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	for _, path := range untracked {
 		out, err := gitDiffNoIndex(repoPath, path)
 		if err != nil {
-			return nil, err
+			return "", err
 		}
 		if strings.TrimSpace(out) == "" {
 			continue
 		}
-		chunks = append(chunks, out)
-	}
-	return chunks, nil
-}
-
-// splitPerFile cuts a multi-file diff at each "diff --git" header. The header
-// line is kept with the chunk that follows it.
-func splitPerFile(diff string) []string {
-	const marker = "diff --git "
-	var chunks []string
-	rest := diff
-	for {
-		idx := strings.Index(rest, marker)
-		if idx < 0 {
-			if strings.TrimSpace(rest) != "" && len(chunks) == 0 {
-				chunks = append(chunks, rest)
-			}
-			return chunks
+		if b.Len() > 0 && !strings.HasSuffix(b.String(), "\n") {
+			b.WriteString("\n")
 		}
-		rest = rest[idx:]
-		next := strings.Index(rest[len(marker):], "\n"+marker)
-		if next < 0 {
-			return append(chunks, rest)
-		}
-		chunks = append(chunks, rest[:len(marker)+next+1])
-		rest = rest[len(marker)+next+1:]
+		b.WriteString(out)
 	}
-}
-
-// capFileChunk truncates one file's diff to MaxFileDiffBytes, leaving a marker
-// that says how much was dropped. The marker matters more than the bytes: a
-// silently shortened diff reads as a complete one.
-//
-// The cut lands on a rune boundary: slicing bytes would leave a half-character
-// at the seam, and the prompt is JSON-encoded and rendered downstream.
-func capFileChunk(chunk string) (string, bool) {
-	if len(chunk) <= MaxFileDiffBytes {
-		return chunk, false
-	}
-	kept := truncateBytesOnRuneBoundary(chunk, MaxFileDiffBytes)
-	dropped := len(chunk) - len(kept)
-	return kept + fmt.Sprintf(
-		"\n[… %d bytes of this file's diff elided: the per-file cap of %d bytes was reached]\n",
-		dropped, MaxFileDiffBytes), true
+	return b.String(), nil
 }
 
 // truncateBytesOnRuneBoundary returns the longest prefix of s that is at most

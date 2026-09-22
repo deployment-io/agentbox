@@ -309,8 +309,22 @@ func (d *Driver) BuildArgs(cfg *config.Config) []string {
 	if cfg.Model != "" {
 		args = append(args, "--model", cfg.Model)
 	}
-	args = append(args, cfg.StepPrompt+"\n\n"+trailingInstruction(cfg))
+	// A review's prompt travels on stdin (see Stdin). With no message
+	// argument, opencode run takes the piped stdin as the message.
+	if cfg.Mode != config.ModeReview {
+		args = append(args, cfg.StepPrompt+"\n\n"+trailingInstruction(cfg))
+	}
 	return args
+}
+
+// Stdin carries the review prompt plus the trailer instruction, folded the
+// same way the implement path folds them into the argument. See the claude
+// driver's Stdin for why a review prompt does not go in the args.
+func (d *Driver) Stdin(cfg *config.Config) string {
+	if cfg.Mode == config.ModeReview {
+		return cfg.StepPrompt + "\n\n" + trailingInstruction(cfg)
+	}
+	return ""
 }
 
 // trailingInstruction picks which contract this run is held to — see the

@@ -44,7 +44,7 @@ func TestSelectPassesCostGate(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			diff := Diff{Paths: tc.paths, Text: "diff --git a/x b/x"}
+			diff := Diff{Paths: tc.paths}
 			passes, skipped := SelectPasses(requested, diff)
 			if !equalStrings(passes, tc.wantPasses) {
 				t.Errorf("passes = %v, want %v", passes, tc.wantPasses)
@@ -79,7 +79,7 @@ func TestSelectPassesSkipsEverythingForAnEmptyDiff(t *testing.T) {
 // missing from the list would read as "not applicable" rather than "nobody
 // looked".
 func TestBuildCoverageCoversEveryParameterExactlyOnce(t *testing.T) {
-	coverage := BuildCoverage([]string{PassSecurity}, map[string]string{PassCorrectness: ReasonLockfileOnly}, false)
+	coverage := BuildCoverage([]string{PassSecurity}, map[string]string{PassCorrectness: ReasonLockfileOnly})
 	if len(coverage) != len(allParameters) {
 		t.Fatalf("coverage has %d entries, want %d", len(coverage), len(allParameters))
 	}
@@ -108,26 +108,6 @@ func TestBuildCoverageCoversEveryParameterExactlyOnce(t *testing.T) {
 		if got := byParameter[parameter]; got.State != stateNotChecked || got.Reason != ReasonNoPass {
 			t.Errorf("%s = %+v, want not checked", parameter, got)
 		}
-	}
-}
-
-// A truncated diff means every pass that RAN saw only part of the change. The
-// coverage reason is the only place that gap is visible, so it has to be there
-// — a review with a known gap is useful; one that looks complete is not.
-func TestBuildCoverageRecordsTruncationOnEveryPassThatRan(t *testing.T) {
-	coverage := BuildCoverage([]string{PassSecurity, PassCorrectness}, nil, true)
-	ran := 0
-	for _, c := range coverage {
-		if c.State != stateChecked {
-			continue
-		}
-		ran++
-		if c.Reason != ReasonDiffTruncated {
-			t.Errorf("%s reason = %q, want the truncation note", c.Parameter, c.Reason)
-		}
-	}
-	if ran != 2 {
-		t.Errorf("%d parameters reported checked, want 2", ran)
 	}
 }
 
