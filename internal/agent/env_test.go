@@ -34,6 +34,33 @@ func TestBuildEnv_StripsAgentboxInputVars(t *testing.T) {
 	}
 }
 
+// The review inputs are agentbox's contract too, and they carry exactly the
+// content that breaks Codex's shell-environment snapshot: REVIEW_SPEC is
+// free-form prose or JSON with embedded quotes and newlines, and
+// REVIEW_BASE_COMMITS is a JSON object. The agent receives the diff, the spec
+// and the pass list folded into the prompt it is given, so forwarding them is
+// pointless as well as dangerous.
+func TestBuildEnv_StripsReviewInputVars(t *testing.T) {
+	t.Setenv("REVIEW_SPEC", "{\"title\":\"Add \\\"login\\\"\",\n\"goal\":\"x\"}")
+	t.Setenv("REVIEW_PASSES", "security,correctness")
+	t.Setenv("REVIEW_BASE_COMMITS", `{"0-acme/api":"abc123"}`)
+	t.Setenv("REVIEW_ROUND", "2")
+	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+
+	env := buildEnv()
+
+	for _, key := range []string{"REVIEW_SPEC", "REVIEW_PASSES", "REVIEW_BASE_COMMITS", "REVIEW_ROUND"} {
+		for _, kv := range env {
+			if strings.HasPrefix(kv, key+"=") {
+				t.Errorf("%s must be stripped from the agent subprocess env", key)
+			}
+		}
+	}
+	if !envContains(env, "ANTHROPIC_API_KEY=sk-ant-test") {
+		t.Error("the credential must still be forwarded to the agent")
+	}
+}
+
 func envContains(env []string, kv string) bool {
 	for _, e := range env {
 		if e == kv {

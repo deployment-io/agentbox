@@ -20,6 +20,13 @@ type Driver interface {
 	Ensure(ctx context.Context) error
 	Binary() string
 	BuildArgs(cfg *config.Config) []string
+	// Stdin returns what to write on the agent's standard input, or "" to
+	// leave stdin closed. A review prompt is delivered this way rather than
+	// as an argument: Linux caps one argv element at 128 KiB, and a prompt
+	// that indexes a change of any size must not have a ceiling the change
+	// can hit. BuildArgs and Stdin are read for the same cfg and must agree
+	// on where the prompt went.
+	Stdin(cfg *config.Config) string
 	DetectVersion() string
 	NewOutputParser() OutputParser
 	// AllowedHosts returns the hostnames this agent legitimately needs

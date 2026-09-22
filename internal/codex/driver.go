@@ -15,6 +15,7 @@ import (
 
 	"github.com/deployment-io/agentbox/internal/agent"
 	"github.com/deployment-io/agentbox/internal/config"
+	"github.com/deployment-io/agentbox/internal/review"
 )
 
 const agentType = "codex"
@@ -142,12 +143,27 @@ func (d *Driver) Binary() string {
 // set by the orchestrator), so no --cd is needed. Codex has no turn-cap or
 // token-budget flag — those limits are enforced agentbox-side from the
 // JSON event stream (see agent.Run's limit watcher).
+// A REVIEW run swaps danger-full-access for --sandbox read-only and drops
+// --dangerously-bypass-approvals-and-sandbox, so the sandbox is enforced rather
+// than bypassed. `codex exec` is non-interactive and never prompts, so a write
+// the reviewer attempts is refused rather than escalated. The prompt already
+// forbids edits; this makes it a guarantee instead of a request.
 func (d *Driver) BuildArgs(cfg *config.Config) []string {
+	reviewing := cfg.Mode == config.ModeReview
+
 	args := []string{
 		"exec",
 		"--json",
-		"--sandbox", "danger-full-access",
-		"--dangerously-bypass-approvals-and-sandbox",
+	}
+	if reviewing {
+		args = append(args, "--sandbox", "read-only")
+	} else {
+		args = append(args,
+			"--sandbox", "danger-full-access",
+			"--dangerously-bypass-approvals-and-sandbox",
+		)
+	}
+	args = append(args,
 		"--skip-git-repo-check",
 		// Silence the non-essential outbound calls the agentbox proxy
 		// blocks anyway, so they don't add deny-log noise or latency: the
@@ -157,11 +173,11 @@ func (d *Driver) BuildArgs(cfg *config.Config) []string {
 		"-c", "analytics.enabled=false",
 		"-c", "otel.exporter=none",
 		"-c", "otel.metrics_exporter=none",
-	}
+	)
 	if cfg.Model != "" {
 		args = append(args, "--model", cfg.Model)
 	}
-	if cfg.MCPSocket != "" {
+	if cfg.MCPSocket != "" && !reviewing {
 		// Register the runner's tool socket as a stdio MCP server — the same
 		// bridge the claude driver uses (`agentbox mcp-bridge <socket>`). Codex
 		// has no --mcp-config flag; MCP servers live under mcp_servers.<name> in
@@ -177,8 +193,33 @@ func (d *Driver) BuildArgs(cfg *config.Config) []string {
 			"-c", "mcp_servers.deployment_io.args="+jsonList(bridgeArgs),
 		)
 	}
-	args = append(args, cfg.StepPrompt+"\n\n"+finalMessageInstruction)
+	// A review's prompt travels on stdin (see Stdin). With no PROMPT
+	// argument, codex exec reads its instructions from stdin.
+	if !reviewing {
+		args = append(args, cfg.StepPrompt+"\n\n"+trailingInstruction(cfg))
+	}
 	return args
+}
+
+// Stdin carries the review prompt plus the trailer instruction — codex has
+// no system-prompt flag, so the instruction rides with the prompt exactly as
+// it does in the argument-borne implement path. See the claude driver's
+// Stdin for why a review prompt does not go in the args.
+func (d *Driver) Stdin(cfg *config.Config) string {
+	if cfg.Mode == config.ModeReview {
+		return cfg.StepPrompt + "\n\n" + trailingInstruction(cfg)
+	}
+	return ""
+}
+
+// trailingInstruction picks which contract this run is held to — see the
+// claude driver's copy. In review mode the implementer's instruction is not
+// appended, so no <verify> or <pr_title> trailer is requested or produced.
+func trailingInstruction(cfg *config.Config) string {
+	if cfg.Mode == config.ModeReview {
+		return review.Instruction(cfg.ReviewPasses)
+	}
+	return finalMessageInstruction
 }
 
 // jsonValue renders v as a JSON literal for a `codex -c key=<value>` override

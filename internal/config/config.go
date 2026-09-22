@@ -4,8 +4,10 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -28,6 +30,18 @@ const (
 	// bidirectional stream-json session driven by user messages over a
 	// pipe (see internal/agent/interactive.go). Used by repo-aware chat.
 	ModeInteractive = "interactive"
+	// ModeReview reviews the diff an implement run produced against the
+	// Task's spec and reports findings as a <review> trailer. One agent
+	// run, no STEP_PROMPT: the work item is the diff itself, computed by
+	// internal/review from REVIEW_BASE_COMMITS.
+	//
+	// A review run reads NOTHING a previous run wrote — no result.json, no
+	// progress.json, no message records, no transcript. Its prompt is the
+	// diff, the spec and the pass list, and nothing else. The runner
+	// enforces this structurally as well (it moves the implementer's output
+	// directory out of the work dir before the round), so the guarantee
+	// does not rest on restraint here.
+	ModeReview = "review"
 )
 
 // Config captures the validated inputs for one agentbox run.
@@ -47,9 +61,35 @@ type Config struct {
 	// never preempts it.
 	TokenBudget int
 
-	// Mode is batch (default) or interactive — see the Mode* constants.
-	// From AGENT_MODE.
+	// Mode is batch (default), interactive or review — see the Mode*
+	// constants. From AGENT_MODE.
 	Mode string
+
+	// ReviewSpec is what the diff is reviewed AGAINST: the Task's structured
+	// spec as JSON, or its prose description when it has no spec. Passed
+	// through to the review prompt verbatim — agentbox does not interpret
+	// it, because a spec is for the reviewer to read, not for agentbox to
+	// parse. From REVIEW_SPEC.
+	ReviewSpec string
+
+	// ReviewPasses names the focused passes to run, in order, e.g.
+	// ["security", "correctness"]. From the comma-separated REVIEW_PASSES.
+	// Empty falls back to security and correctness, which is the only set
+	// this release ships.
+	ReviewPasses []string
+
+	// ReviewBaseCommits maps a repository directory (relative to WorkDir) to
+	// the commit it was checked out at when the Step began. THE BASELINE IS
+	// NOT HEAD: an implementer committing its own work is supported, and
+	// diffing against HEAD after that would show nothing at all. From the
+	// JSON object in REVIEW_BASE_COMMITS.
+	ReviewBaseCommits map[string]string
+
+	// ReviewRound is the 1-based round number within one Step's Review
+	// stage. Carried so the round can be named in logs and so a prompt can
+	// say whether this is a first look or a re-check after fixes. From
+	// REVIEW_ROUND.
+	ReviewRound int
 
 	// SessionID, when set, is forwarded to the agent as a stable session
 	// identifier (claude --session-id) so the transcript persists on disk
@@ -127,15 +167,22 @@ func Load() (*Config, error) {
 	}
 
 	switch c.Mode {
-	case ModeBatch, ModeInteractive:
+	case ModeBatch, ModeInteractive, ModeReview:
 	default:
-		return nil, fmt.Errorf("invalid AGENT_MODE %q: must be %q or %q", c.Mode, ModeBatch, ModeInteractive)
+		return nil, fmt.Errorf("invalid AGENT_MODE %q: must be %q, %q or %q", c.Mode, ModeBatch, ModeInteractive, ModeReview)
 	}
 
 	// STEP_PROMPT is the batch-mode work item. Interactive mode receives
-	// user turns over the message pipe, so it is not required there.
+	// user turns over the message pipe, and review mode builds its own
+	// prompt from the diff and the spec, so neither requires it.
 	if c.Mode == ModeBatch && c.StepPrompt == "" {
 		return nil, fmt.Errorf("STEP_PROMPT is required")
+	}
+
+	if c.Mode == ModeReview {
+		if err := c.loadReviewInputs(); err != nil {
+			return nil, err
+		}
 	}
 
 	appendPrompt, err := loadAppendSystemPrompt()
@@ -168,6 +215,120 @@ func Load() (*Config, error) {
 	}
 
 	return c, nil
+}
+
+// defaultReviewPasses is the pass set this release ships: the two parameters
+// the platform default policy gates on. The other six review parameters have
+// no pass and are reported NotChecked rather than silently omitted.
+var defaultReviewPasses = []string{"security", "correctness"}
+
+// knownReviewPasses is every pass name this release can actually run. A pass
+// must map to a review parameter, because the coverage record is per parameter:
+// a pass with no parameter would run, cost a model call, and then have nowhere
+// to report what it covered.
+//
+// Deliberately duplicated rather than imported from internal/review — review
+// imports config, so the dependency cannot go the other way. Two names is a
+// small enough mirror to keep by hand; adding a pass means adding it here and
+// to internal/review's parameterForPass. internal/review's
+// TestConfigAndReviewAgreeOnThePassList pins the two lists to each other.
+var knownReviewPasses = map[string]bool{
+	"security":    true,
+	"correctness": true,
+}
+
+// KnownReviewPasses returns every pass name this release can run, for the
+// cross-check test in internal/review (which can import config; config
+// cannot import review).
+func KnownReviewPasses() []string {
+	out := make([]string, 0, len(knownReviewPasses))
+	for p := range knownReviewPasses {
+		out = append(out, p)
+	}
+	return out
+}
+
+// loadReviewInputs reads and validates the REVIEW_* half of the contract.
+//
+// Only REVIEW_BASE_COMMITS is strictly required: without a baseline there is
+// no diff, and a review of nothing would report a clean bill of health for
+// work it never saw — the one failure mode a review must not have. Everything
+// else has a defensible default.
+func (c *Config) loadReviewInputs() error {
+	c.ReviewSpec = strings.TrimSpace(os.Getenv("REVIEW_SPEC"))
+	c.ReviewPasses = parseReviewPasses(os.Getenv("REVIEW_PASSES"))
+
+	raw := strings.TrimSpace(os.Getenv("REVIEW_BASE_COMMITS"))
+	if raw == "" {
+		return fmt.Errorf("REVIEW_BASE_COMMITS is required in %s mode", ModeReview)
+	}
+	commits := map[string]string{}
+	if err := json.Unmarshal([]byte(raw), &commits); err != nil {
+		return fmt.Errorf("invalid REVIEW_BASE_COMMITS: %w", err)
+	}
+	for dir, sha := range commits {
+		if strings.TrimSpace(dir) == "" || strings.TrimSpace(sha) == "" {
+			return fmt.Errorf("REVIEW_BASE_COMMITS has an empty repository directory or commit")
+		}
+		// Every key is joined onto WORK_DIR and handed to git -C. A key
+		// that escapes the work dir ("..", an absolute path) would point
+		// the review at a repository outside the Step's workspace, so it
+		// is rejected here rather than resolved.
+		if !filepath.IsLocal(dir) {
+			return fmt.Errorf("REVIEW_BASE_COMMITS key %q must be a path inside WORK_DIR", dir)
+		}
+	}
+	if len(commits) == 0 {
+		return fmt.Errorf("REVIEW_BASE_COMMITS names no repositories")
+	}
+	c.ReviewBaseCommits = commits
+
+	// REVIEW_ROUND labels the round. Absent or unreadable means the first
+	// one — a wrong label is not worth failing a review over.
+	c.ReviewRound = 1
+	if round, err := strconv.Atoi(strings.TrimSpace(os.Getenv("REVIEW_ROUND"))); err == nil && round > 0 {
+		c.ReviewRound = round
+	}
+	return nil
+}
+
+// parseReviewPasses splits the comma-separated pass list, dropping empties,
+// duplicates and names this release cannot run, while preserving order.
+//
+// An unknown name is DROPPED WITH A WARNING rather than accepted. Carried
+// through, it would reach the prompt as a pass the agent is asked to run and
+// the trailer instruction as a parameter it may report against — producing
+// findings under a parameter no consumer can map, which the runner then
+// annotates rather than acts on. The warning is what makes a newer runner
+// talking to an older image visible instead of merely quiet.
+//
+// An empty list — whether unset or emptied by the filter — is the default set
+// rather than "no passes": a review asked to run with no passes at all would
+// report nothing and look clean.
+func parseReviewPasses(raw string) []string {
+	seen := map[string]bool{}
+	var out []string
+	var dropped []string
+	for _, p := range strings.Split(raw, ",") {
+		p = strings.ToLower(strings.TrimSpace(p))
+		if p == "" || seen[p] {
+			continue
+		}
+		seen[p] = true
+		if !knownReviewPasses[p] {
+			dropped = append(dropped, p)
+			continue
+		}
+		out = append(out, p)
+	}
+	if len(dropped) > 0 {
+		fmt.Fprintf(os.Stderr, "[agentbox] review: ignoring unknown REVIEW_PASSES %s; this image can run %s\n",
+			strings.Join(dropped, ", "), strings.Join(defaultReviewPasses, ", "))
+	}
+	if len(out) == 0 {
+		return append([]string{}, defaultReviewPasses...)
+	}
+	return out
 }
 
 // agentVersionForType reads the env var that holds the pinned version

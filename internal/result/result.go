@@ -107,6 +107,10 @@ type Outcome struct {
 	// PLAN_tasks_verification.md.
 	VerifyResult *VerifyResult `json:"verify_result,omitempty"`
 
+	// ReviewResult is what a review-mode run found. Nil for every other
+	// mode, and for a review that produced no parseable trailer.
+	ReviewResult *ReviewResult `json:"review_result,omitempty"`
+
 	// ExitCode is the classified exit code (see Exit* constants:
 	// 0 success, 1 generic execution failure, 2 auth/rate-limit,
 	// 3 cancelled, 4 timeout). agentbox's process exits with this
@@ -248,5 +252,21 @@ func WriteFailure(err error, summary string) error {
 		ChangesSummary: summary,
 		Error:          err.Error(),
 		ExitCode:       ExitExecutionFailure,
+	})
+}
+
+// WriteReviewFailure is WriteFailure for a review run that never reached the
+// agent: the outcome carries a review_result whose coverage names the failure
+// for every parameter, so the consumer records "not checked, because X"
+// rather than finding no review at all.
+func WriteReviewFailure(err error, coverage []ReviewCoverage) error {
+	return Write(Outcome{
+		Status:   StatusFailure,
+		Error:    err.Error(),
+		ExitCode: ExitExecutionFailure,
+		ReviewResult: &ReviewResult{
+			Findings: []ReviewFinding{},
+			Coverage: coverage,
+		},
 	})
 }

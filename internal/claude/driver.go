@@ -14,6 +14,7 @@ import (
 
 	"github.com/deployment-io/agentbox/internal/agent"
 	"github.com/deployment-io/agentbox/internal/config"
+	"github.com/deployment-io/agentbox/internal/review"
 )
 
 // rawStreamLogPath is the in-container path that captures Claude Code's
@@ -87,6 +88,18 @@ Final-message format. Your final assistant message must contain, at the very end
 
 Emit <verify> and <pr_title> only here, at the very end.`
 
+// trailingInstruction picks which contract this run is held to. A REVIEW run
+// is asked for a <review> trailer and is NOT asked for the implementer's
+// <verify> or <pr_title> — it changes nothing, so a verification result would
+// be a claim about someone else's work and a PR title would be a review
+// naming the change it reviewed.
+func trailingInstruction(cfg *config.Config) string {
+	if cfg.Mode == config.ModeReview {
+		return review.Instruction(cfg.ReviewPasses)
+	}
+	return finalMessageInstruction
+}
+
 func init() {
 	agent.Register(agentType, NewDriver)
 }
@@ -138,14 +151,33 @@ func (d *Driver) Binary() string {
 	return "claude"
 }
 
+// BuildArgs assembles the headless `claude -p` invocation.
+//
+// A REVIEW run is held to the read-only allowlist instead of
+// --dangerously-skip-permissions. The prompt tells the reviewer not to edit
+// anything, but a prompt is a request and an allowlist is a guarantee: a
+// reviewer that edits the code it is reviewing produces a diff nobody
+// authorised, inside a stage whose whole job is to judge the diff it was given.
+// It also gets no MCP tools — review needs none, and a tool channel the
+// reviewer cannot use is a channel it cannot misuse.
 func (d *Driver) BuildArgs(cfg *config.Config) []string {
+	reviewing := cfg.Mode == config.ModeReview
+
 	// Claude Code rejects --output-format=stream-json + -p without --verbose.
-	args := []string{
-		"-p", cfg.StepPrompt,
-		"--append-system-prompt", finalMessageInstruction,
+	//
+	// A review's prompt travels on stdin (see Stdin), so -p is left bare:
+	// with no positional prompt, claude -p reads the prompt from stdin.
+	args := []string{"-p"}
+	if !reviewing {
+		args = append(args, cfg.StepPrompt)
+	}
+	args = append(args,
+		"--append-system-prompt", trailingInstruction(cfg),
 		"--output-format", "stream-json",
 		"--verbose",
-		"--dangerously-skip-permissions",
+	)
+	if !reviewing {
+		args = append(args, "--dangerously-skip-permissions")
 	}
 	if cfg.MaxTurns != "" {
 		args = append(args, "--max-turns", cfg.MaxTurns)
@@ -153,12 +185,19 @@ func (d *Driver) BuildArgs(cfg *config.Config) []string {
 	if cfg.Model != "" {
 		args = append(args, "--model", cfg.Model)
 	}
-	if cfg.MCPSocket != "" {
+	if cfg.MCPSocket != "" && !reviewing {
 		// Point Claude Code's MCP client at the runner's tool socket via the
 		// `agentbox mcp-bridge` stdio bridge. --dangerously-skip-permissions
 		// (set above) also auto-allows these tools, so the agent invokes them
 		// without a permission prompt.
 		args = append(args, "--mcp-config", mcpConfigJSON(cfg.MCPSocket))
+	}
+	if reviewing {
+		// Appended LAST: --allowedTools is variadic and consumes every
+		// following token. Same list and same reasoning as the read-only
+		// interactive path.
+		args = append(args, "--allowedTools")
+		args = append(args, readOnlyAllowedTools...)
 	}
 	return args
 }
@@ -183,6 +222,18 @@ func mcpConfigJSON(socket string) string {
 		`{"mcpServers":{"deployment-io":{"command":%q,"args":[%s]}}}`,
 		command, strings.Join(quoted, ","),
 	)
+}
+
+// Stdin carries the review prompt. As an argv element a prompt is capped at
+// 128 KiB by the kernel, and a review prompt indexes a change of any size; on
+// stdin nothing about its size is load-bearing. An implement run keeps its
+// prompt in the args: that path is exercised by every Task today and its
+// prompt is a description, not an index.
+func (d *Driver) Stdin(cfg *config.Config) string {
+	if cfg.Mode == config.ModeReview {
+		return cfg.StepPrompt
+	}
+	return ""
 }
 
 func (d *Driver) DetectVersion() string {

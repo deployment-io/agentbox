@@ -18,6 +18,7 @@ import (
 	"github.com/deployment-io/agentbox/internal/config"
 	"github.com/deployment-io/agentbox/internal/progress"
 	"github.com/deployment-io/agentbox/internal/result"
+	"github.com/deployment-io/agentbox/internal/review"
 	"github.com/deployment-io/agentbox/internal/verify"
 )
 
@@ -63,10 +64,40 @@ const (
 func Run(ctx context.Context, cfg *config.Config, driver Driver) (outcome result.Outcome) {
 	agentVersion := driver.DetectVersion()
 
-	// Steer the agent to write inside the checked-out repo subdirs rather than
-	// the /work root (its cwd). Agent-agnostic; every batch driver folds
-	// cfg.StepPrompt into its args. No-op when there are no repositories.
-	cfg.StepPrompt = anchorPromptToRepos(cfg.StepPrompt, cfg.WorkDir)
+	// Review mode's work item is the diff, not a prompt someone handed us: it
+	// is computed here, before anything else, because the cost gate can decide
+	// that no pass is worth running and that answer needs no agent at all.
+	var reviewPlan review.Plan
+	if cfg.Mode == config.ModeReview {
+		plan, err := review.Build(cfg)
+		if err != nil {
+			// The diff could not be computed, so nothing was examined. This
+			// must FAIL rather than come back with an empty findings list,
+			// which the consumer would read as a clean review.
+			return failedReviewOutcome(cfg, agentVersion, err)
+		}
+		reviewPlan = plan
+		// The diff files are this round's input and nobody else's: a fix
+		// run that followed would otherwise find last round's change on
+		// disk, and the next round rewrites them anyway.
+		defer review.Cleanup(cfg.WorkDir)
+		if reviewPlan.NothingToReview() {
+			return skippedReviewOutcome(cfg, agentVersion, reviewPlan)
+		}
+		cfg.StepPrompt = reviewPlan.Prompt
+		// Narrow the config to the passes the cost gate actually left
+		// standing, BEFORE BuildArgs reads it. The drivers derive the
+		// trailer instruction's parameter list from cfg.ReviewPasses, so
+		// without this a gated-out pass is still named as one the agent may
+		// report against — inviting findings for a pass that never ran.
+		cfg.ReviewPasses = reviewPlan.Passes
+	} else {
+		// Steer the agent to write inside the checked-out repo subdirs rather
+		// than the /work root (its cwd). Agent-agnostic; every batch driver
+		// folds cfg.StepPrompt into its args. No-op when there are no
+		// repositories — and meaningless for a review, which writes nothing.
+		cfg.StepPrompt = anchorPromptToRepos(cfg.StepPrompt, cfg.WorkDir)
+	}
 
 	// Snapshot each repository's commit BEFORE the agent can move it. This is
 	// the baseline a failed verify is replayed against — see
@@ -76,6 +107,9 @@ func Run(ctx context.Context, cfg *config.Config, driver Driver) (outcome result
 	cmd := exec.Command(driver.Binary(), driver.BuildArgs(cfg)...)
 	cmd.Dir = cfg.WorkDir
 	cmd.Env = buildEnv()
+	if in := driver.Stdin(cfg); in != "" {
+		cmd.Stdin = strings.NewReader(in)
+	}
 
 	parser := driver.NewOutputParser()
 	pr, pw := io.Pipe()
@@ -135,11 +169,15 @@ func Run(ctx context.Context, cfg *config.Config, driver Driver) (outcome result
 		_ = pw.Close()
 		<-parseDone
 		endedAt = time.Now().Unix()
-		return result.Outcome{
+		oc := result.Outcome{
 			Status:   result.StatusFailure,
 			ExitCode: result.ExitExecutionFailure,
 			Error:    fmt.Sprintf("failed to start %s: %v", driver.Binary(), err),
 		}
+		if cfg.Mode == config.ModeReview {
+			liftReview(&oc, reviewPlan)
+		}
+		return oc
 	}
 
 	watcherCtx, stopWatcher := context.WithCancel(ctx)
@@ -167,6 +205,13 @@ func Run(ctx context.Context, cfg *config.Config, driver Driver) (outcome result
 		done <- err
 	}()
 
+	// Every exit path produces an Outcome here and the review / verify
+	// post-processing happens once, below. A shutdown path that returned
+	// directly used to skip liftReview entirely, so a review killed by
+	// SIGTERM, the no-activity watchdog or the turn cap carried its raw
+	// <review> block in changes_summary (and, on the failure paths, inside
+	// Error) with no review_result at all.
+	var oc result.Outcome
 	select {
 	case err := <-done:
 		// A run that merely ran hot says so here. Without this the first
@@ -179,19 +224,118 @@ func Run(ctx context.Context, cfg *config.Config, driver Driver) (outcome result
 				fmt.Fprintf(os.Stderr, "[agentbox] %s\n", mem)
 			}
 		}
-		oc := buildOutcome(err, parser.State(), stderrBuf.String(), driver.Binary())
-		annotateVerifyBaseline(ctx, cfg, startCommits, &oc)
-		return oc
+		oc = buildOutcome(err, parser.State(), stderrBuf.String(), driver.Binary())
 	case <-ctx.Done():
-		return gracefulShutdown(cmd, done, parser, reasonSignal, "")
+		oc = gracefulShutdown(cmd, done, parser, reasonSignal, "")
 	case <-timeoutReached:
 		detail := fmt.Sprintf("no agent output for %s; subprocess killed", cfg.NoActivityTimeout)
 		fmt.Fprintf(os.Stderr, "[agentbox] %s\n", detail)
-		return gracefulShutdown(cmd, done, parser, reasonTimeout, detail)
+		oc = gracefulShutdown(cmd, done, parser, reasonTimeout, detail)
 	case msg := <-limitReached:
 		detail := msg + "; subprocess killed"
 		fmt.Fprintf(os.Stderr, "[agentbox] %s\n", detail)
-		return gracefulShutdown(cmd, done, parser, reasonLimit, detail)
+		oc = gracefulShutdown(cmd, done, parser, reasonLimit, detail)
+	}
+
+	if cfg.Mode == config.ModeReview {
+		liftReview(&oc, reviewPlan)
+		return oc
+	}
+	annotateVerifyBaseline(ctx, cfg, startCommits, &oc)
+	return oc
+}
+
+// liftReview moves the agent's <review> trailer out of its final message and
+// into the outcome, and puts the stripped message back as the changes summary.
+//
+// Stripping is not optional and is not conditional on the trailer parsing: the
+// block is machine payload, and changes_summary is rendered verbatim into a
+// pull-request body. A malformed block that leaked there would show a reviewer
+// raw JSON where the review's prose should be.
+func liftReview(oc *result.Outcome, plan review.Plan) {
+	reviewResult, stripped := review.LiftResult(oc.ChangesSummary, plan.Coverage)
+	oc.ChangesSummary = stripped
+	// Error is built from the agent's own final message on several failure
+	// paths (see failureMessage), so it can carry the raw block too. Strip it
+	// for the same reason: Error is rendered to a human, and a reader looking
+	// for why the round died should not be handed a wall of JSON.
+	oc.Error = review.Strip(oc.Error)
+	if oc.Status != result.StatusSuccess {
+		// The round did not finish, so the planned coverage — which says a
+		// pass RAN — is no longer a claim agentbox can stand behind. Report
+		// the truth: nothing is known to have been checked.
+		reviewResult.Coverage = review.FailedCoverage(
+			fmt.Sprintf("the review run ended as %s before it could report coverage", oc.Status))
+	}
+	oc.ReviewResult = reviewResult
+	// A review changes nothing, so the implementer's fields describe work it
+	// did not do. Clear them rather than let a stray trailer from a confused
+	// agent reach the runner, which merges them into the Step's own record.
+	oc.FilesChanged = nil
+	oc.VerifyResult = nil
+	oc.PRTitle = ""
+}
+
+// skippedReviewOutcome is the answer when the cost gate stood every pass down:
+// a SUCCESSFUL run that examined nothing, with the coverage record saying why.
+//
+// Success rather than a skip status on purpose — the review did what it was
+// asked to do, which was to decide that a documentation-only change does not
+// need a security pass. The consumer reads the coverage, not the status, to
+// learn what was examined.
+func skippedReviewOutcome(cfg *config.Config, agentVersion string, plan review.Plan) result.Outcome {
+	now := time.Now().Unix()
+	reasons := map[string]bool{}
+	for _, c := range plan.Coverage {
+		if c.Reason != "" && c.Reason != review.ReasonNoPass {
+			reasons[c.Reason] = true
+		}
+	}
+	summary := "No review pass was worth running on this change."
+	for reason := range reasons {
+		summary = "No review pass was run: " + reason + "."
+		break
+	}
+	fmt.Fprintf(os.Stderr, "[agentbox] review: %s\n", summary)
+	return result.Outcome{
+		Status:         result.StatusSuccess,
+		ExitCode:       result.ExitSuccess,
+		AgentType:      cfg.AgentType,
+		AgentVersion:   agentVersion,
+		StartedAt:      now,
+		EndedAt:        now,
+		ChangesSummary: summary,
+		ReviewResult:   &result.ReviewResult{Findings: []result.ReviewFinding{}, Coverage: plan.Coverage},
+	}
+}
+
+// failedReviewOutcome is the answer when the diff itself could not be
+// computed: a FAILED run whose coverage says, for every parameter, that nothing
+// was checked and why.
+//
+// Failure rather than an empty success on purpose, and the distinction is the
+// whole point of the check that produces it. A missing base commit or a
+// mis-keyed repository used to yield an empty diff, which the passes then
+// reviewed and reported clean — the review equivalent of a test suite that
+// passes because it ran no tests. The runner treats a failed round as
+// non-fatal, ends the loop and says so in the pull request, which is the
+// correct outcome here: no claim is made about work nobody looked at.
+func failedReviewOutcome(cfg *config.Config, agentVersion string, err error) result.Outcome {
+	now := time.Now().Unix()
+	reason := "the review could not compute the diff: " + err.Error()
+	fmt.Fprintf(os.Stderr, "[agentbox] review: %s\n", reason)
+	return result.Outcome{
+		Status:       result.StatusFailure,
+		ExitCode:     result.ExitExecutionFailure,
+		AgentType:    cfg.AgentType,
+		AgentVersion: agentVersion,
+		StartedAt:    now,
+		EndedAt:      now,
+		Error:        reason,
+		ReviewResult: &result.ReviewResult{
+			Findings: []result.ReviewFinding{},
+			Coverage: review.FailedCoverage(reason),
+		},
 	}
 }
 
@@ -233,6 +377,16 @@ var agentboxInputEnv = map[string]bool{
 	"READ_ONLY":                 true,
 	"MAX_BUDGET_USD":            true,
 	"APPEND_SYSTEM_PROMPT_FILE": true,
+	// Review-mode inputs (read by config.Load; the agent receives the diff,
+	// the spec and the pass list folded into the prompt it is given). Stripped
+	// for the same reason STEP_PROMPT is: REVIEW_SPEC is free-form prose or
+	// JSON with embedded quotes and newlines, and REVIEW_BASE_COMMITS is a
+	// JSON object — both break Codex's shell-environment snapshot with
+	// "Unterminated quoted string".
+	"REVIEW_SPEC":         true,
+	"REVIEW_PASSES":       true,
+	"REVIEW_BASE_COMMITS": true,
+	"REVIEW_ROUND":        true,
 }
 
 // buildEnv forwards the parent env minus agentbox's own input-contract vars

@@ -35,6 +35,10 @@ func setEnv(t *testing.T, want map[string]string) {
 		"MAX_BUDGET_USD",
 		"READ_ONLY",
 		"APPEND_SYSTEM_PROMPT_FILE",
+		"REVIEW_SPEC",
+		"REVIEW_PASSES",
+		"REVIEW_BASE_COMMITS",
+		"REVIEW_ROUND",
 	}
 	for _, v := range vars {
 		t.Setenv(v, want[v])
