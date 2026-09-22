@@ -239,3 +239,75 @@ func writeFile(t *testing.T, path, content string) {
 		t.Fatal(err)
 	}
 }
+
+// stdinDriver is a driver whose "agent" is a shell that copies its standard
+// input to a file. It proves Run actually pipes Driver.Stdin into the
+// subprocess — the drivers' own tests only show what Stdin returns.
+type stdinDriver struct {
+	recordingDriver
+	stdin   string
+	outFile string
+}
+
+func (d *stdinDriver) Binary() string { return "sh" }
+func (d *stdinDriver) BuildArgs(cfg *config.Config) []string {
+	d.built = true
+	return []string{"-c", "cat > " + d.outFile}
+}
+func (d *stdinDriver) Stdin(*config.Config) string { return d.stdin }
+
+// A review prompt travels on stdin. Run must write Driver.Stdin to the
+// subprocess, byte for byte and in full — a prompt that arrived cut short
+// would be a review of a change index the reviewer never finished reading.
+func TestRunPipesDriverStdinToTheAgent(t *testing.T) {
+	workDir := t.TempDir()
+	repo := filepath.Join(workDir, "0-acme", "api")
+	base := initTestRepo(t, repo)
+	writeFile(t, filepath.Join(repo, "main.go"), "package main\n// changed\n")
+	t.Setenv("RESULT_PATH", filepath.Join(t.TempDir(), "result.json"))
+
+	// Well past any pipe buffer, so a Run that wrote stdin without waiting
+	// for the reader would be caught too.
+	prompt := strings.Repeat("the change index and the spec, line after line\n", 20000)
+	driver := &stdinDriver{stdin: prompt, outFile: filepath.Join(t.TempDir(), "stdin.txt")}
+	cfg := &config.Config{
+		Mode:              config.ModeReview,
+		WorkDir:           workDir,
+		AgentType:         "claude-code",
+		ReviewPasses:      []string{review.PassSecurity, review.PassCorrectness},
+		ReviewBaseCommits: map[string]string{"0-acme/api": base},
+		ReviewRound:       1,
+	}
+	oc := Run(context.Background(), cfg, driver)
+	if oc.Status != result.StatusSuccess {
+		t.Fatalf("status = %s (%s), want success", oc.Status, oc.Error)
+	}
+	got, err := os.ReadFile(driver.outFile)
+	if err != nil {
+		t.Fatalf("the agent received nothing on stdin: %v", err)
+	}
+	if string(got) != prompt {
+		t.Errorf("stdin received %d bytes, want %d; content %s",
+			len(got), len(prompt), map[bool]string{true: "matches as a prefix", false: "differs"}[strings.HasPrefix(prompt, string(got))])
+	}
+}
+
+// And nothing on stdin when the driver has nothing to send: an implement
+// run's agent must see a closed stdin, not block on an open one.
+func TestRunLeavesStdinClosedWhenTheDriverSendsNothing(t *testing.T) {
+	workDir := t.TempDir()
+	t.Setenv("RESULT_PATH", filepath.Join(t.TempDir(), "result.json"))
+	driver := &stdinDriver{stdin: "", outFile: filepath.Join(t.TempDir(), "stdin.txt")}
+	cfg := &config.Config{Mode: config.ModeBatch, WorkDir: workDir, AgentType: "claude-code", StepPrompt: "do the thing"}
+	oc := Run(context.Background(), cfg, driver)
+	if oc.Status != result.StatusSuccess {
+		t.Fatalf("status = %s (%s), want success — cat on a closed stdin exits at once", oc.Status, oc.Error)
+	}
+	got, err := os.ReadFile(driver.outFile)
+	if err != nil {
+		t.Fatalf("cat never ran: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("stdin carried %d bytes, want none", len(got))
+	}
+}
