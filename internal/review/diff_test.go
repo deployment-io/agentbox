@@ -500,3 +500,38 @@ func TestConfigAndReviewAgreeOnThePassList(t *testing.T) {
 		}
 	}
 }
+
+// The review prompt states the turn budget when there is one, so a reviewer
+// nearing it reports instead of being cut off with nothing; and says nothing
+// when there is no cap to plan against.
+func TestBuildPromptStatesTheTurnBudget(t *testing.T) {
+	workDir := t.TempDir()
+	repo := filepath.Join(workDir, "0-acme", "api")
+	base := initRepo(t, repo)
+	write(t, filepath.Join(repo, "main.go"), "package main\n// changed\n")
+	build := func(maxTurns string) string {
+		plan, err := Build(&config.Config{
+			WorkDir:           workDir,
+			ReviewBaseCommits: map[string]string{"0-acme/api": base},
+			ReviewPasses:      []string{PassSecurity, PassCorrectness},
+			ReviewRound:       1,
+			MaxTurns:          maxTurns,
+		})
+		if err != nil {
+			t.Fatalf("Build: %v", err)
+		}
+		return plan.Prompt
+	}
+	with := build("80")
+	if !strings.Contains(with, "at most 80 turns") || !strings.Contains(with, "write your report") {
+		t.Errorf("a prompt with a cap does not state the budget:\n%s", with)
+	}
+	if strings.Index(with, "[Turn budget]") > strings.Index(with, "[Passes]") {
+		t.Error("the turn budget comes after the passes; it must be read before the work starts")
+	}
+	for _, none := range []string{"", "0", "abc"} {
+		if p := build(none); strings.Contains(p, "[Turn budget]") {
+			t.Errorf("MAX_TURNS %q produced a budget section", none)
+		}
+	}
+}

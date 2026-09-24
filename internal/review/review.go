@@ -3,6 +3,7 @@ package review
 import (
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/deployment-io/agentbox/internal/config"
@@ -183,6 +184,15 @@ func buildPrompt(cfg *config.Config, plan Plan) string {
 			}
 			b.WriteString("    " + p + "\n")
 		}
+	}
+
+	// The turn budget, stated so the reviewer can plan against it. Every
+	// read is a turn, and a reviewer that runs into the cap mid-trace is
+	// stopped by its harness with no report at all — the whole round is
+	// lost, not just its last few reads. Told the budget, a reviewer nearing
+	// it reports what it has.
+	if n, err := strconv.Atoi(strings.TrimSpace(cfg.MaxTurns)); err == nil && n > 0 {
+		b.WriteString(fmt.Sprintf("\n[Turn budget]\nYou have at most %d turns for this review, and every file read or search is one. Read the diff files first, then follow what the change touches only as far as the budget allows. If you are within 5 turns of the limit, stop exploring and write your report with what you have — an incomplete review that reports is worth more than a thorough one that is cut off.\n", n))
 	}
 
 	b.WriteString("\n[Passes]\n")

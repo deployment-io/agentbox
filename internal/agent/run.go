@@ -85,6 +85,14 @@ func Run(ctx context.Context, cfg *config.Config, driver Driver) (outcome result
 			return skippedReviewOutcome(cfg, agentVersion, reviewPlan)
 		}
 		cfg.StepPrompt = reviewPlan.Prompt
+		// Say which turn cap this review received. The runner logs the cap it
+		// passed; this line is the other end, and the pair locates a limit
+		// lost between them.
+		maxTurns := cfg.MaxTurns
+		if strings.TrimSpace(maxTurns) == "" {
+			maxTurns = "none"
+		}
+		fmt.Fprintf(os.Stderr, "[agentbox] review: turn cap %s\n", maxTurns)
 		// Narrow the config to the passes the cost gate actually left
 		// standing, BEFORE BuildArgs reads it. The drivers derive the
 		// trailer instruction's parameter list from cfg.ReviewPasses, so
