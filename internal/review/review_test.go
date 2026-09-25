@@ -102,6 +102,37 @@ func TestTrailerRulesDocumentPreviousOnlyWhenFindingsAreGiven(t *testing.T) {
 	}
 }
 
+// The prompt opens by telling the reviewer it is not implementing anything and
+// must not touch the tree. That stays whether or not the runner mounted the
+// repositories read-only — it aims the run at reading — but it must never be
+// softened into a claim that the tree is off limits only by request, which
+// would read as an invitation to try. So: the instruction is present, and the
+// prompt makes no promise about it either way.
+func TestPromptForbidsTouchingTheWorkingTree(t *testing.T) {
+	cfg := reviewConfig(t, nil)
+	for _, readOnlyMounts := range []bool{false, true} {
+		cfg.ReviewReadOnlyMounts = readOnlyMounts
+		prompt := buildPrompt(cfg, Plan{Passes: []string{PassSecurity}})
+
+		for _, s := range []string{
+			"You are NOT implementing anything",
+			"do not edit, create or delete any file",
+			"do not run any command that changes the working tree",
+		} {
+			if !strings.Contains(prompt, s) {
+				t.Errorf("with read-only mounts=%t the prompt dropped %q:\n%s", readOnlyMounts, s, prompt)
+			}
+		}
+		// Nothing in the prompt may characterise the rule as merely asked
+		// for, or as enforced by a mechanism the reviewer could test.
+		for _, claim := range []string{"read-only mount", "mounted read-only", "but a prompt is a request", "if you try"} {
+			if strings.Contains(strings.ToLower(prompt), strings.ToLower(claim)) {
+				t.Errorf("the prompt claims something about enforcement (%q):\n%s", claim, prompt)
+			}
+		}
+	}
+}
+
 // The previously-reported section sits after the change index and before the
 // passes: the reviewer has just been told where the code is and has not yet
 // started looking, so the status question is answered by reading the code.

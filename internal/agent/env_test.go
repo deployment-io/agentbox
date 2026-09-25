@@ -47,11 +47,12 @@ func TestBuildEnv_StripsReviewInputVars(t *testing.T) {
 	t.Setenv("REVIEW_BASE_COMMITS", `{"0-acme/api":"abc123"}`)
 	t.Setenv("REVIEW_ROUND", "2")
 	t.Setenv("REVIEW_OPEN_FINDINGS", `[{"key":"sec-env-dump","what":"GET /env returns process.env"}]`)
+	t.Setenv("REVIEW_READONLY_MOUNTS", "1")
 	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-test")
 
 	env := buildEnv()
 
-	for _, key := range []string{"REVIEW_SPEC", "REVIEW_PASSES", "REVIEW_BASE_COMMITS", "REVIEW_ROUND", "REVIEW_OPEN_FINDINGS"} {
+	for _, key := range []string{"REVIEW_SPEC", "REVIEW_PASSES", "REVIEW_BASE_COMMITS", "REVIEW_ROUND", "REVIEW_OPEN_FINDINGS", "REVIEW_READONLY_MOUNTS"} {
 		for _, kv := range env {
 			if strings.HasPrefix(kv, key+"=") {
 				t.Errorf("%s must be stripped from the agent subprocess env", key)

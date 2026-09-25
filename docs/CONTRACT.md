@@ -156,10 +156,33 @@ stdin in review mode, so its size is never bound by the kernel's argv limit.
 **A review run cannot write.** The read-only path each harness already has is
 used instead of its autonomy flag: `claude` gets `--allowedTools` with the
 read-only allowlist and no `--dangerously-skip-permissions`, `codex` gets
-`--sandbox read-only` without `--dangerously-bypass-approvals-and-sandbox`,
-and `opencode` gets a config denying `edit` and `bash`. The prompt also says
-not to touch the tree, but a prompt is a request and this is the guarantee.
-No MCP tool channel is wired in review mode either — a reviewer needs none.
+`--sandbox read-only` without `--dangerously-bypass-approvals-and-sandbox`
+(but see `REVIEW_READONLY_MOUNTS` below), and `opencode` gets a config denying
+`edit` and `bash`. The prompt also says not to touch the tree, but a prompt is
+a request and this is the guarantee. No MCP tool channel is wired in review
+mode either — a reviewer needs none.
+
+**`REVIEW_READONLY_MOUNTS` moves that guarantee to the mount.** A runner that
+bind-mounts every repository read-only into the review container sets it, and
+agentbox then trusts the kernel rather than the harness. It matters for
+`codex`: `--sandbox read-only` is implemented with bubblewrap, which cannot
+create namespaces inside agentbox's container (no capabilities, read-only
+rootfs), so with the sandbox on **every command the reviewer runs fails and
+the review examines nothing**. With the variable set, a `codex` review runs
+with the same `--sandbox danger-full-access` plus
+`--dangerously-bypass-approvals-and-sandbox` an implement run uses — the
+mounts, not Codex, are what make the tree unwritable. **A `codex` review uses
+Codex's own read-only sandbox only when the variable is absent**, which is the
+older-runner case: a review that cannot run is safer than one that could
+write. Everything else review mode does is unchanged either way — the
+`<review>` trailer instruction, no MCP tool channel, the prompt on stdin. The
+`claude` and `opencode` review paths do not read it and are unchanged.
+
+agentbox VERIFIES the claim before acting on it: at the start of a review it tries to create a file in every repository directory (the checkouts under `WORK_DIR` and every `REVIEW_BASE_COMMITS` key). If any write succeeds, the probe file is removed, the claim is withdrawn with a line on stderr, and Codex keeps `--sandbox read-only`.
+
+| Variable | Description |
+|---|---|
+| `REVIEW_READONLY_MOUNTS` | `1` or `true` (case-insensitive) declares that the runner mounted every repository read-only into this review container. Any other value, including `yes` and unset, is off — the flag relaxes a driver's own sandbox, so only an unambiguous yes counts. Review mode only. |
 
 **A git failure fails the round.** Each base commit is verified with
 `git rev-parse --verify <sha>^{commit}` before anything is diffed, and any git

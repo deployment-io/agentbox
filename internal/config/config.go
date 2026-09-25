@@ -85,6 +85,22 @@ type Config struct {
 	// JSON object in REVIEW_BASE_COMMITS.
 	ReviewBaseCommits map[string]string
 
+	// ReviewReadOnlyMounts reports that the RUNNER mounted every repository
+	// read-only into this review container, so the working tree cannot be
+	// written whatever the agent attempts. From REVIEW_READONLY_MOUNTS ("1"
+	// or "true", case-insensitive).
+	//
+	// It exists because a harness's own sandbox can be worse than no sandbox:
+	// Codex implements --sandbox read-only with bubblewrap, which cannot
+	// create namespaces inside agentbox's container, so every command the
+	// reviewer runs fails and the review examines nothing. When the mounts
+	// carry the guarantee, the driver can drop that sandbox.
+	//
+	// Absent means a runner that predates read-only mounts, and the drivers
+	// keep their own read-only enforcement: a review that cannot run is safer
+	// than one that could write.
+	ReviewReadOnlyMounts bool
+
 	// ReviewRound is the 1-based round number within one Step's Review
 	// stage. Carried so the round can be named in logs and so a prompt can
 	// say whether this is a first look or a re-check after fixes. From
@@ -284,6 +300,11 @@ type ReviewOpenFinding struct {
 func (c *Config) loadReviewInputs() error {
 	c.ReviewSpec = strings.TrimSpace(os.Getenv("REVIEW_SPEC"))
 	c.ReviewPasses = parseReviewPasses(os.Getenv("REVIEW_PASSES"))
+
+	// Strict "1"/"true" only — not parseBoolEnv's looser set. This flag
+	// RELAXES a driver's own sandbox, so anything that isn't an unambiguous
+	// yes from the runner leaves the stricter path in place.
+	c.ReviewReadOnlyMounts = parseStrictBoolEnv("REVIEW_READONLY_MOUNTS")
 
 	// REVIEW_OPEN_FINDINGS is optional (round 1 has none), but malformed JSON
 	// fails the load the way REVIEW_BASE_COMMITS does: the runner meant to
@@ -586,6 +607,18 @@ func envOr(key, fallback string) string {
 func parseBoolEnv(key string) bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
 	case "1", "true", "yes":
+		return true
+	}
+	return false
+}
+
+// parseStrictBoolEnv reports whether the named env var holds "1" or "true"
+// (case-insensitive, surrounding space ignored). Anything else — including
+// "yes", "0" and unset — is false. Used where a true value drops a safeguard,
+// so only the two spellings a runner is contracted to send count.
+func parseStrictBoolEnv(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+	case "1", "true":
 		return true
 	}
 	return false

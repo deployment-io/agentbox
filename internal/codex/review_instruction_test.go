@@ -49,10 +49,13 @@ func TestBuildArgsKeepsTheImplementerContractInBatchMode(t *testing.T) {
 	}
 }
 
-// The reviewer must not be ABLE to write. codex enforces that with its own
-// sandbox, so review mode asks for read-only and — critically — drops the flag
-// that bypasses the sandbox entirely.
-func TestBuildArgsMakesReviewReadOnly(t *testing.T) {
+// Without REVIEW_READONLY_MOUNTS the runner has made no promise about the
+// mounts, so codex's own sandbox is what keeps the reviewer from writing:
+// review mode asks for read-only and — critically — drops the flag that
+// bypasses the sandbox entirely. This is the older-runner path, and it stands
+// even though the sandbox makes the review useless inside this container: a
+// review that cannot run is safer than one that could write.
+func TestBuildArgsMakesReviewReadOnlyWithoutReadOnlyMounts(t *testing.T) {
 	d := &Driver{}
 	args := d.BuildArgs(&config.Config{
 		Mode:         config.ModeReview,
@@ -75,6 +78,71 @@ func TestBuildArgsMakesReviewReadOnly(t *testing.T) {
 			t.Errorf("review mode wires MCP tools (%s); a reviewer needs none", arg)
 		}
 	}
+}
+
+// With REVIEW_READONLY_MOUNTS the repositories are mounted read-only, so the
+// tree is already unwritable and codex's sandbox buys nothing — while costing
+// everything, because it is bubblewrap-based and every command it wraps fails
+// inside agentbox's container. So the review runs with the implement run's
+// flags. Everything else review mode does is unchanged: no MCP channel, and
+// the prompt still on stdin.
+func TestBuildArgsUsesFullAccessForReviewWithReadOnlyMounts(t *testing.T) {
+	d := &Driver{}
+	cfg := &config.Config{
+		Mode:                 config.ModeReview,
+		StepPrompt:           "the diff and the spec",
+		ReviewPasses:         []string{"security"},
+		ReviewReadOnlyMounts: true,
+		MCPSocket:            "/run/agentbox/tool-rpc.sock",
+	}
+	args := d.BuildArgs(cfg)
+
+	if !hasPair(args, "--sandbox", "danger-full-access") {
+		t.Errorf("review with read-only mounts does not ask for danger-full-access: %v", args)
+	}
+	if hasPair(args, "--sandbox", "read-only") {
+		t.Errorf("review with read-only mounts still asks for codex's bwrap sandbox: %v", args)
+	}
+	if !contains(args, "--dangerously-bypass-approvals-and-sandbox") {
+		t.Errorf("review with read-only mounts did not bypass the sandbox: %v", args)
+	}
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "mcp_servers.") {
+			t.Errorf("review mode wires MCP tools (%s); a reviewer needs none", arg)
+		}
+		if strings.Contains(arg, cfg.StepPrompt) || strings.Contains(arg, "<review>") {
+			t.Errorf("review args carry the prompt (%q); it must travel on stdin only", arg)
+		}
+	}
+	if in := d.Stdin(cfg); !strings.HasPrefix(in, cfg.StepPrompt) || !strings.Contains(in, "<review>") {
+		t.Errorf("review stdin = %q, want the prompt followed by the trailer instruction", in)
+	}
+	for _, unwanted := range []string{"<verify>", "<pr_title>"} {
+		if strings.Contains(d.Stdin(cfg), unwanted) {
+			t.Errorf("review still asks for %s — the implementer's instruction must not be appended", unwanted)
+		}
+	}
+}
+
+// The flag is a review-mode input; an implement run never sets it and must
+// keep exactly the args it had.
+func TestBuildArgsForBatchIgnoresReadOnlyMounts(t *testing.T) {
+	d := &Driver{}
+	plain := d.BuildArgs(&config.Config{Mode: config.ModeBatch, StepPrompt: "do the thing"})
+	flagged := d.BuildArgs(&config.Config{Mode: config.ModeBatch, StepPrompt: "do the thing", ReviewReadOnlyMounts: true})
+
+	if strings.Join(plain, "\x00") != strings.Join(flagged, "\x00") {
+		t.Errorf("batch args changed with the review flag set:\n %v\n %v", plain, flagged)
+	}
+}
+
+func contains(args []string, want string) bool {
+	for _, a := range args {
+		if a == want {
+			return true
+		}
+	}
+	return false
 }
 
 // Batch mode keeps full autonomy — the Review stage must not quietly restrict

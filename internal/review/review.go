@@ -178,6 +178,15 @@ var passBriefs = map[string]string{
 // moving the implementer's output directory out of the work dir before the
 // round starts, so this is belt and braces rather than the only guard.
 //
+// The opening line tells the reviewer not to edit anything or change the
+// working tree, and it says nothing about whether that is merely asked for.
+// It is not: the runner mounts every repository read-only into a review
+// container (REVIEW_READONLY_MOUNTS), so a write fails in the kernel whatever
+// the prompt says. The instruction stays because it aims the run — a reviewer
+// that knows it is not implementing spends its turns reading — and it must
+// never be rewritten into a promise that the tree is merely off limits by
+// request, which would read as an invitation to try.
+//
 // The diff itself is NOT here. It is on disk (see Diff), and the prompt tells
 // the reviewer where and insists it is read in full before the first pass.
 // The prompt therefore stays small whatever the change's size; the drivers

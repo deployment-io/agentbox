@@ -69,6 +69,7 @@ func Run(ctx context.Context, cfg *config.Config, driver Driver) (outcome result
 	// that no pass is worth running and that answer needs no agent at all.
 	var reviewPlan review.Plan
 	if cfg.Mode == config.ModeReview {
+		verifyReadOnlyMounts(cfg, os.Stderr)
 		plan, err := review.Build(cfg)
 		if err != nil {
 			// The diff could not be computed, so nothing was examined. This
@@ -391,11 +392,12 @@ var agentboxInputEnv = map[string]bool{
 	// JSON object — both break Codex's shell-environment snapshot with
 	// "Unterminated quoted string". REVIEW_OPEN_FINDINGS is a JSON array of
 	// the same kind of prose and is folded into the prompt the same way.
-	"REVIEW_SPEC":          true,
-	"REVIEW_PASSES":        true,
-	"REVIEW_BASE_COMMITS":  true,
-	"REVIEW_ROUND":         true,
-	"REVIEW_OPEN_FINDINGS": true,
+	"REVIEW_SPEC":            true,
+	"REVIEW_PASSES":          true,
+	"REVIEW_BASE_COMMITS":    true,
+	"REVIEW_ROUND":           true,
+	"REVIEW_OPEN_FINDINGS":   true,
+	"REVIEW_READONLY_MOUNTS": true,
 }
 
 // buildEnv forwards the parent env minus agentbox's own input-contract vars
