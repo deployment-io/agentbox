@@ -56,6 +56,56 @@ func TestWriteEmitsTheReviewResultShape(t *testing.T) {
 			t.Errorf("coverage entry is missing %q: %v", key, coverage)
 		}
 	}
+	// A round given no open findings reports no status list at all.
+	if _, ok := review["previous"]; ok {
+		t.Errorf("review_result carries a previous list with nothing given: %v", review)
+	}
+}
+
+// The status of each previously reported finding travels in result.json under
+// "previous". The runner matches it by key against what it handed over, and
+// reads a key it does not get back as still present.
+func TestWriteEmitsThePreviousStatuses(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("RESULT_PATH", filepath.Join(dir, "result.json"))
+
+	err := Write(Outcome{
+		Status:   StatusSuccess,
+		ExitCode: ExitSuccess,
+		ReviewResult: &ReviewResult{
+			Findings: []ReviewFinding{},
+			Coverage: []ReviewCoverage{{Parameter: "security", State: "checked"}},
+			Previous: []PreviousFinding{
+				{Key: "sec-unauthenticated-env-dump-app-js", Status: "still_present", Note: "the route is unchanged"},
+				{Key: "cor-missing-nil-check", Status: "resolved"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Write: %s", err)
+	}
+
+	raw, err := os.ReadFile(Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]interface{}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("result.json is not valid JSON: %s", err)
+	}
+	previous, ok := doc["review_result"].(map[string]interface{})["previous"].([]interface{})
+	if !ok || len(previous) != 2 {
+		t.Fatalf("review_result has no two-entry previous list: %s", raw)
+	}
+	first := previous[0].(map[string]interface{})
+	for _, key := range []string{"key", "status", "note"} {
+		if _, ok := first[key]; !ok {
+			t.Errorf("previous entry is missing %q — the consumer reads by name: %v", key, first)
+		}
+	}
+	if second := previous[1].(map[string]interface{}); second["status"] != "resolved" {
+		t.Errorf("previous[1] = %v, want the resolved status", second)
+	}
 }
 
 // must_fix_open is the decision about whether the work may proceed, and it is

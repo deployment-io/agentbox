@@ -62,6 +62,80 @@ func TestLoadReviewModeLoadsEveryReviewInput(t *testing.T) {
 	}
 }
 
+// Rounds 2 and 3 carry the previous round's still-open must-fix findings, so
+// the reviewer can be asked, per finding, whether the problem is still in the
+// code rather than being left to rediscover it (or quietly not to).
+func TestLoadReviewModeParsesOpenFindings(t *testing.T) {
+	setEnv(t, map[string]string{
+		"WORK_DIR":            t.TempDir(),
+		"ANTHROPIC_API_KEY":   "sk-ant-test",
+		"AGENT_MODE":          ModeReview,
+		"REVIEW_BASE_COMMITS": `{"0-acme/api":"abc123"}`,
+		"REVIEW_ROUND":        "2",
+		"REVIEW_OPEN_FINDINGS": `[{"key":"sec-unauthenticated-env-dump-app-js","parameter":"security",` +
+			`"severity":"critical","location":"0-acme/api/app.js","what":"GET /env returns process.env with no auth"}]`,
+	})
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %s", err)
+	}
+	if len(cfg.ReviewOpenFindings) != 1 {
+		t.Fatalf("ReviewOpenFindings = %+v, want the one open finding", cfg.ReviewOpenFindings)
+	}
+	f := cfg.ReviewOpenFindings[0]
+	if f.Key != "sec-unauthenticated-env-dump-app-js" || f.Parameter != "security" ||
+		f.Severity != "critical" || f.Location != "0-acme/api/app.js" ||
+		!strings.Contains(f.What, "process.env") {
+		t.Errorf("ReviewOpenFindings[0] = %+v, want every field carried through", f)
+	}
+}
+
+// Round 1 has nothing open, and that is the absence of the variable rather
+// than an error.
+func TestLoadReviewModeAcceptsNoOpenFindings(t *testing.T) {
+	setEnv(t, map[string]string{
+		"WORK_DIR":            t.TempDir(),
+		"ANTHROPIC_API_KEY":   "sk-ant-test",
+		"AGENT_MODE":          ModeReview,
+		"REVIEW_BASE_COMMITS": `{"0-acme/api":"abc123"}`,
+	})
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %s", err)
+	}
+	if len(cfg.ReviewOpenFindings) != 0 {
+		t.Errorf("ReviewOpenFindings = %+v, want none on a first round", cfg.ReviewOpenFindings)
+	}
+}
+
+// A malformed list fails the load the way a malformed baseline does: the
+// runner meant the reviewer to see these findings, and a round that silently
+// dropped them could report the change clean while every one of them stands.
+func TestLoadReviewModeRejectsMalformedOpenFindings(t *testing.T) {
+	for _, tc := range []struct{ name, value string }{
+		{"not json", "not json"},
+		{"an object rather than an array", `{"key":"sec-1"}`},
+		{"a truncated array", `[{"key":"sec-1"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setEnv(t, map[string]string{
+				"WORK_DIR":             t.TempDir(),
+				"ANTHROPIC_API_KEY":    "sk-ant-test",
+				"AGENT_MODE":           ModeReview,
+				"REVIEW_BASE_COMMITS":  `{"0-acme/api":"abc123"}`,
+				"REVIEW_OPEN_FINDINGS": tc.value,
+			})
+			if _, err := Load(); err == nil {
+				t.Fatal("Load accepted an unreadable REVIEW_OPEN_FINDINGS")
+			} else if !strings.Contains(err.Error(), "REVIEW_OPEN_FINDINGS") {
+				t.Errorf("error %q should name REVIEW_OPEN_FINDINGS", err)
+			}
+		})
+	}
+}
+
 // Without a baseline there is no diff, and a review of nothing would report a
 // clean bill of health for work it never saw.
 func TestLoadReviewModeRequiresBaseCommits(t *testing.T) {

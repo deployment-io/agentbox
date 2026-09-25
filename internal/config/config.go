@@ -91,6 +91,17 @@ type Config struct {
 	// REVIEW_ROUND.
 	ReviewRound int
 
+	// ReviewOpenFindings are the must-fix findings the PREVIOUS review round
+	// left open, passed by the runner on rounds 2 and 3. From the JSON array
+	// in REVIEW_OPEN_FINDINGS; empty on round 1.
+	//
+	// This is the reviewer's own previous output and NOTHING ELSE. The
+	// implementer's summary, transcript and description of what it fixed stay
+	// out of the review's input, because a reviewer shown "I fixed it" grades
+	// the claim instead of the code — which is exactly how a Critical finding
+	// gets waved through after a round that only added a comment.
+	ReviewOpenFindings []ReviewOpenFinding
+
 	// SessionID, when set, is forwarded to the agent as a stable session
 	// identifier (claude --session-id) so the transcript persists on disk
 	// and can be resumed after a container restart. From SESSION_ID.
@@ -248,6 +259,22 @@ func KnownReviewPasses() []string {
 	return out
 }
 
+// ReviewOpenFinding is one must-fix finding a previous review round reported
+// and that was still open when that round ended. The runner passes the list
+// back in on the next round so the reviewer states, per finding, whether the
+// problem is still in the code.
+//
+// Key is the identity: the runner matches the status the reviewer reports back
+// against the key it handed over, so a finding cannot quietly change identity
+// between rounds and read as a new, lower-severity one.
+type ReviewOpenFinding struct {
+	Key       string `json:"key"`
+	Parameter string `json:"parameter"`
+	Severity  string `json:"severity"`
+	Location  string `json:"location"`
+	What      string `json:"what"`
+}
+
 // loadReviewInputs reads and validates the REVIEW_* half of the contract.
 //
 // Only REVIEW_BASE_COMMITS is strictly required: without a baseline there is
@@ -257,6 +284,16 @@ func KnownReviewPasses() []string {
 func (c *Config) loadReviewInputs() error {
 	c.ReviewSpec = strings.TrimSpace(os.Getenv("REVIEW_SPEC"))
 	c.ReviewPasses = parseReviewPasses(os.Getenv("REVIEW_PASSES"))
+
+	// REVIEW_OPEN_FINDINGS is optional (round 1 has none), but malformed JSON
+	// fails the load the way REVIEW_BASE_COMMITS does: the runner meant to
+	// hand over open must-fix findings, and silently reviewing without them
+	// would let a round report a change clean while the same problem stands.
+	openFindings, err := parseReviewOpenFindings(os.Getenv("REVIEW_OPEN_FINDINGS"))
+	if err != nil {
+		return err
+	}
+	c.ReviewOpenFindings = openFindings
 
 	raw := strings.TrimSpace(os.Getenv("REVIEW_BASE_COMMITS"))
 	if raw == "" {
@@ -290,6 +327,39 @@ func (c *Config) loadReviewInputs() error {
 		c.ReviewRound = round
 	}
 	return nil
+}
+
+// parseReviewOpenFindings reads the JSON array in REVIEW_OPEN_FINDINGS.
+//
+// Absent or empty is no findings — the shape of round 1. Anything present but
+// unparseable is an error: a runner that sent a list meant the review to see
+// it, and a review that silently dropped it would re-report or re-rate the
+// same problems as if it had never seen them.
+//
+// An entry with no key is dropped: the key is how the runner matches the
+// status back to the finding it asked about, and a status it cannot match is
+// indistinguishable from one that never arrived.
+func parseReviewOpenFindings(raw string) ([]ReviewOpenFinding, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	var parsed []ReviewOpenFinding
+	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+		return nil, fmt.Errorf("invalid REVIEW_OPEN_FINDINGS: %w", err)
+	}
+	out := make([]ReviewOpenFinding, 0, len(parsed))
+	for _, f := range parsed {
+		if strings.TrimSpace(f.Key) == "" {
+			continue
+		}
+		f.Key = strings.TrimSpace(f.Key)
+		out = append(out, f)
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	return out, nil
 }
 
 // parseReviewPasses splits the comma-separated pass list, dropping empties,

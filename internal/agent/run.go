@@ -253,7 +253,7 @@ func Run(ctx context.Context, cfg *config.Config, driver Driver) (outcome result
 // pull-request body. A malformed block that leaked there would show a reviewer
 // raw JSON where the review's prose should be.
 func liftReview(oc *result.Outcome, plan review.Plan) {
-	reviewResult, stripped := review.LiftResult(oc.ChangesSummary, plan.Coverage)
+	reviewResult, stripped := review.LiftResult(oc.ChangesSummary, plan.Coverage, plan.Open)
 	oc.ChangesSummary = stripped
 	// Error is built from the agent's own final message on several failure
 	// paths (see failureMessage), so it can carry the raw block too. Strip it
@@ -382,11 +382,13 @@ var agentboxInputEnv = map[string]bool{
 	// for the same reason STEP_PROMPT is: REVIEW_SPEC is free-form prose or
 	// JSON with embedded quotes and newlines, and REVIEW_BASE_COMMITS is a
 	// JSON object — both break Codex's shell-environment snapshot with
-	// "Unterminated quoted string".
-	"REVIEW_SPEC":         true,
-	"REVIEW_PASSES":       true,
-	"REVIEW_BASE_COMMITS": true,
-	"REVIEW_ROUND":        true,
+	// "Unterminated quoted string". REVIEW_OPEN_FINDINGS is a JSON array of
+	// the same kind of prose and is folded into the prompt the same way.
+	"REVIEW_SPEC":          true,
+	"REVIEW_PASSES":        true,
+	"REVIEW_BASE_COMMITS":  true,
+	"REVIEW_ROUND":         true,
+	"REVIEW_OPEN_FINDINGS": true,
 }
 
 // buildEnv forwards the parent env minus agentbox's own input-contract vars

@@ -332,7 +332,7 @@ func (d *Driver) Stdin(cfg *config.Config) string {
 // appended, so no <verify> or <pr_title> trailer is requested or produced.
 func trailingInstruction(cfg *config.Config) string {
 	if cfg.Mode == config.ModeReview {
-		return review.Instruction(cfg.ReviewPasses)
+		return review.Instruction(cfg)
 	}
 	return finalMessageInstruction
 }

@@ -45,11 +45,33 @@ type ReviewCoverage struct {
 	Reason    string `json:"reason,omitempty"`
 }
 
-// ReviewResult is one review run's output: what it found and what it looked
-// at. Both lists are owned by agentbox after extraction — findings are capped
-// and stage-stamped, coverage is rebuilt from what actually ran rather than
-// taken from the agent.
+// PreviousFinding is the reviewer's verdict on ONE finding a previous round
+// left open and the runner handed back in (REVIEW_OPEN_FINDINGS).
+//
+// Key is echoed from the list that was given; a status for a key nobody asked
+// about is dropped at extraction, so the reviewer cannot rename a problem into
+// a different one. Status is "resolved" or "still_present" and nothing else.
+//
+// ABSENCE MEANS STILL PRESENT. A finding that was given and comes back with no
+// entry is not resolved — it is unanswered, and the consumer treats unanswered
+// and still present the same way. Silence must never clear a must-fix.
+type PreviousFinding struct {
+	Key    string `json:"key"`
+	Status string `json:"status"`
+	Note   string `json:"note,omitempty"`
+}
+
+// ReviewResult is one review run's output: what it found, what it looked at,
+// and — when the round was given the previous round's open findings — what
+// became of each of those. All three lists are owned by agentbox after
+// extraction: findings are capped and stage-stamped, coverage is rebuilt from
+// what actually ran rather than taken from the agent, and a previous-status
+// entry survives only when it names a key that was actually given.
 type ReviewResult struct {
 	Findings []ReviewFinding  `json:"findings"`
 	Coverage []ReviewCoverage `json:"coverage"`
+
+	// Previous is omitted entirely when the round was given no open findings
+	// — the round-1 shape, where there is nothing to report a status for.
+	Previous []PreviousFinding `json:"previous,omitempty"`
 }
