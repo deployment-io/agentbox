@@ -391,11 +391,12 @@ var agentboxInputEnv = map[string]bool{
 	// JSON object — both break Codex's shell-environment snapshot with
 	// "Unterminated quoted string". REVIEW_OPEN_FINDINGS is a JSON array of
 	// the same kind of prose and is folded into the prompt the same way.
-	"REVIEW_SPEC":          true,
-	"REVIEW_PASSES":        true,
-	"REVIEW_BASE_COMMITS":  true,
-	"REVIEW_ROUND":         true,
-	"REVIEW_OPEN_FINDINGS": true,
+	"REVIEW_SPEC":            true,
+	"REVIEW_PASSES":          true,
+	"REVIEW_BASE_COMMITS":    true,
+	"REVIEW_ROUND":           true,
+	"REVIEW_OPEN_FINDINGS":   true,
+	"REVIEW_READONLY_MOUNTS": true,
 }
 
 // buildEnv forwards the parent env minus agentbox's own input-contract vars

@@ -62,6 +62,65 @@ func TestLoadReviewModeLoadsEveryReviewInput(t *testing.T) {
 	}
 }
 
+// REVIEW_READONLY_MOUNTS is how a runner says it mounted every repository
+// read-only, which is what lets a driver drop its own sandbox. Because a true
+// value RELAXES a safeguard, only the two spellings the contract names count:
+// "yes" — truthy for READ_ONLY — is deliberately not one of them, and neither
+// is anything else a confused runner might send.
+func TestLoadReviewModeParsesReadOnlyMounts(t *testing.T) {
+	for _, tc := range []struct {
+		raw  string
+		want bool
+	}{
+		{"1", true},
+		{"true", true},
+		{"TRUE", true},
+		{" True ", true},
+		{"", false},
+		{"0", false},
+		{"yes", false},
+		{"false", false},
+		{"maybe", false},
+	} {
+		t.Run("REVIEW_READONLY_MOUNTS="+tc.raw, func(t *testing.T) {
+			setEnv(t, map[string]string{
+				"WORK_DIR":               t.TempDir(),
+				"ANTHROPIC_API_KEY":      "sk-ant-test",
+				"AGENT_MODE":             ModeReview,
+				"REVIEW_BASE_COMMITS":    `{"0-acme/api":"abc123"}`,
+				"REVIEW_READONLY_MOUNTS": tc.raw,
+			})
+
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load: %s", err)
+			}
+			if cfg.ReviewReadOnlyMounts != tc.want {
+				t.Errorf("ReviewReadOnlyMounts = %t for %q, want %t", cfg.ReviewReadOnlyMounts, tc.raw, tc.want)
+			}
+		})
+	}
+}
+
+// The flag is a review-mode input. A batch run never reads it, so an
+// implement container that happens to inherit it stays exactly as it was.
+func TestLoadBatchModeIgnoresReadOnlyMounts(t *testing.T) {
+	setEnv(t, map[string]string{
+		"WORK_DIR":               t.TempDir(),
+		"ANTHROPIC_API_KEY":      "sk-ant-test",
+		"STEP_PROMPT":            "do the thing",
+		"REVIEW_READONLY_MOUNTS": "1",
+	})
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %s", err)
+	}
+	if cfg.ReviewReadOnlyMounts {
+		t.Error("ReviewReadOnlyMounts is set in batch mode; it is a review-mode input")
+	}
+}
+
 // Rounds 2 and 3 carry the previous round's still-open must-fix findings, so
 // the reviewer can be asked, per finding, whether the problem is still in the
 // code rather than being left to rediscover it (or quietly not to).

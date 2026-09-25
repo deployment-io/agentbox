@@ -145,9 +145,16 @@ func (d *Driver) Binary() string {
 // JSON event stream (see agent.Run's limit watcher).
 // A REVIEW run swaps danger-full-access for --sandbox read-only and drops
 // --dangerously-bypass-approvals-and-sandbox, so the sandbox is enforced rather
-// than bypassed. `codex exec` is non-interactive and never prompts, so a write
-// the reviewer attempts is refused rather than escalated. The prompt already
-// forbids edits; this makes it a guarantee instead of a request.
+// than bypassed — but ONLY when the runner has not already made the
+// repositories read-only. Codex implements read-only and workspace-write with
+// bubblewrap, which cannot create namespaces inside agentbox's container (no
+// capabilities, read-only rootfs), so every command the reviewer runs fails
+// and the review examines nothing. When REVIEW_READONLY_MOUNTS says the
+// runner mounted every repository read-only, that guarantee is already in the
+// kernel and Codex's own sandbox is pure cost, so the review runs with the
+// same flags an implement run uses. Without the variable — an older runner —
+// read-only stays: a review that cannot run is safer than one that could
+// write.
 func (d *Driver) BuildArgs(cfg *config.Config) []string {
 	reviewing := cfg.Mode == config.ModeReview
 
@@ -155,7 +162,7 @@ func (d *Driver) BuildArgs(cfg *config.Config) []string {
 		"exec",
 		"--json",
 	}
-	if reviewing {
+	if reviewing && !cfg.ReviewReadOnlyMounts {
 		args = append(args, "--sandbox", "read-only")
 	} else {
 		args = append(args,
