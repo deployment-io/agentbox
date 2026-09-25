@@ -39,6 +39,7 @@ func setEnv(t *testing.T, want map[string]string) {
 		"REVIEW_PASSES",
 		"REVIEW_BASE_COMMITS",
 		"REVIEW_ROUND",
+		"REVIEW_OPEN_FINDINGS",
 	}
 	for _, v := range vars {
 		t.Setenv(v, want[v])

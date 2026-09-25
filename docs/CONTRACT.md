@@ -92,11 +92,34 @@ asked for a `<review>` block instead — see
 
 A review run reads NOTHING a previous run wrote: not `result.json`, not
 `progress.json`, not the interactive message records, not a transcript. Its
-prompt is the spec, an index of the change and the pass list, and the diff
-files it names are written fresh for the round. Consumers are expected to
-enforce the same boundary structurally (the deployment.io runner moves the
-implementer's `.agentbox-output` out of the work dir before each round), so
-the guarantee does not rest on agentbox's restraint alone.
+prompt is the spec, an index of the change, the pass list and — on a re-check
+— the REVIEWER'S OWN still-open findings from `REVIEW_OPEN_FINDINGS`, and the
+diff files it names are written fresh for the round. Nothing the implementer
+produced reaches it: not its summary, not its transcript, not its description
+of what it fixed. A reviewer shown "I fixed it" grades the claim rather than
+the code. Consumers are expected to enforce the same boundary structurally
+(the deployment.io runner moves the implementer's `.agentbox-output` out of
+the work dir before each round), so the guarantee does not rest on agentbox's
+restraint alone.
+
+**Severity is harm, not permission.** The security brief and the trailer rules
+both tell the reviewer to rate a finding by the harm the code can cause as
+written: a requirement in the spec never lowers a severity (it is reported at
+its real severity, with the `why` saying the spec requires it), and a comment,
+documentation, logging or a README note never lowers one either unless it
+changes what the code does. Whether a dangerous-but-required finding blocks
+the change stays the consumer's policy decision — see `must_fix_open` below.
+
+**A previously reported finding gets a verdict, not a rediscovery.** When
+`REVIEW_OPEN_FINDINGS` is non-empty, the prompt lists each finding's key,
+parameter, severity, location and what between the change index and the
+passes, and asks the reviewer to read the CURRENT code and say whether the
+problem is still present — `resolved` means the code no longer has the
+problem, and a comment, documentation, logging, a README note or a spec
+requirement does not resolve it. The passes then run as a fresh review, and a
+problem that is still present is reported in the status list rather than
+repeated as a new finding. The statuses come back in
+[`review_result.previous`](#review_result).
 
 | Variable | Description |
 |---|---|
@@ -105,6 +128,7 @@ the guarantee does not rest on agentbox's restraint alone.
 | `REVIEW_PASSES` | Comma-separated focused passes to run, e.g. `security,correctness`. Order is honoured. A name this image cannot run is dropped with a warning on stderr — every accepted pass must map to a review parameter, or its findings would arrive under a parameter no consumer can read. Empty / unset — or emptied by that filter — means `security,correctness`, the set this release ships. |
 | `REVIEW_BASE_COMMITS` | **Required in review mode.** JSON object mapping each repository directory relative to `WORK_DIR` to the commit it was checked out at when the Step began, e.g. `{"0-acme/api":"9fceb02…"}`. Each key must be a relative path that stays inside `WORK_DIR`; `..` and absolute paths are rejected at startup. THE BASELINE IS NOT HEAD: an agent may commit its own work, and diffing against HEAD on that path shows nothing at all. |
 | `REVIEW_ROUND` | 1-based round number within one Step's review. Optional; absent or unreadable means `1`. |
+| `REVIEW_OPEN_FINDINGS` | JSON array of the must-fix findings the PREVIOUS round left open, e.g. `[{"key":"sec-unauthenticated-env-dump-app-js","parameter":"security","severity":"critical","location":"0-acme/api/app.js","what":"GET /env returns all of process.env with no auth"}]`. Optional — absent on round 1, supplied by the runner on rounds 2 and 3. Present but unparseable fails the load, the way a malformed `REVIEW_BASE_COMMITS` does: a round that silently dropped the list could report the change clean while every one of them still stands. An entry with no `key` is dropped, because the key is how the status comes back. |
 
 **Pass selection is cost-gated by what the diff touches.** A diff whose every
 changed path is documentation (`*.md`, `*.mdx`, `*.rst`, `*.txt`, `LICENSE`,
@@ -386,13 +410,16 @@ What a review-mode run found and what it actually looked at. Present only for
     {"parameter": "security", "state": "checked"},
     {"parameter": "correctness", "state": "checked"},
     {"parameter": "spec conformance", "state": "not checked", "reason": "no pass for this parameter in this release"}
+  ],
+  "previous": [
+    {"key": "sec-unauthenticated-env-dump-app-js", "status": "still_present", "note": "the route still returns process.env; only a comment was added"}
   ]
 }
 ```
 
 | Field | Written by | Meaning |
 |---|---|---|
-| `findings[].key` | agent | Short stable slug for the finding, so the same finding is recognisable across rounds after a fix. |
+| `findings[].key` | agent | Short stable slug naming the parameter, the file and the rule, e.g. `sec-unauthenticated-env-dump-app-js`. It never carries a line number — lines move between rounds, and the key has to stay the same for the same problem or a re-report reads as a new finding. |
 | `findings[].parameter` | agent | One of `security`, `correctness`, `spec conformance`, `testing`, `deploy readiness`, `performance`, `maintainability`, `reliability`. A NAME, not a number: agentbox imports no consumer's enum, so the consumer parses the name (case, spaces, hyphens and underscores ignored) and drops what it cannot read. |
 | `findings[].severity` | agent | One of `info`, `low`, `medium`, `high`, `critical`. |
 | `findings[].location` | agent | Where in the change, e.g. `0-acme/api/handler.go:41`. |
@@ -402,6 +429,17 @@ What a review-mode run found and what it actually looked at. Present only for
 | `coverage[].parameter` | **agentbox** | Every one of the eight parameters appears exactly once. |
 | `coverage[].state` | **agentbox** | `checked` (a pass ran), `skipped` (a pass stood down — see `reason`) or `not checked` (this release ships no pass for it). Built from what actually ran, not from the agent's claim; the agent's own claim is honoured only when it ADMITS a gap agentbox could not see. |
 | `coverage[].reason` | **agentbox** | Why a pass was skipped, or that the diff was truncated. |
+| `previous[].key` | agent, filtered by **agentbox** | A key from `REVIEW_OPEN_FINDINGS`, echoed back. An entry naming a key that was not given is dropped at extraction, so a reviewer cannot rename a problem into a different one. |
+| `previous[].status` | agent | `resolved` (the code no longer has the problem) or `still_present`. Case is normalised; any other word is dropped along with its entry, because keeping it would mean guessing, and the wrong guess clears a must-fix nobody fixed. |
+| `previous[].note` | agent | One sentence saying what was checked. Capped at 400 runes. |
+
+**`previous` is present only on a round that was given
+`REVIEW_OPEN_FINDINGS`**, and **an absent entry means STILL PRESENT.** A
+finding that was handed over and comes back with no status has not been
+cleared — it is unanswered, and the consumer must treat unanswered and still
+present identically. The same applies when the whole trailer is unreadable: no
+statuses are reported, so nothing is resolved. At most one entry survives per
+given key (the first), and at most as many entries as keys were given.
 
 **`must_fix_open` is not part of this contract and never will be.** Whether
 findings block the change is a policy decision the consumer owns, made from
@@ -409,9 +447,9 @@ its own severity thresholds; agentbox has no struct field for it, so an agent
 cannot assert that its own findings need not be fixed.
 
 **Caps applied at extraction**, mirroring the consumer's storage limits: at
-most 100 findings, one coverage entry per parameter, 120-rune `key`, 400-rune
-`location`, 1000-rune `what`, 1000-rune `why`, 60-rune `pass`, 400-rune
-`reason`. Every cap TRUNCATES in runes rather than rejecting — a review that
+most 100 findings, one coverage entry per parameter, one `previous` entry per
+given key, 120-rune `key`, 400-rune `location`, 1000-rune `what`, 1000-rune
+`why`, 60-rune `pass`, 400-rune `reason`, 400-rune `note`. Every cap TRUNCATES in runes rather than rejecting — a review that
 found 400 things is still worth its first 100.
 
 The `<review>` block is extracted by the same machine-owned-block rules as the

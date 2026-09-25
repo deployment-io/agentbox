@@ -3,6 +3,8 @@ package review
 import (
 	"strings"
 	"testing"
+
+	"github.com/deployment-io/agentbox/internal/config"
 )
 
 const validBlock = `<review>
@@ -12,7 +14,7 @@ const validBlock = `<review>
 func TestExtractLiftsFindingsAndStripsTheBlock(t *testing.T) {
 	text := "I reviewed the change and found one thing.\n\n" + validBlock
 
-	findings, coverage, stripped, ok := Extract(text)
+	findings, coverage, _, stripped, ok := Extract(text, nil)
 	if !ok {
 		t.Fatal("Extract reported not-ok for a well-formed block")
 	}
@@ -38,7 +40,7 @@ func TestExtractStampsTheStageRegardlessOfWhatTheAgentSaid(t *testing.T) {
 {"findings":[{"parameter":"security","severity":"high","what":"x","location":"a.go:1","stage":"implement"}]}
 </review>`
 
-	findings, _, _, ok := Extract(text)
+	findings, _, _, _, ok := Extract(text, nil)
 	if !ok || len(findings) != 1 {
 		t.Fatalf("Extract = %+v, ok=%t", findings, ok)
 	}
@@ -58,7 +60,7 @@ func TestExtractIgnoresAProseMentionAndTakesTheLatestBlock(t *testing.T) {
 {"findings":[{"key":"new","parameter":"correctness","severity":"high","what":"later","location":"b.go:2"}]}
 </review>`
 
-	findings, _, stripped, ok := Extract(text)
+	findings, _, _, stripped, ok := Extract(text, nil)
 	if !ok {
 		t.Fatal("Extract reported not-ok")
 	}
@@ -78,7 +80,7 @@ func TestExtractIgnoresAProseMentionAndTakesTheLatestBlock(t *testing.T) {
 func TestExtractSurvivesAnUnclosedOpening(t *testing.T) {
 	text := "<review>\noops, never closed this one\n\n" + validBlock
 
-	findings, _, _, ok := Extract(text)
+	findings, _, _, _, ok := Extract(text, nil)
 	if !ok || len(findings) != 1 || findings[0].Key != "sec-1" {
 		t.Errorf("Extract = (%+v, ok=%t), want the well-formed block", findings, ok)
 	}
@@ -89,7 +91,7 @@ func TestExtractSurvivesAnUnclosedOpening(t *testing.T) {
 func TestExtractStripsAMalformedBlock(t *testing.T) {
 	text := "Here is what I found.\n\n<review>\nnot json at all\n</review>"
 
-	findings, _, stripped, ok := Extract(text)
+	findings, _, _, stripped, ok := Extract(text, nil)
 	if ok || len(findings) != 0 {
 		t.Errorf("Extract = (%+v, ok=%t), want not-ok with no findings", findings, ok)
 	}
@@ -115,7 +117,7 @@ func TestExtractAppliesTheCaps(t *testing.T) {
 	}
 	b.WriteString(`],"coverage":[{"parameter":"security","state":"checked","reason":"` + strings.Repeat("r", MaxReasonRunes+50) + `"}]}` + "\n</review>")
 
-	findings, coverage, _, ok := Extract(b.String())
+	findings, coverage, _, _, ok := Extract(b.String(), nil)
 	if !ok {
 		t.Fatal("Extract reported not-ok")
 	}
@@ -148,7 +150,7 @@ func TestExtractTruncatesOnRuneBoundaries(t *testing.T) {
 {"findings":[{"parameter":"security","severity":"low","location":"a.go:1","what":"` + strings.Repeat("é", MaxWhatRunes+20) + `"}]}
 </review>`
 
-	findings, _, _, ok := Extract(text)
+	findings, _, _, _, ok := Extract(text, nil)
 	if !ok || len(findings) != 1 {
 		t.Fatalf("Extract = (%+v, ok=%t)", findings, ok)
 	}
@@ -165,9 +167,114 @@ func TestExtractDropsAFindingWithNoWhatAndNoLocation(t *testing.T) {
 {"findings":[{"parameter":"security","severity":"critical","why":"trust me"},{"parameter":"security","severity":"low","what":"real one","location":"a.go:1"}]}
 </review>`
 
-	findings, _, _, _ := Extract(text)
+	findings, _, _, _, _ := Extract(text, nil)
 	if len(findings) != 1 || findings[0].What != "real one" {
 		t.Errorf("findings = %+v, want only the actionable one", findings)
+	}
+}
+
+// The status list is bounded by the findings that were GIVEN: a status for a
+// key nobody asked about says nothing about the change, and an unreadable
+// status word would have to be guessed at — with "resolved" the guess that
+// clears a must-fix nobody fixed.
+func TestExtractParsesPreviousStatuses(t *testing.T) {
+	open := []config.ReviewOpenFinding{
+		{Key: "sec-env-dump", Parameter: "security", Severity: "critical"},
+		{Key: "cor-missing-nil-check", Parameter: "correctness", Severity: "high"},
+		{Key: "sec-weak-hash", Parameter: "security", Severity: "medium"},
+	}
+	text := `<review>
+{"findings":[],"previous":[
+{"key":"sec-env-dump","status":"Still_Present","note":"  the route still returns process.env; only a comment was added  "},
+{"key":"cor-missing-nil-check","status":" RESOLVED ","note":"the handler now checks for nil"},
+{"key":"sec-weak-hash","status":"mitigated","note":"we documented it"},
+{"key":"sec-invented-key","status":"resolved","note":"nobody asked about this"}
+]}
+</review>`
+
+	_, _, previous, _, ok := Extract(text, open)
+	if !ok {
+		t.Fatal("Extract reported not-ok for a well-formed block")
+	}
+	if len(previous) != 2 {
+		t.Fatalf("previous = %+v, want only the two answerable entries", previous)
+	}
+	if previous[0].Key != "sec-env-dump" || previous[0].Status != StatusStillPresent {
+		t.Errorf("previous[0] = %+v, want sec-env-dump still_present with its case normalised", previous[0])
+	}
+	if !strings.HasPrefix(previous[0].Note, "the route still returns") {
+		t.Errorf("note = %q, want it trimmed", previous[0].Note)
+	}
+	if previous[1].Key != "cor-missing-nil-check" || previous[1].Status != StatusResolved {
+		t.Errorf("previous[1] = %+v, want cor-missing-nil-check resolved", previous[1])
+	}
+	// sec-weak-hash carried a status this contract does not define and
+	// sec-invented-key was never asked about. Both are simply absent, and
+	// absence is read by the consumer as still present.
+	for _, p := range previous {
+		if p.Key == "sec-weak-hash" || p.Key == "sec-invented-key" {
+			t.Errorf("previous carries %+v, which should have been dropped", p)
+		}
+	}
+}
+
+// A round that was given nothing reports no status list at all, whatever the
+// agent emitted — there is nothing for an entry to refer to.
+func TestExtractDropsPreviousWhenNothingWasGiven(t *testing.T) {
+	text := `<review>
+{"findings":[],"previous":[{"key":"sec-env-dump","status":"resolved","note":"trust me"}]}
+</review>`
+
+	_, _, previous, _, ok := Extract(text, nil)
+	if !ok {
+		t.Fatal("Extract reported not-ok")
+	}
+	if len(previous) != 0 {
+		t.Errorf("previous = %+v, want none — no findings were given", previous)
+	}
+}
+
+// The list is capped at the number of findings given (one answer per
+// question), and the note is capped like every other free-text field.
+func TestExtractCapsPreviousListAndNote(t *testing.T) {
+	open := []config.ReviewOpenFinding{{Key: "sec-env-dump"}, {Key: "cor-nil"}}
+	text := `<review>
+{"findings":[],"previous":[
+{"key":"sec-env-dump","status":"still_present","note":"` + strings.Repeat("n", MaxNoteRunes+50) + `"},
+{"key":"sec-env-dump","status":"resolved","note":"second answer to the same question"},
+{"key":"cor-nil","status":"resolved","note":"fixed"}
+]}
+</review>`
+
+	_, _, previous, _, _ := Extract(text, open)
+	if len(previous) != 2 {
+		t.Fatalf("previous = %+v, want one entry per key", previous)
+	}
+	if got := len([]rune(previous[0].Note)); got != MaxNoteRunes {
+		t.Errorf("note length = %d runes, want %d", got, MaxNoteRunes)
+	}
+	if previous[0].Status != StatusStillPresent {
+		t.Errorf("previous[0] = %+v — the first answer for a key stands; a later one must not overwrite it", previous[0])
+	}
+}
+
+// LiftResult carries the status list through to result.json, and an
+// unreadable trailer clears nothing: no entry means still present.
+func TestLiftResultCarriesPreviousThrough(t *testing.T) {
+	open := []config.ReviewOpenFinding{{Key: "sec-env-dump", Severity: "critical"}}
+	planned := BuildCoverage([]string{PassSecurity, PassCorrectness}, nil)
+	text := `<review>
+{"findings":[],"coverage":[],"previous":[{"key":"sec-env-dump","status":"still_present","note":"the route is unchanged"}]}
+</review>`
+
+	result, _ := LiftResult(text, planned, open)
+	if len(result.Previous) != 1 || result.Previous[0].Status != StatusStillPresent {
+		t.Fatalf("previous = %+v, want the one still-present status", result.Previous)
+	}
+
+	missing, _ := LiftResult("I forgot the block.", planned, open)
+	if len(missing.Previous) != 0 {
+		t.Errorf("previous = %+v, want none — a missing trailer resolves nothing", missing.Previous)
 	}
 }
 
@@ -179,7 +286,7 @@ func TestLiftResultKeepsAgentboxCoverageAndHonoursAnAdmittedGap(t *testing.T) {
 {"findings":[],"coverage":[{"parameter":"security","state":"checked"},{"parameter":"correctness","state":"skipped","reason":"the diff was too large to read fully"},{"parameter":"performance","state":"checked"}]}
 </review>`
 
-	result, _ := LiftResult(text, planned)
+	result, _ := LiftResult(text, planned, nil)
 	byParameter := map[string]Coverage{}
 	for _, c := range result.Coverage {
 		byParameter[c.Parameter] = c
@@ -202,7 +309,7 @@ func TestLiftResultKeepsAgentboxCoverageAndHonoursAnAdmittedGap(t *testing.T) {
 func TestLiftResultKeepsCoverageWhenTheTrailerIsMissing(t *testing.T) {
 	planned := BuildCoverage([]string{PassSecurity}, map[string]string{PassCorrectness: ReasonLockfileOnly})
 
-	result, stripped := LiftResult("I looked at the diff but forgot the block.", planned)
+	result, stripped := LiftResult("I looked at the diff but forgot the block.", planned, nil)
 	if len(result.Coverage) != len(allParameters) {
 		t.Errorf("coverage has %d entries, want one per parameter", len(result.Coverage))
 	}

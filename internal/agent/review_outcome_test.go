@@ -311,3 +311,29 @@ func TestRunLeavesStdinClosedWhenTheDriverSendsNothing(t *testing.T) {
 		t.Errorf("stdin carried %d bytes, want none", len(got))
 	}
 }
+
+// An unfinished round's verdicts on earlier findings are dropped with its
+// coverage. A "resolved" from a review killed mid-run would clear a must-fix
+// finding on the strength of a review that did not finish; absent, the
+// consumer reads every earlier finding as still present.
+func TestLiftReviewDropsPreviousVerdictsOnAnUnfinishedRound(t *testing.T) {
+	plan := review.Plan{
+		Coverage: review.BuildCoverage([]string{review.PassSecurity}, nil),
+		Open:     []config.ReviewOpenFinding{{Key: "sec-a", Parameter: "security", Severity: "critical", Location: "app.js", What: "x"}},
+	}
+	block := "done\n<review>\n{\"findings\":[],\"coverage\":[{\"parameter\":\"security\",\"state\":\"checked\"}],\"previous\":[{\"key\":\"sec-a\",\"status\":\"resolved\"}]}\n</review>"
+
+	finished := result.Outcome{Status: result.StatusSuccess, ChangesSummary: block}
+	liftReview(&finished, plan)
+	if len(finished.ReviewResult.Previous) != 1 {
+		t.Fatalf("a completed round lost its verdicts: %+v", finished.ReviewResult.Previous)
+	}
+
+	for _, status := range []result.Status{result.StatusTimeout, result.StatusFailure, result.StatusCancelled} {
+		oc := result.Outcome{Status: status, ChangesSummary: block}
+		liftReview(&oc, plan)
+		if oc.ReviewResult.Previous != nil {
+			t.Errorf("a %s round kept its verdicts %+v; an unfinished review must not resolve anything", status, oc.ReviewResult.Previous)
+		}
+	}
+}

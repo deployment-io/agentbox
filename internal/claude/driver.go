@@ -95,7 +95,7 @@ Emit <verify> and <pr_title> only here, at the very end.`
 // naming the change it reviewed.
 func trailingInstruction(cfg *config.Config) string {
 	if cfg.Mode == config.ModeReview {
-		return review.Instruction(cfg.ReviewPasses)
+		return review.Instruction(cfg)
 	}
 	return finalMessageInstruction
 }
