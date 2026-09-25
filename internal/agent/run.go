@@ -266,6 +266,13 @@ func liftReview(oc *result.Outcome, plan review.Plan) {
 		// the truth: nothing is known to have been checked.
 		reviewResult.Coverage = review.FailedCoverage(
 			fmt.Sprintf("the review run ended as %s before it could report coverage", oc.Status))
+		// The same goes for its verdicts on the previous round's findings. A
+		// "resolved" from a run killed mid-review is not a claim agentbox can
+		// stand behind either, and it is the one claim that would clear a
+		// must-fix finding — so it is dropped. Absence already means "still
+		// present" to the consumer, which is the safe reading of a round that
+		// did not finish.
+		reviewResult.Previous = nil
 	}
 	oc.ReviewResult = reviewResult
 	// A review changes nothing, so the implementer's fields describe work it
