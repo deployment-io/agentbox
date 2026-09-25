@@ -69,6 +69,7 @@ func Run(ctx context.Context, cfg *config.Config, driver Driver) (outcome result
 	// that no pass is worth running and that answer needs no agent at all.
 	var reviewPlan review.Plan
 	if cfg.Mode == config.ModeReview {
+		verifyReadOnlyMounts(cfg, os.Stderr)
 		plan, err := review.Build(cfg)
 		if err != nil {
 			// The diff could not be computed, so nothing was examined. This
