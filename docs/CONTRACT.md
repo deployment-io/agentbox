@@ -102,13 +102,16 @@ the code. Consumers are expected to enforce the same boundary structurally
 the work dir before each round), so the guarantee does not rest on agentbox's
 restraint alone.
 
-**Severity is harm, not permission.** The security brief and the trailer rules
-both tell the reviewer to rate a finding by the harm the code can cause as
+**Severity is harm, not permission.** Every pass brief and the trailer rules
+tell the reviewer to rate a finding by the harm the code can cause as
 written: a requirement in the spec never lowers a severity (it is reported at
 its real severity, with the `why` saying the spec requires it), and a comment,
 documentation, logging or a README note never lowers one either unless it
-changes what the code does. Whether a dangerous-but-required finding blocks
-the change stays the consumer's policy decision — see `must_fix_open` below.
+changes what the code does. They also carry the same five-word severity rubric
+— see [`review_result`](#review_result) for its definitions — so every pass and
+the report format rate on one scale. Whether a dangerous-but-required finding
+blocks the change stays the consumer's policy decision — see `must_fix_open`
+below.
 
 **A previously reported finding gets a verdict, not a rediscovery.** When
 `REVIEW_OPEN_FINDINGS` is non-empty, the prompt lists each finding's key,
@@ -444,7 +447,7 @@ What a review-mode run found and what it actually looked at. Present only for
 |---|---|---|
 | `findings[].key` | agent | Short stable slug naming the parameter, the file and the rule, e.g. `sec-unauthenticated-env-dump-app-js`. It never carries a line number — lines move between rounds, and the key has to stay the same for the same problem or a re-report reads as a new finding. |
 | `findings[].parameter` | agent | One of `security`, `correctness`, `spec conformance`, `testing`, `deploy readiness`, `performance`, `maintainability`, `reliability`. A NAME, not a number: agentbox imports no consumer's enum, so the consumer parses the name (case, spaces, hyphens and underscores ignored) and drops what it cannot read. |
-| `findings[].severity` | agent | One of `info`, `low`, `medium`, `high`, `critical`. |
+| `findings[].severity` | agent | One of `info`, `low`, `medium`, `high`, `critical`, rated against the rubric below. |
 | `findings[].location` | agent | Where in the change, e.g. `0-acme/api/handler.go:41`. |
 | `findings[].what` / `why` | agent | What was seen, and why it matters. Both are needed: what alone leaves the reader to work out whether it matters, why alone leaves them hunting for where. |
 | `findings[].stage` | **agentbox** | Always `review` for a review run, stamped regardless of what the agent emitted. An agent cannot relabel where its finding came from. |
@@ -455,6 +458,26 @@ What a review-mode run found and what it actually looked at. Present only for
 | `previous[].key` | agent, filtered by **agentbox** | A key from `REVIEW_OPEN_FINDINGS`, echoed back. An entry naming a key that was not given is dropped at extraction, so a reviewer cannot rename a problem into a different one. |
 | `previous[].status` | agent | `resolved` (the code no longer has the problem) or `still_present`. Case is normalised; any other word is dropped along with its entry, because keeping it would mean guessing, and the wrong guess clears a must-fix nobody fixed. |
 | `previous[].note` | agent | One sentence saying what was checked. Capped at 400 runes. |
+
+**What the severity values mean.** The five words are defined, not left to each
+reviewer's sense of likelihood times impact. Both pass briefs and the trailer
+rules carry the same rubric:
+
+- `critical` — exploitable as written, secrets or credentials exposed, or data lost or corrupted.
+- `high` — a core behaviour or a security guarantee breaks in normal use.
+- `medium` — the change's own stated guarantee can be bypassed or silently fail under a plausible condition; or a resource leaks (a process, container, connection, lock or file that is never released); or a result is silently wrong.
+- `low` — a real defect whose failure is visible and harmless: the caller gets a clear error, or the output is cosmetically wrong.
+- `info` — an observation, not a defect.
+
+Two rules go with it, and they are what keep a silent gap out of `low`: a
+severity is NOT lowered because the triggering condition is uncommon when the
+failure is silent or defeats what the change is for — this review runs on every
+change, so an uncommon path is exercised regularly, and a silent failure is
+found only after it has done damage — and other controls lower a severity only
+when they fully prevent the harm, not when they merely limit it, with the `why`
+saying which controls were relied on. A reaper that leaves a container running,
+a guarantee the change itself can bypass, or a result that is quietly wrong is
+`medium` or above however narrow the path to it, because nothing reports it.
 
 **`previous` is present only on a round that was given
 `REVIEW_OPEN_FINDINGS`**, and **an absent entry means STILL PRESENT.** A
