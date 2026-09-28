@@ -34,6 +34,12 @@ var readOnlyAllowedTools = []string{
 	"Bash(git blame *)",
 	"Bash(ls *)",
 	"Bash(cat *)",
+	// jq is how a session reads the pre-built context under /work/context,
+	// whose files are JSON — the session prompt asks for exactly that and the
+	// image ships jq, so without this entry every such call is a denial. It
+	// reads a file and prints to stdout; it has no way to write one, so it
+	// adds no exposure "Bash(cat *)" does not already have.
+	"Bash(jq *)",
 	"Bash(head *)",
 	"Bash(tail *)",
 	"Bash(find *)",

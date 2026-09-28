@@ -19,6 +19,10 @@ import (
 // agent-agnostic (every batch driver folds cfg.StepPrompt into its args) and a
 // no-op when no repositories are present (e.g. analysis-only tasks), so it never
 // invents a constraint that doesn't apply.
+//
+// It also names the pre-built context directory when the runner wrote one (see
+// contextDirUnder) — the same directory the interactive session prompt points
+// a session at, which no implement run was ever told about.
 func anchorPromptToRepos(prompt, workDir string) string {
 	repos := repoDirsUnder(workDir)
 	if len(repos) == 0 {
@@ -30,9 +34,31 @@ func anchorPromptToRepos(prompt, workDir string) string {
 		b.WriteString("- " + r + "\n")
 	}
 	b.WriteString("Make ALL file changes inside these repository directories — anything written elsewhere under " + workDir + " is discarded (not committed, no PR). ")
-	b.WriteString("\"Root\" and \"top level\" mean the repository root above, not " + workDir + ".\n\n")
+	b.WriteString("\"Root\" and \"top level\" mean the repository root above, not " + workDir + ".\n")
+	if dir, ok := contextDirUnder(workDir); ok {
+		b.WriteString("Pre-built context about these repositories and how they are deployed is at " + dir + " (start with index.md). ")
+		b.WriteString("Consult it when the change touches deployment, configuration, or how services connect; a change confined to code does not need it.\n")
+	}
+	b.WriteString("\n")
 	b.WriteString(prompt)
 	return b.String()
+}
+
+// contextDirUnder reports the pre-built context directory the runner writes
+// for a Task — the organisation's services, how they are deployed, how they
+// reach each other — and whether it is there at all.
+//
+// Only the interactive session prompt used to mention it, so an implement run
+// was handed a directory nobody told it about and answered deployment
+// questions from the code alone. The index file is the existence test rather
+// than the directory: an empty /work/context is a directory with nothing to
+// read, and pointing an agent at it would cost a turn to learn that.
+func contextDirUnder(workDir string) (string, bool) {
+	dir := filepath.Join(workDir, "context")
+	if _, err := os.Stat(filepath.Join(dir, "index.md")); err != nil {
+		return "", false
+	}
+	return dir, true
 }
 
 // repoDirsUnder returns the checked-out repository directories under workDir,

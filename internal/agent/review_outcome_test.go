@@ -170,6 +170,70 @@ func TestRunNarrowsReviewPassesToTheGatedListBeforeBuildArgs(t *testing.T) {
 	}
 }
 
+// A review's prompt is built by review.Build and nothing else: the repo anchor
+// — the repository list AND the pre-built-context line it now carries — is for
+// a run that WRITES. A reviewer given it would be told to make its changes
+// inside the repositories it was told not to touch.
+func TestRunNeverAnchorsAReviewPrompt(t *testing.T) {
+	workDir := t.TempDir()
+	repo := filepath.Join(workDir, "0-acme", "api")
+	base := initTestRepo(t, repo)
+	writeFile(t, filepath.Join(repo, "main.go"), "package main\n// changed\n")
+	writeFile(t, filepath.Join(workDir, "context", "index.md"), "# services\n")
+
+	t.Setenv("RESULT_PATH", filepath.Join(t.TempDir(), "result.json"))
+	driver := &recordingDriver{}
+	cfg := &config.Config{
+		Mode:              config.ModeReview,
+		WorkDir:           workDir,
+		AgentType:         "claude-code",
+		ReviewPasses:      []string{review.PassSecurity},
+		ReviewBaseCommits: map[string]string{"0-acme/api": base},
+		ReviewRound:       1,
+	}
+	Run(context.Background(), cfg, driver)
+
+	if !driver.built {
+		t.Fatal("BuildArgs was never called")
+	}
+	for _, unwanted := range []string{"Pre-built context", "Repositories for this task are checked out at"} {
+		if strings.Contains(driver.promptAtBuild, unwanted) {
+			t.Errorf("the review prompt carries the implementer's anchor %q:\n%s", unwanted, driver.promptAtBuild)
+		}
+	}
+}
+
+// The implement path does get both, from the same Run, so the two cases above
+// and below are the same switch read from either side.
+func TestRunAnchorsAnImplementPromptToTheReposAndTheContext(t *testing.T) {
+	workDir := t.TempDir()
+	initTestRepo(t, filepath.Join(workDir, "0-acme", "api"))
+	writeFile(t, filepath.Join(workDir, "context", "index.md"), "# services\n")
+
+	t.Setenv("RESULT_PATH", filepath.Join(t.TempDir(), "result.json"))
+	driver := &recordingDriver{}
+	cfg := &config.Config{
+		Mode:       config.ModeBatch,
+		WorkDir:    workDir,
+		AgentType:  "claude-code",
+		StepPrompt: "Move the API to the new cluster.",
+	}
+	Run(context.Background(), cfg, driver)
+
+	if !driver.built {
+		t.Fatal("BuildArgs was never called")
+	}
+	for _, want := range []string{
+		"Repositories for this task are checked out at",
+		filepath.Join(workDir, "context") + " (start with index.md)",
+		"Move the API to the new cluster.",
+	} {
+		if !strings.Contains(driver.promptAtBuild, want) {
+			t.Errorf("the implement prompt does not carry %q:\n%s", want, driver.promptAtBuild)
+		}
+	}
+}
+
 func hasState(coverage []review.Coverage, parameter, state string) bool {
 	for _, c := range coverage {
 		if c.Parameter == parameter && c.State == state {
@@ -179,11 +243,12 @@ func hasState(coverage []review.Coverage, parameter, state string) bool {
 	return false
 }
 
-// recordingDriver captures cfg.ReviewPasses at the moment BuildArgs is called,
-// then runs `true` so Run completes without a real agent.
+// recordingDriver captures cfg.ReviewPasses and cfg.StepPrompt at the moment
+// BuildArgs is called, then runs `true` so Run completes without a real agent.
 type recordingDriver struct {
 	built         bool
 	passesAtBuild []string
+	promptAtBuild string
 }
 
 func (d *recordingDriver) Ensure(context.Context) error { return nil }
@@ -191,6 +256,7 @@ func (d *recordingDriver) Binary() string               { return "true" }
 func (d *recordingDriver) BuildArgs(cfg *config.Config) []string {
 	d.built = true
 	d.passesAtBuild = append([]string{}, cfg.ReviewPasses...)
+	d.promptAtBuild = cfg.StepPrompt
 	return nil
 }
 func (d *recordingDriver) Stdin(*config.Config) string   { return "" }

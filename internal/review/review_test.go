@@ -282,7 +282,7 @@ func TestBuildAndTestSectionSitsBeforeThePasses(t *testing.T) {
 // denied, which is the run this was reported from.
 func TestBuildAndTestSectionSaysWhetherCommandsCanBeRun(t *testing.T) {
 	const mayRun = "You may run the repository's build and test commands. They cannot change the repositories, so running them does not break the instruction at the top. Prefer the narrowest command that exercises the change, such as the tests of the packages the diff touches, over the whole suite: this review round has a time limit. Report a failure as a finding only when this diff causes it, and say which command you ran."
-	const mayNot = "Build and test commands are not available in this review. Do not try to run them; rely on the result above."
+	const mayNot = "Build and test commands are not available in this review. Do not try to run them;"
 
 	for _, tc := range []struct {
 		name           string
@@ -303,6 +303,55 @@ func TestBuildAndTestSectionSaysWhetherCommandsCanBeRun(t *testing.T) {
 				t.Errorf("the prompt also carries the other case's sentence %q", tc.unwanted)
 			}
 		})
+	}
+}
+
+// A reviewer that may run the build is running it inside the fence the rest of
+// agentbox puts around a review: the network is an allowlist and the
+// repositories are read-only. A blocked download, or a tool that insists on
+// writing its cache inside the tree (cargo's target/, a test cache under
+// node_modules), fails for reasons the diff had nothing to do with — and reads
+// exactly like a broken change to a reviewer that was never told.
+func TestBuildAndTestSectionNamesEnvironmentFailures(t *testing.T) {
+	const environmentSentence = "A failure caused by the environment is not a finding: a download the restricted network blocks, or a tool that tries to write inside the read-only repositories (a build cache or a target directory)."
+
+	cfg := reviewConfig(t, nil)
+	cfg.ReviewCanRunCommands = true
+	if prompt := buildPrompt(cfg, Plan{Passes: []string{PassSecurity}}); !strings.Contains(prompt, environmentSentence) {
+		t.Errorf("a reviewer that may run the build is not told which failures are the container's:\n%s", prompt)
+	}
+
+	// Pointless where no command can run — and it would read as a hint that
+	// one might, in the one case the section exists to close off.
+	cfg.ReviewCanRunCommands = false
+	if prompt := buildPrompt(cfg, Plan{Passes: []string{PassSecurity}}); strings.Contains(prompt, environmentSentence) {
+		t.Errorf("a review that cannot run commands was told how to judge their failures:\n%s", prompt)
+	}
+}
+
+// "Rely on the result above" needs a result above. With none, the section said
+// in one breath that the implementer reported nothing and in the next to lean
+// on what it reported — so the reviewer was pointed at an absence.
+func TestBuildAndTestSectionDoesNotPointAtAResultThatIsNotThere(t *testing.T) {
+	cfg := reviewConfig(t, nil)
+	cfg.ReviewCanRunCommands = false
+	cfg.ReviewVerifyResult = nil
+	prompt := buildPrompt(cfg, Plan{Passes: []string{PassSecurity}})
+
+	if !strings.Contains(prompt, "The implementer reported no build or test result.") {
+		t.Fatalf("this case is meant to have no implementer result:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "rely on the result above") {
+		t.Errorf("the reviewer is told to rely on a result nobody reported:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "Do not try to run them; judge the change by reading it.") {
+		t.Errorf("the reviewer is not told what to do instead:\n%s", prompt)
+	}
+
+	// With a result there IS something to lean on, so the pointer stands.
+	cfg.ReviewVerifyResult = &config.ReviewVerifyResult{Ran: true, Passed: true, Command: "go test ./..."}
+	if prompt := buildPrompt(cfg, Plan{Passes: []string{PassSecurity}}); !strings.Contains(prompt, "rely on the result above") {
+		t.Errorf("a reported result is no longer pointed at:\n%s", prompt)
 	}
 }
 

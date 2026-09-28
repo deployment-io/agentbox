@@ -65,6 +65,14 @@ const agentType = "claude-code"
 // Verbatim output is the point: an agent's paraphrase of an error is the
 // one thing the reader can already guess. The exact text is what makes it
 // greppable and searchable.
+//
+// The <verify> paragraph is IDENTICAL in the codex and opencode drivers —
+// stderr_tail, both failure examples and all. They carried only the multi-repo
+// example until this was aligned, so a one-repository failure on either agent
+// arrived naming the command and nothing else, which is the hole stderr_tail
+// exists to close. agent.TestVerifyParagraphIsIdenticalAcrossAgents compares
+// the extracted paragraphs, so editing one copy alone fails; the wording
+// outside it stays each agent's own ("final assistant message" here).
 const finalMessageInstruction = `Before finishing: when the repo has a feasible build/test command (e.g. go build ./... && go vet ./..., go test ./..., tsc, pytest), run it to verify your edits and fix failures within your turn budget.
 
 Final-message format. Your final assistant message must contain, at the very end:
