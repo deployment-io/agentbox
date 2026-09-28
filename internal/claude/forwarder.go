@@ -26,6 +26,11 @@ type chunkForwarder struct {
 	// in-progress assistant message, so the completed message isn't re-sent
 	// as a duplicate chunk.
 	streamedThisMsg bool
+	// lastFinal is the turn's most recent chat-visible message. Claude Code
+	// reports some failures (API errors) as an assistant message AND repeats
+	// the same text on the failed result; remembering it keeps the failure
+	// explanation from quoting what the user has just read.
+	lastFinal string
 }
 
 func newChunkForwarder(sink agent.InteractiveSink) *chunkForwarder {
@@ -37,6 +42,12 @@ type forwardEvent struct {
 	Message json.RawMessage `json:"message"`
 	Result  string          `json:"result"`
 	Event   *partialEvent   `json:"event"`
+	// Subtype / IsError / NumTurns classify a result event: "success" (or
+	// absent, on older CLIs) for a finished turn, else the failure class —
+	// error_max_turns, error_max_budget_usd, error_during_execution, ...
+	Subtype  string `json:"subtype"`
+	IsError  bool   `json:"is_error"`
+	NumTurns int    `json:"num_turns"`
 }
 
 type partialEvent struct {
@@ -60,12 +71,7 @@ func (f *chunkForwarder) handleLine(line []byte) {
 	case "assistant":
 		f.handleAssistant(ev.Message)
 	case "result":
-		// End of turn: the agent is now blocked on user input. The result
-		// text isn't chat-visible (it duplicates the last assistant
-		// message), but the boundary itself is forwarded — consumers gate
-		// their composer on it and group the turn's messages.
-		f.streamedThisMsg = false
-		_ = f.sink.ForwardTurnEnd()
+		f.handleResult(ev)
 	case "system", "user":
 		// init / tool_result: not chat-visible here.
 	default:
@@ -78,6 +84,58 @@ func (f *chunkForwarder) handleLine(line []byte) {
 			_ = f.sink.ForwardChunk(agent.AssistantChunk{Text: ev.Event.Delta.Text})
 		}
 	}
+}
+
+// handleResult processes the end-of-turn result event: the agent is now
+// blocked on user input. A successful result's text isn't chat-visible (it
+// duplicates the last assistant message), but the boundary itself is
+// forwarded — consumers gate their composer on it and group the turn's
+// messages.
+//
+// A FAILED result is different: nothing else in the stream tells the user
+// why the composer re-opened with no answer (the human log has the subtype,
+// the chat does not), so the failure is forwarded first as an assistant-
+// visible message that names the reason, then the boundary.
+func (f *chunkForwarder) handleResult(ev forwardEvent) {
+	f.streamedThisMsg = false
+	shown := f.lastFinal
+	f.lastFinal = ""
+	if msg := turnFailureMessage(ev, shown); msg != "" {
+		_ = f.sink.ForwardChunk(agent.AssistantChunk{Text: msg})
+		_ = f.sink.ForwardFinal(agent.AssistantMessage{Text: msg})
+	}
+	_ = f.sink.ForwardTurnEnd()
+}
+
+// turnFailureMessage renders a failed result event as the one-line
+// explanation the user sees in chat, or "" for a successful turn. The
+// subtype → reason mapping is the batch parser's (resultFailurePredicate);
+// only the remedy differs — in a session the user continues by sending a
+// message, not by raising a cap. Subtypes the mapping doesn't cover fall
+// back to naming the class plus an excerpt of the result text, which for
+// error_during_execution is the agent's own description of what broke. The
+// excerpt is dropped when it repeats alreadyShown, the message the user has
+// just read.
+func turnFailureMessage(ev forwardEvent, alreadyShown string) string {
+	if !ev.IsError && (ev.Subtype == "" || ev.Subtype == "success") {
+		return ""
+	}
+	predicate, capped := resultFailurePredicate(ev.Subtype, ev.NumTurns, ev.Result)
+	switch {
+	case capped && ev.Subtype == resultSubtypeMaxTurns:
+		return "The agent " + predicate + "; send a message to continue."
+	case predicate != "":
+		return "The agent " + predicate + "."
+	}
+	msg := "The agent's turn failed"
+	if ev.Subtype != "" && ev.Subtype != "success" {
+		msg += " (" + ev.Subtype + ")"
+	}
+	excerpt := ellipsisOneLine(ev.Result, resultExcerptLen)
+	if excerpt != "" && excerpt != ellipsisOneLine(alreadyShown, resultExcerptLen) {
+		return msg + ": " + excerpt
+	}
+	return msg + "."
 }
 
 // handleAssistant processes a completed assistant message: forwards any
@@ -105,6 +163,7 @@ func (f *chunkForwarder) handleAssistant(raw json.RawMessage) {
 		_ = f.sink.ForwardChunk(agent.AssistantChunk{Text: display})
 	}
 	_ = f.sink.ForwardFinal(agent.AssistantMessage{Text: display})
+	f.lastFinal = display
 }
 
 // assistantText concatenates the text content blocks of an assistant
