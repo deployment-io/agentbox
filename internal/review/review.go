@@ -347,7 +347,7 @@ func buildAndTestSection(cfg *config.Config) string {
 	b.WriteString("\n[Build and tests]\n")
 	b.WriteString(implementerVerifyLines(cfg.ReviewVerifyResult))
 	if cfg.ReviewCanRunCommands {
-		b.WriteString("You may run the repository's build and test commands. They cannot change the repositories. Report a failure as a finding only when this diff causes it, and say which command you ran.\n")
+		b.WriteString("You may run the repository's build and test commands. They cannot change the repositories, so running them does not break the instruction at the top. Prefer the narrowest command that exercises the change, such as the tests of the packages the diff touches, over the whole suite: this review round has a time limit. Report a failure as a finding only when this diff causes it, and say which command you ran.\n")
 	} else {
 		b.WriteString("Build and test commands are not available in this review. Do not try to run them; rely on the result above.\n")
 	}

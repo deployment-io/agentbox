@@ -281,7 +281,7 @@ func TestBuildAndTestSectionSitsBeforeThePasses(t *testing.T) {
 // silent: a reviewer told nothing spends turns discovering that `go build` is
 // denied, which is the run this was reported from.
 func TestBuildAndTestSectionSaysWhetherCommandsCanBeRun(t *testing.T) {
-	const mayRun = "You may run the repository's build and test commands. They cannot change the repositories. Report a failure as a finding only when this diff causes it, and say which command you ran."
+	const mayRun = "You may run the repository's build and test commands. They cannot change the repositories, so running them does not break the instruction at the top. Prefer the narrowest command that exercises the change, such as the tests of the packages the diff touches, over the whole suite: this review round has a time limit. Report a failure as a finding only when this diff causes it, and say which command you ran."
 	const mayNot = "Build and test commands are not available in this review. Do not try to run them; rely on the result above."
 
 	for _, tc := range []struct {
