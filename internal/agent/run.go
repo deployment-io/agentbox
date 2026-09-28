@@ -70,6 +70,7 @@ func Run(ctx context.Context, cfg *config.Config, driver Driver) (outcome result
 	var reviewPlan review.Plan
 	if cfg.Mode == config.ModeReview {
 		verifyReadOnlyMounts(cfg, os.Stderr)
+		cfg.ReviewCanRunCommands = cfg.ReviewReadOnlyMounts && driver.Capabilities().ReviewCommands
 		plan, err := review.Build(cfg)
 		if err != nil {
 			// The diff could not be computed, so nothing was examined. This
@@ -398,6 +399,7 @@ var agentboxInputEnv = map[string]bool{
 	"REVIEW_ROUND":           true,
 	"REVIEW_OPEN_FINDINGS":   true,
 	"REVIEW_READONLY_MOUNTS": true,
+	"REVIEW_VERIFY_RESULT":   true,
 }
 
 // buildEnv forwards the parent env minus agentbox's own input-contract vars

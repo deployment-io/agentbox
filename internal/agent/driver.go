@@ -80,6 +80,16 @@ type Capabilities struct {
 	// False is the safe default: a new Driver that hasn't wired the
 	// bridge should report false rather than claim a facility it lacks.
 	MCPTools bool
+
+	// ReviewCommands reports whether a REVIEW run of this Driver can run shell
+	// commands once the repositories are verified read-only
+	// (config.ReviewReadOnlyMounts after the write probe). The review prompt
+	// tells the reviewer it may run the build and tests only when this is
+	// true: promising commands the harness then denies sends the reviewer
+	// into the permission denials that promise exists to prevent.
+	//
+	// False is the safe default, as for MCPTools.
+	ReviewCommands bool
 }
 
 // OutputParser consumes an agent's output stream and accumulates

@@ -172,10 +172,38 @@ func (d *Driver) BuildArgs(cfg *config.Config) []string {
 	}
 	args = append(args,
 		"--skip-git-repo-check",
-		// Silence the non-essential outbound calls the agentbox proxy
-		// blocks anyway, so they don't add deny-log noise or latency: the
-		// GitHub update check (github.com) and the Statsig analytics /
-		// feature-flag traffic (chatgpt.com / ab.chatgpt.com).
+		// Silence the non-essential outbound calls the agentbox proxy blocks
+		// anyway, so they don't add deny-log noise or latency.
+		//
+		// features.plugins=false is the one that stops the startup denials
+		// actually seen on the pinned 0.147.0 (github.com, api.github.com and
+		// chatgpt.com, before the session starts). They are ALL the curated
+		// plugin sync, which `codex exec` runs while creating the thread —
+		// codex_core_plugins::{manager,startup_sync}, verified by running the
+		// pinned binary behind a logging deny-proxy:
+		//
+		//   chatgpt.com/backend-api/plugins/featured?platform=codex
+		//     — "warm featured plugin ids cache"
+		//   git ls-remote https://github.com/openai/plugins.git
+		//     — the curated sync itself
+		//   api.github.com/repos/openai/plugins
+		//     — its fallback when the git sync is refused
+		//   chatgpt.com/backend-api/plugins/export/curated
+		//     — its fallback when that is refused too
+		//
+		// One feature, four requests, one key. It does not touch MCP: the
+		// mcp_servers.* registration below is core config, not a plugin
+		// (verified with `codex mcp list` under the same override).
+		//
+		// The four keys below are NOT renamed and NOT dead — `codex exec
+		// --strict-config` on 0.147.0 still accepts every one, and dropping
+		// otel/analytics brings back a 60-second POST to
+		// ab.chatgpt.com/otlp/v1/metrics. They simply never governed the
+		// plugin sync. check_for_update_on_startup covers the TUI's update
+		// check against api.github.com/repos/openai/codex/releases/latest,
+		// which `codex exec` never performs; it stays because a future exec
+		// path that does would be covered without another round of this.
+		"-c", "features.plugins=false",
 		"-c", "check_for_update_on_startup=false",
 		"-c", "analytics.enabled=false",
 		"-c", "otel.exporter=none",
@@ -275,5 +303,7 @@ func (d *Driver) NewLogFormatter(sink io.Writer) io.WriteCloser {
 // so BuildArgs writes mcp_servers.deployment_io into its config via -c
 // when cfg.MCPSocket is set.
 func (d *Driver) Capabilities() agent.Capabilities {
-	return agent.Capabilities{MCPTools: true}
+	// ReviewCommands: on verified read-only mounts Codex runs without its own
+	// sandbox (BuildArgs), so its shell works.
+	return agent.Capabilities{MCPTools: true, ReviewCommands: true}
 }

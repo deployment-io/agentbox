@@ -101,6 +101,33 @@ type Config struct {
 	// than one that could write.
 	ReviewReadOnlyMounts bool
 
+	// ReviewCanRunCommands is not read from the environment. agent.Run sets it
+	// after the write probe: true only when ReviewReadOnlyMounts survived the
+	// probe AND the Driver's review run can actually run shell commands
+	// (agent.Capabilities.ReviewCommands). The review prompt's build-and-test
+	// sentence follows it, so the reviewer is never told it may run what its
+	// harness will deny.
+	ReviewCanRunCommands bool
+
+	// ReviewVerifyResult is the IMPLEMENTER's self-reported build/test
+	// outcome, as the runner read it out of the implement run's
+	// result.json. From the JSON object in REVIEW_VERIFY_RESULT; nil when
+	// the runner sent nothing, or sent something that would not parse.
+	//
+	// It is ADVISORY and nothing more. It is the implementing agent's claim
+	// about its own work, which is exactly why the reviewer is told it AND
+	// — when the repositories are provably read-only — allowed to run the
+	// commands itself. A malformed value never fails the load: a review that
+	// refused to start because a status line was unreadable would trade the
+	// whole examination for a field that only adds context.
+	//
+	// This is the one thing from the implement run that reaches a review, and
+	// it stays a RESULT: what ran and whether it passed. The implementer's
+	// summary, its description of what it fixed and its transcript remain out,
+	// because a reviewer shown "I fixed it" grades the claim instead of the
+	// code.
+	ReviewVerifyResult *ReviewVerifyResult
+
 	// ReviewRound is the 1-based round number within one Step's Review
 	// stage. Carried so the round can be named in logs and so a prompt can
 	// say whether this is a first look or a re-check after fixes. From
@@ -291,6 +318,56 @@ type ReviewOpenFinding struct {
 	What      string `json:"what"`
 }
 
+// ReviewVerifyResult is the implementer's own build/test result, forwarded to
+// the review round so the reviewer knows what the implementer claims it ran.
+// A subset of result.VerifyResult — the fields a reviewer can act on — and
+// deliberately not that type: internal/result does not import config, and a
+// review reads this as an input, not as a result it produced.
+type ReviewVerifyResult struct {
+	Ran           bool               `json:"ran"`
+	Passed        bool               `json:"passed"`
+	Command       string             `json:"command"`
+	SkippedReason string             `json:"skipped_reason"`
+	PreExisting   bool               `json:"pre_existing"`
+	Steps         []ReviewVerifyStep `json:"steps"`
+}
+
+// ReviewVerifyStep is one repository's line of that result.
+type ReviewVerifyStep struct {
+	Repo    string `json:"repo"`
+	Command string `json:"command"`
+	Passed  bool   `json:"passed"`
+}
+
+// parseReviewVerifyResult reads the JSON object in REVIEW_VERIFY_RESULT.
+//
+// Unlike REVIEW_OPEN_FINDINGS, a malformed value is IGNORED with a line on
+// stderr rather than failing the load. The two carry different weight: an
+// unreadable open-findings list would let a round report a change clean while
+// must-fix problems still stand, whereas this is advisory context. Failing the
+// review over it would discard the entire examination to protect a field the
+// reviewer is explicitly told not to rely on.
+func parseReviewVerifyResult(raw string) *ReviewVerifyResult {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	// Unmarshalling into a POINTER, not a value: a literal `null` is valid
+	// JSON that leaves a value target zeroed and error-free, which would read
+	// downstream as a genuine "ran: false" claim the runner never made. Into a
+	// pointer it stays nil, and is ignored the same way an absent value is.
+	var parsed *ReviewVerifyResult
+	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+		fmt.Fprintf(os.Stderr, "[agentbox] review: ignoring unreadable REVIEW_VERIFY_RESULT: %v\n", err)
+		return nil
+	}
+	if parsed == nil {
+		fmt.Fprintf(os.Stderr, "[agentbox] review: ignoring null REVIEW_VERIFY_RESULT\n")
+		return nil
+	}
+	return parsed
+}
+
 // loadReviewInputs reads and validates the REVIEW_* half of the contract.
 //
 // Only REVIEW_BASE_COMMITS is strictly required: without a baseline there is
@@ -315,6 +392,8 @@ func (c *Config) loadReviewInputs() error {
 		return err
 	}
 	c.ReviewOpenFindings = openFindings
+
+	c.ReviewVerifyResult = parseReviewVerifyResult(os.Getenv("REVIEW_VERIFY_RESULT"))
 
 	raw := strings.TrimSpace(os.Getenv("REVIEW_BASE_COMMITS"))
 	if raw == "" {

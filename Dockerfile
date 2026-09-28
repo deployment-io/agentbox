@@ -138,6 +138,21 @@ ENV CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
 ENV DO_NOT_TRACK=1
 ENV DISABLE_AUTOUPDATER=1
 
+# Raise Claude Code's Bash tool timeouts. The default is 2 minutes, which a
+# cold `go build ./...` of a large repository exceeds — and the workaround the
+# agent reaches for makes it worse: it backgrounds the build and then waits
+# with `sleep`, which is itself a Bash call and dies at the same 2-minute mark
+# (exit 143), so the run burns turns learning nothing. 10 minutes by default
+# with a 20-minute ceiling covers a cold build and its test run while still
+# bounding a genuinely hung command.
+#
+# Set in EVERY mode, deliberately: with reviewers now allowed to run the build
+# and tests on read-only mounts, a review hits the same cold-build wall an
+# implement run does. A caller that passes either variable in the container
+# environment still overrides what is set here (docker run -e wins over ENV).
+ENV BASH_DEFAULT_TIMEOUT_MS=600000
+ENV BASH_MAX_TIMEOUT_MS=1200000
+
 # Agent version pins. Overridable at build time via --build-arg or at
 # runtime via docker run -e. The Go binary reads these on startup and
 # installs the selected agent.

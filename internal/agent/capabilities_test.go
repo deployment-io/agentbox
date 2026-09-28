@@ -26,9 +26,9 @@ import (
 // method exists — the interface does that; what it declares is on us.)
 func TestDeclaredCapabilities(t *testing.T) {
 	want := map[string]agent.Capabilities{
-		"claude-code": {MCPTools: true},
-		"codex":       {MCPTools: true},
-		"opencode":    {MCPTools: true},
+		"claude-code": {MCPTools: true, ReviewCommands: true},
+		"codex":       {MCPTools: true, ReviewCommands: true},
+		"opencode":    {MCPTools: true, ReviewCommands: false},
 	}
 
 	registered := agent.RegisteredTypes()

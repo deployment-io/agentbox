@@ -41,6 +41,50 @@ var readOnlyAllowedTools = []string{
 	"Bash(tree *)",
 }
 
+// reviewAllowedTools is the allowlist a REVIEW run is held to.
+//
+// Without verified read-only mounts it is exactly readOnlyAllowedTools, and a
+// `go build` is denied like anything else not on it.
+//
+// With them, every read-only `Bash(...)` pattern collapses into a plain `Bash`,
+// so the reviewer can run the repository's build and tests. Two facts make
+// that safe, and BOTH are required. The runner mounted every repository
+// read-only, and agent.verifyReadOnlyMounts already tried a real write in each
+// one and did not get it — so a command that tries to edit the change under
+// review fails in the kernel, which no allowlist pattern could promise anyway
+// (`Bash(cat *)` never stopped `cat x > y`). And a Codex reviewer on the same
+// mounts already runs unrestricted, so this only removes an inconsistency that
+// cost a Claude reviewer its turns: it retried `go build` into permission
+// denials while the Codex reviewer beside it ran the suite and reported the
+// result.
+//
+// The non-Bash entries are the point of what stays. Read, Grep and Glob are
+// kept and Edit, Write and NotebookEdit are still absent, so the reviewer has
+// no first-class editing tool however the mounts are configured, and BuildArgs
+// still wires no MCP server. What is relaxed is the SHELL, which the mounts
+// govern; what is not relaxed is the tool surface, which they do not.
+func reviewAllowedTools(readOnlyMounts bool) []string {
+	if !readOnlyMounts {
+		return readOnlyAllowedTools
+	}
+	out := make([]string, 0, len(readOnlyAllowedTools))
+	bash := false
+	for _, tool := range readOnlyAllowedTools {
+		if !strings.HasPrefix(tool, "Bash(") {
+			out = append(out, tool)
+			continue
+		}
+		if !bash {
+			bash = true
+			out = append(out, "Bash")
+		}
+	}
+	if !bash {
+		out = append(out, "Bash")
+	}
+	return out
+}
+
 // BuildInteractiveArgs builds the argv for a long-lived bidirectional
 // session: user turns arrive as line-delimited stream-json on stdin and
 // the agent emits its events (including token-level partials) as

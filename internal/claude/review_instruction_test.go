@@ -84,6 +84,90 @@ func TestBuildArgsMakesReviewReadOnly(t *testing.T) {
 	}
 }
 
+// On VERIFIED read-only mounts the reviewer gets a plain Bash, so it can run
+// the repository's build and tests — the independent check on the
+// implementer's self-reported verify result, and what a Codex reviewer on the
+// same mounts has been doing all along. What it must NOT gain is a tool that
+// edits: the mounts make the tree unwritable, and the allowlist keeps Edit,
+// Write and NotebookEdit off the table regardless, so neither guarantee rests
+// on the other.
+func TestReviewGetsUnrestrictedBashOnVerifiedReadOnlyMounts(t *testing.T) {
+	d := &Driver{}
+	args := d.BuildArgs(&config.Config{
+		Mode:                 config.ModeReview,
+		StepPrompt:           "the diff and the spec",
+		ReviewPasses:         []string{"security"},
+		ReviewReadOnlyMounts: true,
+		MCPSocket:            "/run/agentbox/tool-rpc.sock",
+	})
+
+	idx := indexOf(args, "--allowedTools")
+	if idx < 0 {
+		t.Fatalf("review mode has no --allowedTools allowlist: %v", args)
+	}
+	allowed := args[idx+1:]
+	if indexOf(allowed, "Bash") < 0 {
+		t.Errorf("read-only mounts did not grant a plain Bash: %v", allowed)
+	}
+	for _, entry := range allowed {
+		if strings.HasPrefix(entry, "Bash(") {
+			t.Errorf("a restricted Bash pattern (%q) survived alongside the plain Bash, which is dead weight: %v", entry, allowed)
+		}
+		for _, writer := range []string{"Edit", "Write", "NotebookEdit"} {
+			if strings.HasPrefix(entry, writer) {
+				t.Errorf("read-only mounts granted the writing tool %q", entry)
+			}
+		}
+	}
+	// The reading tools are the reason a reviewer can review at all.
+	for _, reader := range []string{"Read", "Grep", "Glob"} {
+		if indexOf(allowed, reader) < 0 {
+			t.Errorf("the allowlist lost %q: %v", reader, allowed)
+		}
+	}
+	// Everything else review mode withholds is unchanged by the mounts.
+	if indexOf(args, "--dangerously-skip-permissions") >= 0 {
+		t.Error("read-only mounts bypassed the allowlist entirely")
+	}
+	if indexOf(args, "--mcp-config") >= 0 {
+		t.Error("read-only mounts wired MCP tools into a review")
+	}
+	// Still variadic, so it still has to be last.
+	if idx != len(args)-1-len(allowed) {
+		t.Errorf("--allowedTools is not the final flag: %v", args)
+	}
+}
+
+// Without the claim — an older runner, or a probe that found a writable
+// repository and withdrew it — the allowlist is byte-for-byte what it was.
+// There is nothing in the kernel stopping a write, so `go build` is denied
+// along with everything else not on the list.
+func TestReviewKeepsTheAllowlistWithoutVerifiedReadOnlyMounts(t *testing.T) {
+	d := &Driver{}
+	args := d.BuildArgs(&config.Config{
+		Mode:         config.ModeReview,
+		StepPrompt:   "the diff and the spec",
+		ReviewPasses: []string{"security"},
+	})
+
+	idx := indexOf(args, "--allowedTools")
+	if idx < 0 {
+		t.Fatalf("review mode has no --allowedTools allowlist: %v", args)
+	}
+	allowed := args[idx+1:]
+	if len(allowed) != len(readOnlyAllowedTools) {
+		t.Fatalf("allowlist = %v, want the read-only list %v", allowed, readOnlyAllowedTools)
+	}
+	for i, want := range readOnlyAllowedTools {
+		if allowed[i] != want {
+			t.Errorf("allowlist[%d] = %q, want %q", i, allowed[i], want)
+		}
+	}
+	if indexOf(allowed, "Bash") >= 0 {
+		t.Error("an unrestricted Bash was granted with no read-only guarantee behind it")
+	}
+}
+
 // Batch mode keeps full autonomy — the Review stage must not quietly restrict
 // the implementer.
 func TestBuildArgsKeepsBatchModeAutonomous(t *testing.T) {

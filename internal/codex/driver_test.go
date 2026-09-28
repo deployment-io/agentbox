@@ -96,7 +96,7 @@ func TestBuildArgs_Minimal(t *testing.T) {
 		t.Error("--model should not be present when Model is empty")
 	}
 	// Non-essential network calls are disabled via -c overrides.
-	for _, k := range []string{"check_for_update_on_startup=false", "analytics.enabled=false"} {
+	for _, k := range quietStartupOverrides {
 		if !slices.Contains(args, k) {
 			t.Errorf("expected -c %q to disable non-essential calls", k)
 		}
@@ -122,6 +122,58 @@ func TestBuildArgs_WithModel(t *testing.T) {
 	}
 	if !slices.Contains(args, "--skip-git-repo-check") {
 		t.Error("--skip-git-repo-check should be present")
+	}
+}
+
+// quietStartupOverrides is every -c key whose job is to keep Codex off the
+// hosts the egress proxy denies. Named once so both the implement-mode and the
+// review-mode assertions below check the same set: a key that only reaches one
+// of the two modes leaves the other logging denials.
+var quietStartupOverrides = []string{
+	"features.plugins=false",
+	"check_for_update_on_startup=false",
+	"analytics.enabled=false",
+	"otel.exporter=none",
+	"otel.metrics_exporter=none",
+}
+
+// features.plugins=false is the key that earns its place here. On the pinned
+// 0.147.0 the other four are all still accepted (`codex exec --strict-config`
+// takes every one) and still do work — dropping the otel/analytics pair brings
+// back a periodic POST to ab.chatgpt.com/otlp/v1/metrics — but NONE of them
+// touches the startup denials that were actually observed. Those are the
+// curated plugin sync, which `codex exec` runs while creating the thread:
+// chatgpt.com/backend-api/plugins/featured, then git ls-remote on
+// github.com/openai/plugins.git, then api.github.com/repos/openai/plugins, then
+// chatgpt.com/backend-api/plugins/export/curated as each is refused in turn.
+// Four requests, three denied hosts, one feature flag.
+//
+// Asserted in REVIEW mode too: a review run takes a different branch through
+// BuildArgs (sandbox flags, no MCP, prompt on stdin), and a review that logs
+// the same three denials is the run this was reported from.
+func TestBuildArgsQuietsTheStartupCallsInEveryMode(t *testing.T) {
+	d := &Driver{}
+	for _, tc := range []struct {
+		name string
+		cfg  *config.Config
+	}{
+		{"implement", &config.Config{StepPrompt: "hello"}},
+		{"review", &config.Config{Mode: config.ModeReview, StepPrompt: "the diff", ReviewPasses: []string{"security"}}},
+		{"review on read-only mounts", &config.Config{Mode: config.ModeReview, StepPrompt: "the diff", ReviewReadOnlyMounts: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args := d.BuildArgs(tc.cfg)
+			for _, key := range quietStartupOverrides {
+				i := slices.Index(args, key)
+				if i < 0 {
+					t.Errorf("-c %q is missing: %v", key, args)
+					continue
+				}
+				if i == 0 || args[i-1] != "-c" {
+					t.Errorf("%q is not preceded by -c: %v", key, args)
+				}
+			}
+		})
 	}
 }
 

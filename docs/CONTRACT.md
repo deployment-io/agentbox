@@ -92,12 +92,16 @@ asked for a `<review>` block instead — see
 
 A review run reads NOTHING a previous run wrote: not `result.json`, not
 `progress.json`, not the interactive message records, not a transcript. Its
-prompt is the spec, an index of the change, the pass list and — on a re-check
-— the REVIEWER'S OWN still-open findings from `REVIEW_OPEN_FINDINGS`, and the
-diff files it names are written fresh for the round. Nothing the implementer
-produced reaches it: not its summary, not its transcript, not its description
-of what it fixed. A reviewer shown "I fixed it" grades the claim rather than
-the code. Consumers are expected to enforce the same boundary structurally
+prompt is the spec, an index of the change, the build-and-test section, the
+pass list and — on a re-check — the REVIEWER'S OWN still-open findings from
+`REVIEW_OPEN_FINDINGS`, and the diff files it names are written fresh for the
+round. No PROSE the implementer wrote reaches it: not its summary, not its
+transcript, not its description of what it fixed. A reviewer shown "I fixed it"
+grades the claim rather than the code. The single exception is the
+implementer's build/test RESULT (`REVIEW_VERIFY_RESULT` — what ran and whether
+it passed), which is labelled in the prompt as the implementer's own unchecked
+claim and which a reviewer on read-only mounts is invited to re-run rather than
+believe. Consumers are expected to enforce the same boundary structurally
 (the deployment.io runner moves the implementer's `.agentbox-output` out of
 the work dir before each round), so the guarantee does not rest on agentbox's
 restraint alone.
@@ -163,7 +167,9 @@ read-only allowlist and no `--dangerously-skip-permissions`, `codex` gets
 (but see `REVIEW_READONLY_MOUNTS` below), and `opencode` gets a config denying
 `edit` and `bash`. The prompt also says not to touch the tree, but a prompt is
 a request and this is the guarantee. No MCP tool channel is wired in review
-mode either — a reviewer needs none.
+mode either — a reviewer needs none. `Edit`, `Write` and `NotebookEdit` are
+never on the `claude` allowlist and the MCP channel is never wired, whatever
+`REVIEW_READONLY_MOUNTS` says.
 
 **`REVIEW_READONLY_MOUNTS` moves that guarantee to the mount.** A runner that
 bind-mounts every repository read-only into the review container sets it, and
@@ -179,13 +185,56 @@ Codex's own read-only sandbox only when the variable is absent**, which is the
 older-runner case: a review that cannot run is safer than one that could
 write. Everything else review mode does is unchanged either way — the
 `<review>` trailer instruction, no MCP tool channel, the prompt on stdin. The
-`claude` and `opencode` review paths do not read it and are unchanged.
+`opencode` review path does not read it and is unchanged.
 
 agentbox VERIFIES the claim before acting on it: at the start of a review it tries to create a file in every repository directory (the checkouts under `WORK_DIR` and every `REVIEW_BASE_COMMITS` key). If any write succeeds, the probe file is removed, the claim is withdrawn with a line on stderr, and Codex keeps `--sandbox read-only`.
+
+**A `claude` review reads it too, to widen its shell.** With the claim verified,
+the allowlist's read-only `Bash(...)` patterns are replaced by a plain `Bash`,
+so the reviewer can run the repository's build and tests. `Read`, `Grep` and
+`Glob` stay, `Edit`, `Write` and `NotebookEdit` stay absent, and no MCP channel
+is wired — the mounts govern the shell, not the tool surface. Without the
+verified claim the allowlist is exactly what it was, and `go build` is denied
+along with everything else not on it. This only removes an inconsistency: a
+`codex` reviewer on the same mounts already runs unrestricted and has been
+running the build and tests, while the `claude` reviewer beside it spent its
+turns on permission denials.
 
 | Variable | Description |
 |---|---|
 | `REVIEW_READONLY_MOUNTS` | `1` or `true` (case-insensitive) declares that the runner mounted every repository read-only into this review container. Any other value, including `yes` and unset, is off — the flag relaxes a driver's own sandbox, so only an unambiguous yes counts. Review mode only. |
+
+**The reviewer is told the implementer's build/test result, and — on verified
+read-only mounts — invited to check it.** The review prompt carries a
+`[Build and tests]` section immediately before `[Passes]`. It states the
+implementer's reported result, one line per repository (or
+`The implementer reported no build or test result.` when the runner sent none),
+labelled as the implementer's own claim rather than a checked fact. It then
+says one of two things. The first needs BOTH the verified read-only claim above
+AND a harness whose review run can run shell commands (`claude` and `codex` can;
+`opencode`'s review config denies bash whatever the mounts are, so it always
+gets the second):
+
+- the review can run commands — *"You may run the repository's build and test
+  commands. They cannot change the repositories, so running them does not break
+  the instruction at the top. Prefer the narrowest command that exercises the
+  change, such as the tests of the packages the diff touches, over the whole
+  suite: this review round has a time limit. Report a failure as a finding only
+  when this diff causes it, and say which command you ran."*
+- otherwise — *"Build and test commands are not available in this review. Do
+  not try to run them; rely on the result above."*
+
+The result itself is `REVIEW_VERIFY_RESULT`. It is the one thing from the
+implement run that crosses into a review, and it crosses as a RESULT — what ran
+and whether it passed — never as prose. The implementer's summary, its
+description of what it fixed and its transcript stay out, because a reviewer
+shown "I fixed it" grades the claim instead of the code. A reviewer that can
+re-run the command does not have to take even this on trust, which is the point
+of pairing the two halves.
+
+| Variable | Description |
+|---|---|
+| `REVIEW_VERIFY_RESULT` | JSON object with the implementer's self-reported build/test outcome: `{"ran":bool,"passed":bool,"command":string,"skipped_reason":string,"pre_existing":bool,"steps":[{"repo":string,"command":string,"passed":bool}]}` — the same shape agentbox emits as [`verify_result`](#verify_result). All fields optional. Optional as a whole, and **advisory**: unlike `REVIEW_OPEN_FINDINGS`, a malformed value is IGNORED with a line on stderr instead of failing the load, because throwing away the whole examination to protect a line of context is the worse trade. Review mode only. |
 
 **A git failure fails the round.** Each base commit is verified with
 `git rev-parse --verify <sha>^{commit}` before anything is diffed, and any git

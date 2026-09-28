@@ -195,6 +195,95 @@ func TestLoadReviewModeRejectsMalformedOpenFindings(t *testing.T) {
 	}
 }
 
+// REVIEW_VERIFY_RESULT carries the implementer's own build/test result into
+// the round, so the reviewer knows what was claimed and — on read-only mounts
+// — can run the same commands itself.
+func TestLoadReviewModeParsesTheVerifyResult(t *testing.T) {
+	setEnv(t, map[string]string{
+		"WORK_DIR":            t.TempDir(),
+		"ANTHROPIC_API_KEY":   "sk-ant-test",
+		"AGENT_MODE":          ModeReview,
+		"REVIEW_BASE_COMMITS": `{"0-acme/api":"abc123"}`,
+		"REVIEW_VERIFY_RESULT": `{"ran":true,"passed":false,"command":"go test ./...","pre_existing":true,
+			"steps":[{"repo":"0-acme/api","command":"go test ./...","passed":false},
+			         {"repo":"1-acme/web","command":"npm test","passed":true}]}`,
+	})
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %s", err)
+	}
+	v := cfg.ReviewVerifyResult
+	if v == nil {
+		t.Fatal("ReviewVerifyResult is nil")
+	}
+	if !v.Ran || v.Passed || v.Command != "go test ./..." || !v.PreExisting {
+		t.Errorf("rollup = %+v", *v)
+	}
+	if len(v.Steps) != 2 {
+		t.Fatalf("Steps = %+v, want one per repository", v.Steps)
+	}
+	if v.Steps[0].Repo != "0-acme/api" || v.Steps[0].Command != "go test ./..." || v.Steps[0].Passed {
+		t.Errorf("Steps[0] = %+v", v.Steps[0])
+	}
+	if v.Steps[1].Repo != "1-acme/web" || v.Steps[1].Command != "npm test" || !v.Steps[1].Passed {
+		t.Errorf("Steps[1] = %+v", v.Steps[1])
+	}
+}
+
+func TestLoadReviewModeAcceptsNoVerifyResult(t *testing.T) {
+	setEnv(t, map[string]string{
+		"WORK_DIR":            t.TempDir(),
+		"ANTHROPIC_API_KEY":   "sk-ant-test",
+		"AGENT_MODE":          ModeReview,
+		"REVIEW_BASE_COMMITS": `{"0-acme/api":"abc123"}`,
+	})
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %s", err)
+	}
+	if cfg.ReviewVerifyResult != nil {
+		t.Errorf("ReviewVerifyResult = %+v, want nil when the runner sent none", cfg.ReviewVerifyResult)
+	}
+}
+
+// A malformed value is IGNORED, not fatal — the opposite of
+// REVIEW_OPEN_FINDINGS above, and deliberately so. This field is advisory: the
+// reviewer is told in the prompt that it is the implementer's own unchecked
+// claim. Failing the load would throw away the entire examination to protect a
+// line of context, which is a strictly worse outcome than reviewing without it.
+func TestLoadReviewModeIgnoresAMalformedVerifyResult(t *testing.T) {
+	for _, tc := range []struct{ name, value string }{
+		{"not json", "not json"},
+		{"an array rather than an object", `[{"ran":true}]`},
+		{"a truncated object", `{"ran":true,`},
+		{"a field of the wrong type", `{"ran":"yes"}`},
+		// `null` unmarshals without error, so it has to be rejected
+		// explicitly: taken as a result it would tell the reviewer the
+		// implementer reported running nothing, which is a claim the runner
+		// never made.
+		{"a JSON null", `null`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setEnv(t, map[string]string{
+				"WORK_DIR":             t.TempDir(),
+				"ANTHROPIC_API_KEY":    "sk-ant-test",
+				"AGENT_MODE":           ModeReview,
+				"REVIEW_BASE_COMMITS":  `{"0-acme/api":"abc123"}`,
+				"REVIEW_VERIFY_RESULT": tc.value,
+			})
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("an unreadable REVIEW_VERIFY_RESULT failed the load: %s", err)
+			}
+			if cfg.ReviewVerifyResult != nil {
+				t.Errorf("ReviewVerifyResult = %+v, want nil", cfg.ReviewVerifyResult)
+			}
+		})
+	}
+}
+
 // Without a baseline there is no diff, and a review of nothing would report a
 // clean bill of health for work it never saw.
 func TestLoadReviewModeRequiresBaseCommits(t *testing.T) {

@@ -368,5 +368,9 @@ func (d *Driver) NewLogFormatter(sink io.Writer) io.WriteCloser {
 // the bridge as a local stdio server in opencode's `mcp` block when the
 // runner exposes a socket.
 func (d *Driver) Capabilities() agent.Capabilities {
-	return agent.Capabilities{MCPTools: true}
+	// ReviewCommands is false: a review run's permission config denies bash
+	// outright (agentConfig). That file is written in Ensure, before the
+	// write probe has decided whether the mounts are read-only, so it cannot
+	// depend on the probe.
+	return agent.Capabilities{MCPTools: true, ReviewCommands: false}
 }
