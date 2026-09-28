@@ -286,15 +286,15 @@ func TestBuildAndTestSectionSaysWhetherCommandsCanBeRun(t *testing.T) {
 
 	for _, tc := range []struct {
 		name           string
-		readOnlyMounts bool
+		canRun         bool
 		want, unwanted string
 	}{
-		{"with read-only mounts", true, mayRun, mayNot},
-		{"without read-only mounts", false, mayNot, mayRun},
+		{"when the review can run commands", true, mayRun, mayNot},
+		{"when it cannot", false, mayNot, mayRun},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := reviewConfig(t, nil)
-			cfg.ReviewReadOnlyMounts = tc.readOnlyMounts
+			cfg.ReviewCanRunCommands = tc.canRun
 			prompt := buildPrompt(cfg, Plan{Passes: []string{PassSecurity}})
 			if !strings.Contains(prompt, tc.want) {
 				t.Errorf("the prompt does not carry %q:\n%s", tc.want, prompt)
@@ -303,6 +303,18 @@ func TestBuildAndTestSectionSaysWhetherCommandsCanBeRun(t *testing.T) {
 				t.Errorf("the prompt also carries the other case's sentence %q", tc.unwanted)
 			}
 		})
+	}
+}
+
+// Read-only mounts are not enough on their own: a harness that denies the
+// reviewer a shell (opencode's review config) must not be told to run the build.
+func TestBuildAndTestSectionIgnoresTheMountsAlone(t *testing.T) {
+	cfg := reviewConfig(t, nil)
+	cfg.ReviewReadOnlyMounts = true
+	cfg.ReviewCanRunCommands = false
+	prompt := buildPrompt(cfg, Plan{Passes: []string{PassSecurity}})
+	if strings.Contains(prompt, "You may run the repository's build and test commands") {
+		t.Errorf("read-only mounts alone promised commands the harness may deny:\n%s", prompt)
 	}
 }
 

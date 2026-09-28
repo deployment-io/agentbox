@@ -101,6 +101,14 @@ type Config struct {
 	// than one that could write.
 	ReviewReadOnlyMounts bool
 
+	// ReviewCanRunCommands is not read from the environment. agent.Run sets it
+	// after the write probe: true only when ReviewReadOnlyMounts survived the
+	// probe AND the Driver's review run can actually run shell commands
+	// (agent.Capabilities.ReviewCommands). The review prompt's build-and-test
+	// sentence follows it, so the reviewer is never told it may run what its
+	// harness will deny.
+	ReviewCanRunCommands bool
+
 	// ReviewVerifyResult is the IMPLEMENTER's self-reported build/test
 	// outcome, as the runner read it out of the implement run's
 	// result.json. From the JSON object in REVIEW_VERIFY_RESULT; nil when

@@ -271,7 +271,9 @@ func (d *Driver) NewLogFormatter(sink io.Writer) io.WriteCloser {
 // Capabilities reports MCP tool support: BuildArgs points Claude Code at
 // the bridge via --mcp-config when cfg.MCPSocket is set.
 func (d *Driver) Capabilities() agent.Capabilities {
-	return agent.Capabilities{MCPTools: true}
+	// ReviewCommands: on verified read-only mounts the review allowlist widens
+	// to a plain Bash (reviewAllowedTools).
+	return agent.Capabilities{MCPTools: true, ReviewCommands: true}
 }
 
 func openRawStreamLog() io.WriteCloser {

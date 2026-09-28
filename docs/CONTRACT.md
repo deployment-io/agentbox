@@ -210,12 +210,15 @@ read-only mounts — invited to check it.** The review prompt carries a
 implementer's reported result, one line per repository (or
 `The implementer reported no build or test result.` when the runner sent none),
 labelled as the implementer's own claim rather than a checked fact. It then
-says one of two things, decided by the verified read-only claim above:
+says one of two things. The first needs BOTH the verified read-only claim above
+AND a harness whose review run can run shell commands (`claude` and `codex` can;
+`opencode`'s review config denies bash whatever the mounts are, so it always
+gets the second):
 
-- with read-only mounts — *"You may run the repository's build and test
+- the review can run commands — *"You may run the repository's build and test
   commands. They cannot change the repositories. Report a failure as a finding
   only when this diff causes it, and say which command you ran."*
-- without them — *"Build and test commands are not available in this review. Do
+- otherwise — *"Build and test commands are not available in this review. Do
   not try to run them; rely on the result above."*
 
 The result itself is `REVIEW_VERIFY_RESULT`. It is the one thing from the

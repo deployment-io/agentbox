@@ -303,5 +303,7 @@ func (d *Driver) NewLogFormatter(sink io.Writer) io.WriteCloser {
 // so BuildArgs writes mcp_servers.deployment_io into its config via -c
 // when cfg.MCPSocket is set.
 func (d *Driver) Capabilities() agent.Capabilities {
-	return agent.Capabilities{MCPTools: true}
+	// ReviewCommands: on verified read-only mounts Codex runs without its own
+	// sandbox (BuildArgs), so its shell works.
+	return agent.Capabilities{MCPTools: true, ReviewCommands: true}
 }

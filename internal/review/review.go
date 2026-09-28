@@ -331,9 +331,11 @@ const MaxVerifyFieldRunes = 300
 // running the build is free of the risk that made review mode read-only in the
 // first place: the kernel refuses the write whatever the command does. A
 // reviewer that can run `go test` is an independent check on the implementer's
-// "it passed".
+// "it passed". The sentence follows cfg.ReviewCanRunCommands, not the mounts
+// alone: the harness must also let a reviewer run commands (opencode's review
+// config denies bash whatever the mounts are).
 //
-// Without that guarantee the section says so plainly rather than staying
+// Without that the section says so plainly rather than staying
 // silent. A Claude reviewer held to the read-only allowlist spent turns
 // retrying `go build` into permission denials it had no way to interpret; a
 // reviewer told the commands are unavailable spends those turns reading.
@@ -344,7 +346,7 @@ func buildAndTestSection(cfg *config.Config) string {
 	var b strings.Builder
 	b.WriteString("\n[Build and tests]\n")
 	b.WriteString(implementerVerifyLines(cfg.ReviewVerifyResult))
-	if cfg.ReviewReadOnlyMounts {
+	if cfg.ReviewCanRunCommands {
 		b.WriteString("You may run the repository's build and test commands. They cannot change the repositories. Report a failure as a finding only when this diff causes it, and say which command you ran.\n")
 	} else {
 		b.WriteString("Build and test commands are not available in this review. Do not try to run them; rely on the result above.\n")
