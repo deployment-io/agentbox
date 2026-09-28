@@ -1,6 +1,9 @@
 package agent_test
 
 import (
+	"io/fs"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -118,11 +121,52 @@ func TestVerifyParagraphIsIdenticalAcrossAgents(t *testing.T) {
 // Every agent that can be asked to implement is covered above. A fourth driver
 // added without a fourth copy of the paragraph would otherwise ship with a
 // verify contract nobody compared.
+//
+// The registry alone cannot say that: it lists only the drivers linked into
+// THIS test binary, so a new driver package nothing here imports would leave it
+// at three and the loop would pass having compared nothing new. So the source
+// tree is counted too — every non-test file under internal/ that registers a
+// driver — and the two must agree before the loop means anything.
 func TestEveryImplementAgentIsCoveredByTheVerifyComparison(t *testing.T) {
 	compared := map[string]bool{"claude-code": true, "codex": true, "opencode": true}
-	for _, name := range agent.RegisteredTypes() {
+	registered := agent.RegisteredTypes()
+	if inSource := driverRegistrationsInSource(t); len(registered) != inSource {
+		t.Fatalf("%d driver(s) register themselves in internal/, but %d are linked into this test %v: "+
+			"import the new driver here and compare its <verify> paragraph", inSource, len(registered), registered)
+	}
+	for _, name := range registered {
 		if !compared[name] {
 			t.Errorf("agent %q is registered but its <verify> paragraph is compared with nobody's", name)
 		}
 	}
+}
+
+// driverRegistrationsInSource counts the non-test Go files under internal/
+// that call agent.Register — one per driver package.
+func driverRegistrationsInSource(t *testing.T) int {
+	t.Helper()
+	count := 0
+	err := filepath.WalkDir("..", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		src, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if strings.Contains(string(src), "agent.Register(") {
+			count++
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking internal/ for driver registrations: %v", err)
+	}
+	if count == 0 {
+		t.Fatal("found no driver registrations under internal/ — the walk is looking in the wrong place")
+	}
+	return count
 }
