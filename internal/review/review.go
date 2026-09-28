@@ -202,15 +202,23 @@ var passBriefs = map[string]string{
 // with the diff file each repository's part was written to, and one focused
 // brief per pass. The trailer format is appended by the driver.
 //
-// It contains the spec, the change index, the pass list and — on a re-check —
-// the REVIEWER'S OWN still-open findings, AND NOTHING ELSE. No previous
-// result.json, no progress file, no transcript, and above all nothing the
-// implementer wrote: not its summary, not its description of what it fixed. A
-// reviewer shown "I fixed it" grades the claim instead of the code, which is
-// how a Critical finding survives three rounds of comments and ends up
-// recorded as fixed. The runner enforces the same boundary structurally by
-// moving the implementer's output directory out of the work dir before the
-// round starts, so this is belt and braces rather than the only guard.
+// It contains the spec, the change index, the build-and-test section, the pass
+// list and — on a re-check — the REVIEWER'S OWN still-open findings, AND
+// NOTHING ELSE. No previous result.json, no progress file, no transcript, and
+// above all no PROSE the implementer wrote: not its summary, not its
+// description of what it fixed. A reviewer shown "I fixed it" grades the claim
+// instead of the code, which is how a Critical finding survives three rounds of
+// comments and ends up recorded as fixed. The runner enforces the same
+// boundary structurally by moving the implementer's output directory out of
+// the work dir before the round starts, so this is belt and braces rather than
+// the only guard.
+//
+// The one exception is the implementer's build/test RESULT (see
+// buildAndTestSection) — what command ran and whether it passed. It survives
+// the boundary because it is a fact the reviewer can act on rather than an
+// argument about the change, it is labelled as the implementer's own unchecked
+// claim, and on read-only mounts the reviewer is invited to re-run the command
+// instead of believing it.
 //
 // The opening line tells the reviewer not to edit anything or change the
 // working tree, and it says nothing about whether that is merely asked for.
@@ -259,6 +267,7 @@ func buildPrompt(cfg *config.Config, plan Plan) string {
 	}
 
 	b.WriteString(previousIssuesSection(cfg.ReviewOpenFindings))
+	b.WriteString(buildAndTestSection(cfg))
 
 	b.WriteString("\n[Passes]\n")
 	b.WriteString("Run these passes ONE AT A TIME, in order, over the change in the diff files. Each is a separate, focused examination of the same change — finish one before starting the next, and do not merge them into a single sweep.\n")
@@ -299,6 +308,112 @@ func previousIssuesSection(open []config.ReviewOpenFinding) string {
 	}
 	b.WriteString("\nFor each, read the CURRENT code and decide whether the problem is still present. 'resolved' means the code no longer has the problem. A comment, documentation, logging, a README note, or a spec requirement does NOT resolve it. Then run the passes below as a fresh review; a problem that is still present is reported in the status list, not repeated as a new finding.\n")
 	return b.String()
+}
+
+// MaxVerifyStepsShown caps how many repository lines the build-and-test
+// section prints. A workspace has a handful of repositories, not hundreds; the
+// cap exists so a malformed-but-parseable input cannot pad the prompt.
+const MaxVerifyStepsShown = 50
+
+// MaxVerifyFieldRunes caps one reported command. It is a shell line, and a
+// runaway value would push the passes off the reviewer's attention.
+const MaxVerifyFieldRunes = 300
+
+// buildAndTestSection tells the reviewer what the implementer says it verified
+// and whether this review may check that for itself.
+//
+// Both halves matter, and they matter for opposite reasons. The result is
+// SELF-REPORTED by the agent whose work is under review, so it is the one
+// claim in the whole round that nobody has checked — which is exactly why it
+// is worth naming, and exactly why it must not be the last word. When the
+// runner mounted every repository read-only AND the write probe agreed (see
+// agent.verifyReadOnlyMounts, which runs before the drivers read this config),
+// running the build is free of the risk that made review mode read-only in the
+// first place: the kernel refuses the write whatever the command does. A
+// reviewer that can run `go test` is an independent check on the implementer's
+// "it passed".
+//
+// Without that guarantee the section says so plainly rather than staying
+// silent. A Claude reviewer held to the read-only allowlist spent turns
+// retrying `go build` into permission denials it had no way to interpret; a
+// reviewer told the commands are unavailable spends those turns reading.
+//
+// It sits before [Passes] on purpose: the reviewer decides how it is going to
+// examine the change before it starts examining it.
+func buildAndTestSection(cfg *config.Config) string {
+	var b strings.Builder
+	b.WriteString("\n[Build and tests]\n")
+	b.WriteString(implementerVerifyLines(cfg.ReviewVerifyResult))
+	if cfg.ReviewReadOnlyMounts {
+		b.WriteString("You may run the repository's build and test commands. They cannot change the repositories. Report a failure as a finding only when this diff causes it, and say which command you ran.\n")
+	} else {
+		b.WriteString("Build and test commands are not available in this review. Do not try to run them; rely on the result above.\n")
+	}
+	return b.String()
+}
+
+// implementerVerifyLines renders the implementer's reported result as one line
+// per repository, or says plainly that there is none.
+//
+// "No result" and "a result that says nothing ran" are different answers and
+// are reported differently: the first means nobody told this round anything,
+// the second means the implementer looked and decided there was nothing to
+// run. A reviewer that cannot tell them apart cannot judge either.
+func implementerVerifyLines(v *config.ReviewVerifyResult) string {
+	if v == nil {
+		return "The implementer reported no build or test result.\n"
+	}
+	var b strings.Builder
+	b.WriteString("The implementer reported this result for its own work. It is the implementer's own claim about its own change, not a checked fact.\n")
+	if !v.Ran {
+		reason := verifyField(v.SkippedReason)
+		if reason == "" {
+			reason = "no reason given"
+		}
+		b.WriteString("- no build or test was run: " + reason + "\n")
+		return b.String()
+	}
+	if len(v.Steps) == 0 {
+		b.WriteString("- every repository: " + verifyCommandOf(v.Command) + " — " + passedWord(v.Passed) + "\n")
+	}
+	for i, s := range v.Steps {
+		if i == MaxVerifyStepsShown {
+			b.WriteString(fmt.Sprintf("- (and %d more repository result(s), not shown)\n", len(v.Steps)-i))
+			break
+		}
+		repo := verifyField(s.Repo)
+		if repo == "" {
+			repo = "(repository not recorded)"
+		}
+		b.WriteString("- " + repo + ": " + verifyCommandOf(s.Command) + " — " + passedWord(s.Passed) + "\n")
+	}
+	if v.PreExisting {
+		b.WriteString("The implementer reported that every failure above was already present before this change.\n")
+	}
+	return b.String()
+}
+
+func passedWord(passed bool) string {
+	if passed {
+		return "passed"
+	}
+	return "failed"
+}
+
+func verifyCommandOf(command string) string {
+	if c := verifyField(command); c != "" {
+		return c
+	}
+	return "(command not recorded)"
+}
+
+// verifyField flattens one reported value onto a single line and caps it. The
+// value comes from an agent's free-form trailer by way of the runner, so a
+// newline in it would forge extra lines in a section the reviewer reads as
+// structure.
+func verifyField(s string) string {
+	s = strings.TrimSpace(strings.Join(strings.Fields(s), " "))
+	return truncateRunes(s, MaxVerifyFieldRunes)
 }
 
 func fieldOrUnknown(s string) string {

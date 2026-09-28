@@ -153,13 +153,17 @@ func (d *Driver) Binary() string {
 
 // BuildArgs assembles the headless `claude -p` invocation.
 //
-// A REVIEW run is held to the read-only allowlist instead of
+// A REVIEW run is held to an allowlist instead of
 // --dangerously-skip-permissions. The prompt tells the reviewer not to edit
 // anything, but a prompt is a request and an allowlist is a guarantee: a
 // reviewer that edits the code it is reviewing produces a diff nobody
 // authorised, inside a stage whose whole job is to judge the diff it was given.
 // It also gets no MCP tools — review needs none, and a tool channel the
 // reviewer cannot use is a channel it cannot misuse.
+//
+// On verified read-only mounts the allowlist's Bash patterns widen to a plain
+// Bash so the reviewer can run the build and tests; Edit, Write, NotebookEdit
+// and MCP stay absent either way. reviewAllowedTools carries the reasoning.
 func (d *Driver) BuildArgs(cfg *config.Config) []string {
 	reviewing := cfg.Mode == config.ModeReview
 
@@ -194,10 +198,12 @@ func (d *Driver) BuildArgs(cfg *config.Config) []string {
 	}
 	if reviewing {
 		// Appended LAST: --allowedTools is variadic and consumes every
-		// following token. Same list and same reasoning as the read-only
-		// interactive path.
+		// following token. The list is the read-only interactive one, except
+		// on verified read-only mounts, where its Bash patterns collapse into
+		// a plain Bash so the reviewer can run the build and tests — see
+		// reviewAllowedTools for why that is the mounts' guarantee to give.
 		args = append(args, "--allowedTools")
-		args = append(args, readOnlyAllowedTools...)
+		args = append(args, reviewAllowedTools(cfg.ReviewReadOnlyMounts)...)
 	}
 	return args
 }
