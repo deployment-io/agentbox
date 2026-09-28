@@ -142,8 +142,8 @@ func normalize(s string) string {
 }
 
 // severityRule is the one sentence-set that decides what a severity MEANS,
-// carried both in the security brief and in the trailer rules so the reviewer
-// meets it while it is looking and again while it is writing the block.
+// carried in every pass brief and in the trailer rules so the reviewer meets it
+// while it is looking and again while it is writing the block.
 //
 // It exists because of an observed failure: a Task whose spec required an
 // unauthenticated route returning all of process.env was rated Critical in
@@ -155,13 +155,47 @@ func normalize(s string) string {
 // changes nothing a caller can reach.
 const severityRule = `Rate severity by the harm the code can cause as written. A requirement in the spec never lowers a finding's severity — if the spec requires something dangerous, report it at its real severity and say in 'why' that the spec requires it. Comments, documentation, logging or a README note do not reduce a finding's severity unless they change what the code does.`
 
+// severityRubric says what each of the five words MEANS, so the scale is a
+// shared definition rather than each reviewer's private sense of "likelihood
+// times impact". Without it every pass invents its own scale, and the two
+// rules below are the two places that invention went wrong in live reviews.
+//
+// Observed: a reaper that finished a stuck conversion but left the session's
+// agent Job running forever; a review container that left a newly created
+// repository writable while telling the reviewer its repositories were
+// read-only; a flag that dropped Codex's own sandbox without checking the
+// claim it relied on; an interrupted round that could still mark a must-fix
+// finding "resolved". Every one is a gap in a guarantee the change was made to
+// provide, every one fails silently — no error, just a leak, an unreviewed
+// write or a wrong result — and every one came back rated Low, discounted
+// because the trigger is uncommon or because some other control limits the
+// damage. Neither discount survives contact with how this review is used: it
+// runs on every change, so an uncommon path is exercised regularly, and a
+// control that merely narrows the blast radius still leaves the harm.
+//
+// Carried in both pass briefs and in the trailer rules, alongside
+// severityRule, so every pass and the report format read the same scale.
+const severityRubric = `Use this scale:
+- critical — exploitable as written, secrets or credentials exposed, or data lost or corrupted.
+- high — a core behaviour or a security guarantee breaks in normal use.
+- medium — the change's own stated guarantee can be bypassed or silently fail under a plausible condition; or a resource leaks (a process, container, connection, lock or file that is never released); or a result is silently wrong.
+- low — a real defect whose failure is visible and harmless: the caller gets a clear error, or the output is cosmetically wrong.
+- info — an observation, not a defect.
+Do not lower a severity because the triggering condition is uncommon when the failure is silent or defeats what the change is for. This review runs on every change, so an uncommon path is exercised regularly, and a silent failure is found only after it has done damage.
+Other controls lower a severity only when they fully prevent the harm, not when they merely limit it. Say which controls you relied on in 'why'.`
+
 // passBriefs say what each pass is looking for. One focused brief per pass is
 // the point of the design: an omnibus "review this diff" prompt returns a
 // scattering of style notes, while a pass that has been told it is looking for
 // one class of problem finds that class.
+//
+// Every brief ends with severityRule and severityRubric: a pass that finds the
+// right problem and rates it Low has told the consumer's threshold to ignore
+// it, so the scale has to be in front of the reviewer in each pass and not
+// only in the report format.
 var passBriefs = map[string]string{
-	PassSecurity:    `Look ONLY for security problems this diff introduces or leaves open: injection (SQL, command, template), missing authentication or authorisation on a new path, secrets or credentials committed or logged, unsafe deserialisation, path traversal, SSRF, missing validation of untrusted input crossing a trust boundary, a dependency change that pulls in something unvetted, and weakened crypto or transport security. Report a finding only when you can point at the line in the diff that causes it. ` + severityRule,
-	PassCorrectness: `Look ONLY for correctness problems this diff introduces: logic that does not do what the surrounding code and the spec say it should, off-by-one and boundary errors, nil or null dereferences, unhandled errors and swallowed failures, race conditions and unsynchronised shared state, resource leaks, and behaviour changes the spec did not ask for. When the diff changes a function signature, a wire shape or an API contract, check every caller and consumer across the repositories in the workspace, and report a contract change whose other side is not part of this change. Report a finding only when you can point at the line in the diff that causes it, and say what input or state makes it go wrong.`,
+	PassSecurity:    `Look ONLY for security problems this diff introduces or leaves open: injection (SQL, command, template), missing authentication or authorisation on a new path, secrets or credentials committed or logged, unsafe deserialisation, path traversal, SSRF, missing validation of untrusted input crossing a trust boundary, a dependency change that pulls in something unvetted, and weakened crypto or transport security. Report a finding only when you can point at the line in the diff that causes it. ` + severityRule + "\n" + severityRubric,
+	PassCorrectness: `Look ONLY for correctness problems this diff introduces: logic that does not do what the surrounding code and the spec say it should, off-by-one and boundary errors, nil or null dereferences, unhandled errors and swallowed failures, race conditions and unsynchronised shared state, resource leaks, and behaviour changes the spec did not ask for. When the diff changes a function signature, a wire shape or an API contract, check every caller and consumer across the repositories in the workspace, and report a contract change whose other side is not part of this change. Report a finding only when you can point at the line in the diff that causes it, and say what input or state makes it go wrong. ` + severityRule + "\n" + severityRubric,
 }
 
 // buildPrompt assembles the review prompt: the spec, an index of the change
@@ -306,11 +340,12 @@ Rules for the block:
 - parameter is one of: %s. severity is one of: info, low, medium, high, critical. state is one of: checked, skipped.
 - Report a finding ONLY for a problem the diff introduces or leaves open, with a location a reader can open. Do not report style preferences, pre-existing issues the diff does not touch, or things you would have done differently.
 - %s
+%s
 - key is a short stable slug naming the parameter, the file and the rule, e.g. sec-unauthenticated-env-dump-app-js. Never include a line number: lines move between rounds, and the key must stay the same for the same problem.
 - what is what you saw; why is why it matters. Keep both to a few sentences.
 - If a pass found nothing, say so with coverage state "checked" and no findings for it. An empty findings list is a legitimate and common answer.%s
 - Emit the block once, at the very end. Everything outside it is prose for a human and will be shown in the pull request.`,
-		strings.Join(passes, ", "), severityRule, previousTrailerRule(open))
+		strings.Join(passes, ", "), severityRule, severityRubric, previousTrailerRule(open))
 }
 
 // previousTrailerRule documents the "previous" field, and only when the round

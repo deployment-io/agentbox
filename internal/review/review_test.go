@@ -33,28 +33,84 @@ func reviewConfig(t *testing.T, open []config.ReviewOpenFinding) *config.Config 
 	}
 }
 
+// severityPlaces is everywhere the scale has to be stated: each pass brief,
+// because a pass rates while it looks, and the trailer rules, because the
+// report format is where the word is finally written down. A pass that reads a
+// different scale from the one in the rules is a pass whose findings arrive
+// under the wrong threshold.
+func severityPlaces() []struct {
+	name string
+	text string
+} {
+	return []struct {
+		name string
+		text string
+	}{
+		{"the security brief", passBriefs[PassSecurity]},
+		{"the correctness brief", passBriefs[PassCorrectness]},
+		{"the trailer rules", reviewTrailerInstruction([]string{PassSecurity, PassCorrectness}, nil)},
+	}
+}
+
 // A severity says how much harm the code can do. The spec can make a finding
 // EXPECTED, and the consumer's policy can decide to ship it anyway, but a
 // requirement cannot make dangerous code harmless — so the rule is put in
 // front of the reviewer while it looks and again while it writes the block.
-func TestSeverityRuleIsInTheSecurityBriefAndTheTrailerRules(t *testing.T) {
+func TestSeverityRuleIsInEveryPassBriefAndTheTrailerRules(t *testing.T) {
 	sentences := []string{
 		"Rate severity by the harm the code can cause as written.",
 		"A requirement in the spec never lowers a finding's severity",
 		"Comments, documentation, logging or a README note do not reduce a finding's severity unless they change what the code does.",
 	}
-	for _, where := range []struct {
-		name string
-		text string
-	}{
-		{"the security brief", passBriefs[PassSecurity]},
-		{"the trailer rules", reviewTrailerInstruction([]string{PassSecurity}, nil)},
-	} {
+	for _, where := range severityPlaces() {
 		for _, s := range sentences {
 			if !strings.Contains(where.text, s) {
 				t.Errorf("%s does not carry %q", where.name, s)
 			}
 		}
+	}
+}
+
+// The five words need definitions, or the reviewer falls back on a private
+// "likelihood times impact" sense and rates a silent leak Low. These are the
+// findings that were rated Low in live reviews: a reaper that left a Job
+// running forever, a review container that left a repository writable while
+// promising read-only, a flag that dropped a sandbox without checking the
+// claim it relied on, an interrupted round that could mark a must-fix
+// "resolved". All four are the rubric's medium, and the two rules are why —
+// an uncommon trigger and a partial mitigation are not discounts.
+func TestSeverityRubricIsInEveryPassBriefAndTheTrailerRules(t *testing.T) {
+	definitions := []string{
+		"critical — exploitable as written, secrets or credentials exposed, or data lost or corrupted.",
+		"high — a core behaviour or a security guarantee breaks in normal use.",
+		"medium — the change's own stated guarantee can be bypassed or silently fail under a plausible condition; or a resource leaks (a process, container, connection, lock or file that is never released); or a result is silently wrong.",
+		"low — a real defect whose failure is visible and harmless: the caller gets a clear error, or the output is cosmetically wrong.",
+		"info — an observation, not a defect.",
+		"Do not lower a severity because the triggering condition is uncommon when the failure is silent or defeats what the change is for. This review runs on every change, so an uncommon path is exercised regularly, and a silent failure is found only after it has done damage.",
+		"Other controls lower a severity only when they fully prevent the harm, not when they merely limit it. Say which controls you relied on in 'why'.",
+	}
+	for _, where := range severityPlaces() {
+		for _, s := range definitions {
+			if !strings.Contains(where.text, s) {
+				t.Errorf("%s does not carry %q", where.name, s)
+			}
+		}
+	}
+}
+
+// One statement of the scale per place that needs it: once in each pass brief
+// and once in the trailer rules. A rubric repeated inside a prompt is prompt
+// the reviewer skims, and a second copy is a second thing to keep in step.
+func TestSeverityRubricAppearsOncePerPassBriefAndOnceInTheTrailer(t *testing.T) {
+	cfg := reviewConfig(t, nil)
+	passes := []string{PassSecurity, PassCorrectness}
+	prompt := buildPrompt(cfg, Plan{Passes: passes})
+
+	if got := strings.Count(prompt, severityRubric); got != len(passes) {
+		t.Errorf("the prompt carries the rubric %d time(s), want once per pass brief (%d)", got, len(passes))
+	}
+	if got := strings.Count(reviewTrailerInstruction(passes, nil), severityRubric); got != 1 {
+		t.Errorf("the trailer rules carry the rubric %d time(s), want 1", got)
 	}
 }
 
