@@ -220,9 +220,16 @@ gets the second):
   the instruction at the top. Prefer the narrowest command that exercises the
   change, such as the tests of the packages the diff touches, over the whole
   suite: this review round has a time limit. Report a failure as a finding only
-  when this diff causes it, and say which command you ran."*
-- otherwise — *"Build and test commands are not available in this review. Do
-  not try to run them; rely on the result above."*
+  when this diff causes it, and say which command you ran. A failure caused by
+  the environment is not a finding: a download the restricted network blocks,
+  or a tool that tries to write inside the read-only repositories (a build
+  cache or a target directory)."*
+- otherwise, with a reported result — *"Build and test commands are not
+  available in this review. Do not try to run them; rely on the result above."*
+- otherwise, with none — *"Build and test commands are not available in this
+  review. Do not try to run them; judge the change by reading it."* (There is
+  no result above to rely on; the line above it says the implementer reported
+  nothing.)
 
 The result itself is `REVIEW_VERIFY_RESULT`. It is the one thing from the
 implement run that crosses into a review, and it crosses as a RESULT — what ran

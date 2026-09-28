@@ -335,10 +335,21 @@ const MaxVerifyFieldRunes = 300
 // alone: the harness must also let a reviewer run commands (opencode's review
 // config denies bash whatever the mounts are).
 //
-// Without that the section says so plainly rather than staying
+// A reviewer that may run the build also has to be told which failures are
+// the container's rather than the change's. The network is restricted to an
+// allowlist, so a build that fetches a dependency can fail on the download
+// alone; and the repositories are mounted read-only, which Go tolerates
+// (its cache lives outside the tree) but cargo's target/, a test cache under
+// node_modules and the like do not. Either one reads exactly like a broken
+// change to a reviewer that was never told the run is fenced.
+//
+// Without that permission the section says so plainly rather than staying
 // silent. A Claude reviewer held to the read-only allowlist spent turns
 // retrying `go build` into permission denials it had no way to interpret; a
-// reviewer told the commands are unavailable spends those turns reading.
+// reviewer told the commands are unavailable spends those turns reading. It
+// is pointed at the implementer's result only when there IS one: with none,
+// "rely on the result above" pointed at the sentence saying no result was
+// reported, which asks the reviewer to lean on nothing.
 //
 // It sits before [Passes] on purpose: the reviewer decides how it is going to
 // examine the change before it starts examining it.
@@ -347,7 +358,9 @@ func buildAndTestSection(cfg *config.Config) string {
 	b.WriteString("\n[Build and tests]\n")
 	b.WriteString(implementerVerifyLines(cfg.ReviewVerifyResult))
 	if cfg.ReviewCanRunCommands {
-		b.WriteString("You may run the repository's build and test commands. They cannot change the repositories, so running them does not break the instruction at the top. Prefer the narrowest command that exercises the change, such as the tests of the packages the diff touches, over the whole suite: this review round has a time limit. Report a failure as a finding only when this diff causes it, and say which command you ran.\n")
+		b.WriteString("You may run the repository's build and test commands. They cannot change the repositories, so running them does not break the instruction at the top. Prefer the narrowest command that exercises the change, such as the tests of the packages the diff touches, over the whole suite: this review round has a time limit. Report a failure as a finding only when this diff causes it, and say which command you ran. A failure caused by the environment is not a finding: a download the restricted network blocks, or a tool that tries to write inside the read-only repositories (a build cache or a target directory).\n")
+	} else if cfg.ReviewVerifyResult == nil {
+		b.WriteString("Build and test commands are not available in this review. Do not try to run them; judge the change by reading it.\n")
 	} else {
 		b.WriteString("Build and test commands are not available in this review. Do not try to run them; rely on the result above.\n")
 	}

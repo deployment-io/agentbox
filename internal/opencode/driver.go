@@ -52,6 +52,13 @@ const bridgeDiscoveryTimeoutMS = 30000
 // agent-agnostic. The parser strips the two trailers and surfaces each as its
 // own field.
 //
+// The <verify> paragraph is IDENTICAL in all three drivers, including the
+// stderr_tail ask and the single-repository failure example — see the claude
+// driver for what each part is for. It used to carry only the multi-repo
+// example, so a one-repository failure on opencode arrived as the command that
+// failed and nothing about why. agent.TestVerifyParagraphIsIdenticalAcrossAgents
+// compares the extracted paragraphs, so editing one driver's copy alone fails.
+//
 // NOTE (Rule of Three): opencode is the third agent to carry this verbatim.
 // Extract it (plus the trailer parsers in parser.go) into internal/agent/ in a
 // follow-up — see PLAN_tasks_opencode_support.md.
@@ -61,9 +68,10 @@ Final-message format. Your final message must contain, at the very end:
 
 1. A multi-line changes summary describing what you changed and why, noting the verify outcome. This becomes the PR body's lead-in.
 
-2. The verification result as compact JSON wrapped in <verify>...</verify>. If you ran build/test: {"ran":true,"passed":true|false,"command":"<command>"}. If you did not (no buildable code, docs-only, etc.): {"ran":false,"skipped_reason":"<why>"}. Example:
+2. The verification result as compact JSON wrapped in <verify>...</verify>. If you ran build/test: {"ran":true,"passed":true|false,"command":"<command>"}. If you did not (no buildable code, docs-only, etc.): {"ran":false,"skipped_reason":"<why>"}. When passed is false, ALSO include "stderr_tail": the last few lines of actual failure output, verbatim — the error text, not your description of it. Example:
 
    <verify>{"ran":true,"passed":true,"command":"go build ./... && go vet ./..."}</verify>
+   <verify>{"ran":true,"passed":false,"command":"go test ./...","stderr_tail":"pkg/auth/token.go:42:9: undefined: ParseJWT"}</verify>
 
    With more than one repository, add "steps" — one per repo, "repo" being its directory relative to the work dir — and keep the top-level fields as the rollup (passed = every step passed):
 

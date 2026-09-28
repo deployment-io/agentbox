@@ -57,3 +57,40 @@ func TestAnchorPromptToRepos_NoReposIsNoOp(t *testing.T) {
 		t.Errorf("with no repos the prompt must be unchanged, got:\n%s", out)
 	}
 }
+
+// The runner writes the organisation's pre-built context for every Task, but
+// only the interactive session prompt ever mentioned it — so an implement run
+// answered questions about how services are deployed from the code alone,
+// beside a directory that already had the answer.
+func TestAnchorPromptToRepos_NamesTheContextDirectoryWhenItExists(t *testing.T) {
+	work := makeWorkDir(t)
+	if err := os.WriteFile(filepath.Join(work, "context", "index.md"), []byte("# services\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out := anchorPromptToRepos("Move the API to the new cluster.", work)
+
+	for _, want := range []string{
+		filepath.Join(work, "context") + " (start with index.md)",
+		"deployment, configuration, or how services connect",
+		"a change confined to code does not need it",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the anchored prompt does not carry %q:\n%s", want, out)
+		}
+	}
+	// The anchor's own job is unchanged, and the step prompt still comes last.
+	if !strings.Contains(out, "is discarded") || !strings.HasSuffix(out, "Move the API to the new cluster.") {
+		t.Errorf("the context line displaced the anchor or the prompt:\n%s", out)
+	}
+}
+
+// And it says nothing when there is nothing to read. An empty context/ is a
+// directory the agent would spend a turn opening to learn it is empty, so the
+// index file — not the directory — is what the line hangs on.
+func TestAnchorPromptToRepos_SilentWithoutAContextIndex(t *testing.T) {
+	work := makeWorkDir(t) // makeWorkDir creates context/ but no index.md
+	out := anchorPromptToRepos("Rename the handler.", work)
+	if strings.Contains(out, "Pre-built context") {
+		t.Errorf("an empty context directory was advertised anyway:\n%s", out)
+	}
+}
