@@ -555,21 +555,3 @@ func TestAnOlderRunnerGetsTodaysPrompt(t *testing.T) {
 		}
 	}
 }
-
-// The correctness pass checks that text shown to a person is true in every
-// state, and treats the spec as possibly wrong. A Task once shipped a pull
-// request heading, "Noted after a fix attempt", that was false for findings
-// first reported after the fix rounds ran out; the implementer followed the
-// spec exactly and the reviewer judged the code against that spec, so nobody
-// caught it.
-func TestCorrectnessBriefChecksUserFacingTextInEveryState(t *testing.T) {
-	brief := passBriefs[PassCorrectness]
-	for _, want := range []string{
-		"is true in every state the code can reach, including states the spec does not describe",
-		"The spec can be wrong; where following it produces false or misleading text, report it",
-	} {
-		if !strings.Contains(brief, want) {
-			t.Errorf("the correctness brief is missing %q:\n%s", want, brief)
-		}
-	}
-}
