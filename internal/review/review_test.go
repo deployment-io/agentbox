@@ -1,6 +1,8 @@
 package review
 
 import (
+	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -48,6 +50,7 @@ func severityPlaces() []struct {
 	}{
 		{"the security brief", passBriefs[PassSecurity]},
 		{"the correctness brief", passBriefs[PassCorrectness]},
+		{"the spec brief", passBriefs[PassSpec]},
 		{"the trailer rules", reviewTrailerInstruction([]string{PassSecurity, PassCorrectness}, nil)},
 	}
 }
@@ -461,5 +464,94 @@ func TestBuildAndTestSectionLabelsTheResultAsAClaim(t *testing.T) {
 
 	if !strings.Contains(prompt, "not a checked fact") {
 		t.Errorf("the prompt presents the implementer's result as established:\n%s", prompt)
+	}
+}
+
+const unrequestedClause = "behaviour changes the spec did not ask for"
+
+// Two passes reporting the same unrequested change would count it twice.
+func TestUnrequestedBehaviourBelongsToTheSpecPassAlone(t *testing.T) {
+	if strings.Contains(passBriefs[PassCorrectness], unrequestedClause) {
+		t.Error("the correctness brief still carries the unrequested-behaviour clause")
+	}
+	if !strings.Contains(passBriefs[PassSpec], unrequestedClause) {
+		t.Error("the spec brief does not carry the unrequested-behaviour clause")
+	}
+}
+
+func TestSpecBriefEndsWithTheSeverityScale(t *testing.T) {
+	if !strings.HasSuffix(passBriefs[PassSpec], severityRule+"\n"+severityRubric) {
+		t.Error("the spec brief does not end with severityRule and severityRubric")
+	}
+}
+
+func parametersLine(t *testing.T, instruction string) string {
+	t.Helper()
+	for _, line := range strings.Split(instruction, "\n") {
+		if strings.HasPrefix(line, "- parameter is one of: ") {
+			return line
+		}
+	}
+	t.Fatal("the trailer rules have no parameter line")
+	return ""
+}
+
+// The spec pass reports under "spec conformance", never under its pass name,
+// and the trailer offers that parameter only when the pass can run.
+func TestTrailerListsSpecConformanceOnlyWhenThePassRuns(t *testing.T) {
+	cfg := reviewConfig(t, nil)
+	cfg.ReviewPasses = []string{PassSecurity, PassCorrectness, PassSpec}
+	line := parametersLine(t, Instruction(cfg))
+	if !strings.Contains(line, "one of: security, correctness, spec conformance.") {
+		t.Errorf("parameter line = %q, want security, correctness, spec conformance", line)
+	}
+
+	cfg.ReviewSpec = "  "
+	if line := parametersLine(t, Instruction(cfg)); strings.Contains(line, "spec") {
+		t.Errorf("with no spec the parameter line = %q, want no spec conformance", line)
+	}
+
+	cfg = reviewConfig(t, nil)
+	if line := parametersLine(t, Instruction(cfg)); strings.Contains(line, "spec") {
+		t.Errorf("without the spec pass requested the parameter line = %q", line)
+	}
+}
+
+// A runner that predates the spec pass does not request it, and must get the
+// prompt and trailer it got before: the same two passes, in the same words,
+// and no mention of a spec pass.
+func TestAnOlderRunnerGetsTodaysPrompt(t *testing.T) {
+	root := t.TempDir()
+	api := filepath.Join(root, "0-acme", "api")
+	base := initRepo(t, api)
+	write(t, filepath.Join(api, "handler.go"), "package api\n\nfunc Handle() {}\n")
+
+	cfg := reviewConfig(t, nil)
+	cfg.WorkDir = root
+	cfg.ReviewBaseCommits = map[string]string{"0-acme/api": base}
+	cfg.ReviewSpec = someSpec
+	plan, err := Build(cfg)
+	if err != nil {
+		t.Fatalf("Build: %s", err)
+	}
+	if !equalStrings(plan.Passes, []string{PassSecurity, PassCorrectness}) {
+		t.Errorf("passes = %v, want security and correctness", plan.Passes)
+	}
+	if strings.Contains(plan.Prompt, "spec pass") || strings.Contains(plan.Prompt, passBriefs[PassSpec]) {
+		t.Error("the prompt carries the spec pass although it was not requested")
+	}
+	for i, pass := range []string{PassSecurity, PassCorrectness} {
+		want := fmt.Sprintf("\n%d. %s pass — %s\n", i+1, pass, passBriefs[pass])
+		if !strings.Contains(plan.Prompt, want) {
+			t.Errorf("the prompt does not carry the %s brief as before", pass)
+		}
+	}
+	if got := parametersLine(t, Instruction(cfg)); got != "- parameter is one of: security, correctness. severity is one of: info, low, medium, high, critical. state is one of: checked, skipped." {
+		t.Errorf("parameter line = %q", got)
+	}
+	for _, c := range plan.Coverage {
+		if c.Parameter == "spec conformance" && (c.State != stateNotChecked || c.Reason != ReasonNoPass) {
+			t.Errorf("spec conformance = %+v, want not checked as before", c)
+		}
 	}
 }

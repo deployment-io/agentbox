@@ -48,7 +48,7 @@ func Build(cfg *config.Config) (Plan, error) {
 	if err != nil {
 		return Plan{}, err
 	}
-	passes, skipped := SelectPasses(cfg.ReviewPasses, diff)
+	passes, skipped := SelectPasses(cfg.ReviewPasses, diff, cfg.ReviewSpec)
 	plan := Plan{Passes: passes, Diff: diff, Open: cfg.ReviewOpenFindings}
 	if len(passes) > 0 {
 		// The diff files are the change the reviewer reads. A round that
@@ -173,7 +173,7 @@ const severityRule = `Rate severity by the harm the code can cause as written. A
 // runs on every change, so an uncommon path is exercised regularly, and a
 // control that merely narrows the blast radius still leaves the harm.
 //
-// Carried in both pass briefs and in the trailer rules, alongside
+// Carried in every pass brief and in the trailer rules, alongside
 // severityRule, so every pass and the report format read the same scale.
 const severityRubric = `Use this scale:
 - critical — exploitable as written, secrets or credentials exposed, or data lost or corrupted.
@@ -195,7 +195,8 @@ Other controls lower a severity only when they fully prevent the harm, not when 
 // only in the report format.
 var passBriefs = map[string]string{
 	PassSecurity:    `Look ONLY for security problems this diff introduces or leaves open: injection (SQL, command, template), missing authentication or authorisation on a new path, secrets or credentials committed or logged, unsafe deserialisation, path traversal, SSRF, missing validation of untrusted input crossing a trust boundary, a dependency change that pulls in something unvetted, and weakened crypto or transport security. Report a finding only when you can point at the line in the diff that causes it. ` + severityRule + "\n" + severityRubric,
-	PassCorrectness: `Look ONLY for correctness problems this diff introduces: logic that does not do what the surrounding code and the spec say it should, off-by-one and boundary errors, nil or null dereferences, unhandled errors and swallowed failures, race conditions and unsynchronised shared state, resource leaks, and behaviour changes the spec did not ask for. When the diff changes a function signature, a wire shape or an API contract, check every caller and consumer across the repositories in the workspace, and report a contract change whose other side is not part of this change. Report a finding only when you can point at the line in the diff that causes it, and say what input or state makes it go wrong. ` + severityRule + "\n" + severityRubric,
+	PassSpec:        `Look ONLY at whether the change does what the spec in [What the change is meant to achieve] asks. Not code quality, not security: other passes cover those. When the spec lists acceptance criteria ("Acceptance"), check each one against the change and the code around it; a criterion that is not met, or is met only in part, is a finding. When the spec is a plain description, check its stated goal. A change to something the spec lists as out of scope ("OutOfScope") is a finding, and so are behaviour changes the spec did not ask for. Treat the spec's "Assumptions" as context, not as requirements. Where the spec is ambiguous and the change chose one reading, say which reading at info. Within the scale below: the spec's goal itself not achieved is high; an acceptance criterion not met or met only in part is medium; an out-of-scope or unrequested change is low unless it breaks something, in which case the correctness pass reports the breakage; an ambiguity is info. location is the file where the missing behaviour belongs or the file that contradicts the criterion; when there is no such file, use "spec: acceptance criterion N". key names the criterion, e.g. spec-criterion-3-export-csv, with no line number. ` + severityRule + "\n" + severityRubric,
+	PassCorrectness: `Look ONLY for correctness problems this diff introduces: logic that does not do what the surrounding code and the spec say it should, off-by-one and boundary errors, nil or null dereferences, unhandled errors and swallowed failures, race conditions and unsynchronised shared state, and resource leaks. When the diff changes a function signature, a wire shape or an API contract, check every caller and consumer across the repositories in the workspace, and report a contract change whose other side is not part of this change. Report a finding only when you can point at the line in the diff that causes it, and say what input or state makes it go wrong. ` + severityRule + "\n" + severityRubric,
 }
 
 // buildPrompt assembles the review prompt: the spec, an index of the change
@@ -453,7 +454,38 @@ func Instruction(cfg *config.Config) string {
 	if len(passes) == 0 {
 		passes = []string{PassSecurity, PassCorrectness}
 	}
-	return reviewTrailerInstruction(passes, cfg.ReviewOpenFindings)
+	return reviewTrailerInstruction(trailerPasses(passes, cfg.ReviewSpec), cfg.ReviewOpenFindings)
+}
+
+// trailerPasses drops the spec pass when there is no spec, because the gate
+// will stand it down and its parameter must not be offered for findings. The
+// diff-dependent half of the gate is not known here and is not applied.
+func trailerPasses(passes []string, spec string) []string {
+	if strings.TrimSpace(spec) != "" {
+		return passes
+	}
+	out := make([]string, 0, len(passes))
+	for _, p := range passes {
+		if p != PassSpec {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// trailerParameters names the parameters the requested passes report
+// against. The pass name and the parameter name differ for the spec pass
+// ("spec" reports as "spec conformance").
+func trailerParameters(passes []string) []string {
+	out := make([]string, 0, len(passes))
+	for _, p := range passes {
+		if parameter, ok := parameterForPass[p]; ok {
+			out = append(out, parameter)
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
 }
 
 func reviewTrailerInstruction(passes []string, open []config.ReviewOpenFinding) string {
@@ -475,7 +507,7 @@ Rules for the block:
 - what is what you saw; why is why it matters. Keep both to a few sentences.
 - If a pass found nothing, say so with coverage state "checked" and no findings for it. An empty findings list is a legitimate and common answer.%s
 - Emit the block once, at the very end. Everything outside it is prose for a human and will be shown in the pull request.`,
-		strings.Join(passes, ", "), severityRule, severityRubric, previousTrailerRule(open))
+		strings.Join(trailerParameters(passes), ", "), severityRule, severityRubric, previousTrailerRule(open))
 }
 
 // previousTrailerRule documents the "previous" field, and only when the round

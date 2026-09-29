@@ -45,7 +45,7 @@ func TestSelectPassesCostGate(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			diff := Diff{Paths: tc.paths}
-			passes, skipped := SelectPasses(requested, diff)
+			passes, skipped := SelectPasses(requested, diff, "")
 			if !equalStrings(passes, tc.wantPasses) {
 				t.Errorf("passes = %v, want %v", passes, tc.wantPasses)
 			}
@@ -64,7 +64,7 @@ func TestSelectPassesCostGate(t *testing.T) {
 // An empty diff is its own reason, distinct from documentation-only: the PR
 // body says which, and the two mean different things to a reader.
 func TestSelectPassesSkipsEverythingForAnEmptyDiff(t *testing.T) {
-	passes, skipped := SelectPasses(requested, Diff{})
+	passes, skipped := SelectPasses(requested, Diff{}, "")
 	if len(passes) != 0 {
 		t.Errorf("passes = %v, want none", passes)
 	}
@@ -121,4 +121,98 @@ func equalStrings(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+const someSpec = `{"Title":"Document the export","Acceptance":["README describes /export"]}`
+
+// The spec pass asks whether the change did what the Task asked, and a Task can
+// ask for a documentation change or a dependency bump, so neither the docs nor
+// the lockfile rule stands it down. The other two keep today's gate.
+func TestSelectPassesGatesTheSpecPassOnItsOwnTerms(t *testing.T) {
+	all := []string{PassSecurity, PassCorrectness, PassSpec}
+	for _, tc := range []struct {
+		name        string
+		paths       []string
+		spec        string
+		wantPasses  []string
+		wantSkipped map[string]string
+	}{
+		{
+			name:       "documentation only runs the spec pass alone",
+			paths:      []string{"0-acme/api/README.md", "0-acme/api/docs/design.mdx"},
+			spec:       someSpec,
+			wantPasses: []string{PassSpec},
+			wantSkipped: map[string]string{
+				PassSecurity:    ReasonDocsOnly,
+				PassCorrectness: ReasonDocsOnly,
+			},
+		},
+		{
+			name:        "lockfiles only run security and the spec pass",
+			paths:       []string{"0-acme/api/go.sum"},
+			spec:        someSpec,
+			wantPasses:  []string{PassSecurity, PassSpec},
+			wantSkipped: map[string]string{PassCorrectness: ReasonLockfileOnly},
+		},
+		{
+			name:        "an ordinary change runs all three in the requested order",
+			paths:       []string{"0-acme/api/handler.go"},
+			spec:        someSpec,
+			wantPasses:  all,
+			wantSkipped: map[string]string{},
+		},
+		{
+			name:        "a blank spec stands the spec pass down",
+			paths:       []string{"0-acme/api/handler.go"},
+			spec:        " \n\t ",
+			wantPasses:  []string{PassSecurity, PassCorrectness},
+			wantSkipped: map[string]string{PassSpec: ReasonNoSpec},
+		},
+		{
+			name:       "an empty diff skips every pass with the no-changes reason",
+			paths:      nil,
+			spec:       someSpec,
+			wantPasses: nil,
+			wantSkipped: map[string]string{
+				PassSecurity:    ReasonNoChanges,
+				PassCorrectness: ReasonNoChanges,
+				PassSpec:        ReasonNoChanges,
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			passes, skipped := SelectPasses(all, Diff{Paths: tc.paths}, tc.spec)
+			if !equalStrings(passes, tc.wantPasses) {
+				t.Errorf("passes = %v, want %v", passes, tc.wantPasses)
+			}
+			if len(skipped) != len(tc.wantSkipped) {
+				t.Errorf("skipped = %v, want %v", skipped, tc.wantSkipped)
+			}
+			for pass, reason := range tc.wantSkipped {
+				if skipped[pass] != reason {
+					t.Errorf("skipped[%q] = %q, want %q", pass, skipped[pass], reason)
+				}
+			}
+		})
+	}
+}
+
+func TestBuildCoverageReportsSpecConformance(t *testing.T) {
+	byParameter := func(coverage []Coverage) map[string]Coverage {
+		out := map[string]Coverage{}
+		for _, c := range coverage {
+			out[c.Parameter] = c
+		}
+		return out
+	}
+
+	ran := byParameter(BuildCoverage([]string{PassSpec}, map[string]string{PassSecurity: ReasonDocsOnly, PassCorrectness: ReasonDocsOnly}))
+	if got := ran["spec conformance"]; got.State != stateChecked || got.Reason != "" {
+		t.Errorf("spec conformance = %+v, want checked", got)
+	}
+
+	skipped := byParameter(BuildCoverage([]string{PassSecurity}, map[string]string{PassSpec: ReasonNoSpec}))
+	if got := skipped["spec conformance"]; got.State != stateSkipped || got.Reason != ReasonNoSpec {
+		t.Errorf("spec conformance = %+v, want skipped with the no-spec reason", got)
+	}
 }

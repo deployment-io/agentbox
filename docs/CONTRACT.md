@@ -131,21 +131,33 @@ repeated as a new finding. The statuses come back in
 | Variable | Description |
 |---|---|
 | `AGENT_MODE` | `batch` (default), `interactive` or `review`. Any other value is rejected at startup. |
-| `REVIEW_SPEC` | What the change is meant to achieve — JSON of the task spec, or the prose description when there is no structured spec. Passed into the prompt verbatim; agentbox does not parse it. Optional: without it the change is judged on its own terms. |
-| `REVIEW_PASSES` | Comma-separated focused passes to run, e.g. `security,correctness`. Order is honoured. A name this image cannot run is dropped with a warning on stderr — every accepted pass must map to a review parameter, or its findings would arrive under a parameter no consumer can read. Empty / unset — or emptied by that filter — means `security,correctness`, the set this release ships. |
+| `REVIEW_SPEC` | What the change is meant to achieve — JSON of the task spec, or the prose description when there is no structured spec. Passed into the prompt verbatim; agentbox does not parse it. Optional: without it the change is judged on its own terms and the `spec` pass is skipped (`no spec for this change`). |
+| `REVIEW_PASSES` | Comma-separated focused passes to run, e.g. `security,correctness,spec`. Order is honoured. The passes this image can run are `security`, `correctness` and `spec` (spec conformance: does the change do what `REVIEW_SPEC` asks — its acceptance criteria, its goal, and nothing out of scope or unrequested; reported under the parameter `spec conformance`). A name this image cannot run is dropped with a warning on stderr — every accepted pass must map to a review parameter, or its findings would arrive under a parameter no consumer can read. Empty / unset — or emptied by that filter — means `security,correctness`: `spec` runs only when the runner asks for it, so a runner that predates it gets the same review as before. |
 | `REVIEW_BASE_COMMITS` | **Required in review mode.** JSON object mapping each repository directory relative to `WORK_DIR` to the commit it was checked out at when the Step began, e.g. `{"0-acme/api":"9fceb02…"}`. Each key must be a relative path that stays inside `WORK_DIR`; `..` and absolute paths are rejected at startup. THE BASELINE IS NOT HEAD: an agent may commit its own work, and diffing against HEAD on that path shows nothing at all. |
 | `REVIEW_ROUND` | 1-based round number within one Step's review. Optional; absent or unreadable means `1`. |
 | `REVIEW_OPEN_FINDINGS` | JSON array of the must-fix findings the PREVIOUS round left open, e.g. `[{"key":"sec-unauthenticated-env-dump-app-js","parameter":"security","severity":"critical","location":"0-acme/api/app.js","what":"GET /env returns all of process.env with no auth"}]`. Optional — absent on round 1, supplied by the runner on rounds 2 and 3. Present but unparseable fails the load, the way a malformed `REVIEW_BASE_COMMITS` does: a round that silently dropped the list could report the change clean while every one of them still stands. An entry with no `key` is dropped, because the key is how the status comes back. |
 
 **Pass selection is cost-gated by what the diff touches.** A diff whose every
 changed path is documentation (`*.md`, `*.mdx`, `*.rst`, `*.txt`, `LICENSE`,
-`docs/**`, image files) skips both passes; a diff whose every changed path is
-a dependency lockfile (`package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`,
-`go.sum`, `Cargo.lock`, `poetry.lock`, `Gemfile.lock`, `composer.lock`) runs
-`security` and skips `correctness`; an empty diff skips both. A skipped pass
-is recorded in `coverage` with its reason — never silently omitted. When every
-pass is skipped, no agent is spawned at all and the run succeeds with the
-coverage record alone.
+`docs/**`, image files) skips `security` and `correctness` with the reason
+`documentation-only change`; a diff whose every changed path is a dependency
+lockfile (`package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `go.sum`,
+`Cargo.lock`, `poetry.lock`, `Gemfile.lock`, `composer.lock`) runs `security`
+and skips `correctness` with `lockfile-only change`; an empty diff skips every
+pass with `no changes in the diff`. The `spec` pass is gated differently: it
+RUNS on documentation-only and lockfile-only changes, because a Task can be
+asked to change documentation or bump a dependency and whether it did is
+exactly that pass's question. It skips on an empty diff (`no changes in the
+diff`) and when `REVIEW_SPEC` is empty or blank (`no spec for this change`). A
+skipped pass is recorded in `coverage` with its reason — never silently
+omitted. When every pass is skipped, no agent is spawned at all and the run
+succeeds with the coverage record alone.
+
+Findings from the `spec` pass are reported under `spec conformance`, and the
+trailer offers that parameter only when the pass was requested and a spec was
+supplied. The platform review policy sets no threshold for spec conformance,
+so its findings are notes by default: nothing is sent back until an org sets
+one.
 
 **The diff is delivered as files, not prompt text.** Each repository's
 complete diff against its base commit — tracked changes plus untracked files —
@@ -510,13 +522,13 @@ What a review-mode run found and what it actually looked at. Present only for
 | `findings[].pass` | agent | Which focused pass produced it. |
 | `coverage[].parameter` | **agentbox** | Every one of the eight parameters appears exactly once. |
 | `coverage[].state` | **agentbox** | `checked` (a pass ran), `skipped` (a pass stood down — see `reason`) or `not checked` (this release ships no pass for it). Built from what actually ran, not from the agent's claim; the agent's own claim is honoured only when it ADMITS a gap agentbox could not see. |
-| `coverage[].reason` | **agentbox** | Why a pass was skipped, or that the diff was truncated. |
+| `coverage[].reason` | **agentbox** | Why a pass was skipped — `no changes in the diff`, `documentation-only change`, `lockfile-only change` or `no spec for this change` — or that the diff was truncated. |
 | `previous[].key` | agent, filtered by **agentbox** | A key from `REVIEW_OPEN_FINDINGS`, echoed back. An entry naming a key that was not given is dropped at extraction, so a reviewer cannot rename a problem into a different one. |
 | `previous[].status` | agent | `resolved` (the code no longer has the problem) or `still_present`. Case is normalised; any other word is dropped along with its entry, because keeping it would mean guessing, and the wrong guess clears a must-fix nobody fixed. |
 | `previous[].note` | agent | One sentence saying what was checked. Capped at 400 runes. |
 
 **What the severity values mean.** The five words are defined, not left to each
-reviewer's sense of likelihood times impact. Both pass briefs and the trailer
+reviewer's sense of likelihood times impact. Every pass brief and the trailer
 rules carry the same rubric:
 
 - `critical` — exploitable as written, secrets or credentials exposed, or data lost or corrupted.

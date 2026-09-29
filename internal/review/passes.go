@@ -11,6 +11,7 @@ import (
 const (
 	PassSecurity    = "security"
 	PassCorrectness = "correctness"
+	PassSpec        = "spec"
 )
 
 // Every review parameter, in the numbering kit's review_enums uses. agentbox
@@ -35,6 +36,7 @@ var allParameters = []string{
 var parameterForPass = map[string]string{
 	PassSecurity:    "security",
 	PassCorrectness: "correctness",
+	PassSpec:        "spec conformance",
 }
 
 // Coverage state names, as they cross the wire to the runner and on to kit's
@@ -52,51 +54,63 @@ const (
 	ReasonNoChanges    = "no changes in the diff"
 	ReasonDocsOnly     = "documentation-only change"
 	ReasonLockfileOnly = "lockfile-only change"
+	ReasonNoSpec       = "no spec for this change"
 	ReasonNoPass       = "no pass for this parameter in this release"
 )
 
 // SelectPasses decides which of the requested passes actually run, and why the
-// others did not.
+// others did not. spec is REVIEW_SPEC as the runner supplied it.
 //
 // This is a COST GATE, not a correctness one. A review run costs a model call
 // per Step, and spending it on a change that cannot contain what the pass
 // looks for is spending it on nothing:
 //
-//	no changes at all  — both passes skip; there is nothing to look at.
-//	documentation only — both passes skip. A prose change cannot introduce an
-//	                     injection or an off-by-one.
+//	no changes at all  — every pass skips; there is nothing to look at.
+//	documentation only — security and correctness skip. A prose change cannot
+//	                     introduce an injection or an off-by-one.
 //	lockfiles only     — security RUNS (a dependency bump is exactly the shape
 //	                     of a supply-chain problem) and correctness skips,
 //	                     because a lockfile has no logic to get wrong.
 //
+// The spec pass asks a different question — did the change do what the Task
+// asked — so neither the documentation nor the lockfile rule applies to it: a
+// Task can be asked to change documentation or bump a dependency, and whether
+// it did is exactly what that pass looks at. It skips on an empty diff like
+// the others, and when there is no spec to judge against.
+//
 // Anything else runs every requested pass. The gate is deliberately narrow:
 // it fires only on changes where the skip is obvious, because a pass that
 // skips when it should have run reports a clean review of code nobody read.
-func SelectPasses(requested []string, diff Diff) (passes []string, skipped map[string]string) {
+func SelectPasses(requested []string, diff Diff, spec string) (passes []string, skipped map[string]string) {
 	skipped = map[string]string{}
-	if diff.Empty() {
-		for _, p := range requested {
-			skipped[p] = ReasonNoChanges
+	noSpec := strings.TrimSpace(spec) == ""
+	for _, p := range requested {
+		if reason := skipReason(p, diff, noSpec); reason != "" {
+			skipped[p] = reason
+			continue
 		}
-		return nil, skipped
+		passes = append(passes, p)
 	}
-	if allPathsAre(diff.Paths, isDocumentationPath) {
-		for _, p := range requested {
-			skipped[p] = ReasonDocsOnly
+	return passes, skipped
+}
+
+// skipReason is the gate for one pass: the reason it stands down, or "" when
+// it runs.
+func skipReason(pass string, diff Diff, noSpec bool) string {
+	switch {
+	case diff.Empty():
+		return ReasonNoChanges
+	case pass == PassSpec:
+		if noSpec {
+			return ReasonNoSpec
 		}
-		return nil, skipped
+		return ""
+	case allPathsAre(diff.Paths, isDocumentationPath):
+		return ReasonDocsOnly
+	case allPathsAre(diff.Paths, isLockfilePath) && pass != PassSecurity:
+		return ReasonLockfileOnly
 	}
-	if allPathsAre(diff.Paths, isLockfilePath) {
-		for _, p := range requested {
-			if p == PassSecurity {
-				passes = append(passes, p)
-				continue
-			}
-			skipped[p] = ReasonLockfileOnly
-		}
-		return passes, skipped
-	}
-	return append([]string{}, requested...), skipped
+	return ""
 }
 
 // BuildCoverage produces the coverage list: EXACTLY ONE ENTRY PER PARAMETER,
