@@ -163,7 +163,7 @@ one.
 complete diff against its base commit — tracked changes plus untracked files —
 is written to `<WORK_DIR>/.review/<repository dir>.diff` before the agent
 starts and removed when the run ends. The prompt carries the spec (capped at
-8000 bytes), an index of the change — each repository, its diff file and size,
+32000 bytes), an index of the change — each repository, its diff file and size,
 and up to 200 of its changed paths — and the pass briefs, and it instructs the
 reviewer to read every diff file in full before the first pass. Nothing about
 the change is truncated: a file has no size cap, and a reviewer that needs
