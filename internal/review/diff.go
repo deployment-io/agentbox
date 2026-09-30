@@ -17,10 +17,16 @@ import (
 // Cleanup when the round ends.
 const DirName = ".review"
 
-// MaxSpecBytes caps the spec the diff is judged against. A spec is usually a
-// few hundred bytes; the cap exists so a pathological one cannot crowd the
-// change index out of the prompt.
-const MaxSpecBytes = 8000
+// MaxSpecBytes caps the spec the diff is judged against. Real Task specs run
+// to several kilobytes — acceptance criteria, exact user-facing text, a test
+// list — and the spec is the Task's source of truth: a reviewer that sees only
+// part of it cannot check the rest, and its spec pass reports against a
+// truncated brief. The old 8,000-byte cap cut a 9,162-byte spec's whole Tests
+// section. 32,000 bytes (about 8k tokens) holds any spec a person writes and
+// still stops a pathological one from crowding the change index out of the
+// prompt. The runner passes the spec uncapped in REVIEW_SPEC; a single
+// environment string may be 128 KiB on Linux, so the cap binds here first.
+const MaxSpecBytes = 32000
 
 // MaxIndexPathsPerRepo caps how many changed paths the prompt lists per
 // repository. The list is a map of the change, not the change itself — the

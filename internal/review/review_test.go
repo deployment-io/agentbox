@@ -555,3 +555,27 @@ func TestAnOlderRunnerGetsTodaysPrompt(t *testing.T) {
 		}
 	}
 }
+
+// A spec the size of a real Task brief reaches the reviewer whole; only one
+// past the cap is cut, and the cut says so.
+func TestPromptCarriesALongSpecWholeAndMarksOnlyAnOversizedOne(t *testing.T) {
+	cfg := reviewConfig(t, nil)
+	tail := "Tests: the end of the spec must survive."
+	cfg.ReviewSpec = strings.Repeat("A criterion the reviewer must check. ", 400) + tail // ~15 KB
+	prompt := buildPrompt(cfg, Plan{Passes: []string{PassSpec}})
+	if !strings.Contains(prompt, tail) {
+		t.Fatalf("a %d-byte spec lost its end; the reviewer would never see it", len(cfg.ReviewSpec))
+	}
+	if strings.Contains(prompt, "spec truncated") {
+		t.Error("a spec under the cap was marked truncated")
+	}
+
+	cfg.ReviewSpec = strings.Repeat("x", MaxSpecBytes+100) + tail
+	prompt = buildPrompt(cfg, Plan{Passes: []string{PassSpec}})
+	if strings.Contains(prompt, tail) {
+		t.Error("a spec over the cap was not cut")
+	}
+	if !strings.Contains(prompt, "[… spec truncated at its size cap]") {
+		t.Error("a cut spec does not say it was cut")
+	}
+}
