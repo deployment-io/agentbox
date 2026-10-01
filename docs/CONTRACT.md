@@ -128,6 +128,19 @@ problem that is still present is reported in the status list rather than
 repeated as a new finding. The statuses come back in
 [`review_result.previous`](#review_result).
 
+**A re-check starts from what the last fix changed.** When `REVIEW_ROUND` is
+greater than 1 and `REVIEW_FIX_DIFFS` names at least one usable file, the
+prompt carries a `[What the last fix changed]` section after the change index
+and before `[Previously reported issues — check each one]`. It tells the
+reviewer that the listed files hold the last fix run's own changes — everything
+it changed since the previous round, and nothing else — to read them first and
+in full, to check each previously reported issue against them and look for
+anything the fix broke or introduced, and then to run the passes over the
+whole change as usual. One line per repository, sorted by directory:
+`- repository <dir>: <path> (<n> bytes)`, followed by "Repositories not listed
+here were not changed by the last fix." On round 1, or with no usable entries,
+the prompt is exactly what it is without the variable.
+
 | Variable | Description |
 |---|---|
 | `AGENT_MODE` | `batch` (default), `interactive` or `review`. Any other value is rejected at startup. |
@@ -136,6 +149,7 @@ repeated as a new finding. The statuses come back in
 | `REVIEW_BASE_COMMITS` | **Required in review mode.** JSON object mapping each repository directory relative to `WORK_DIR` to the commit it was checked out at when the Step began, e.g. `{"0-acme/api":"9fceb02…"}`. Each key must be a relative path that stays inside `WORK_DIR`; `..` and absolute paths are rejected at startup. THE BASELINE IS NOT HEAD: an agent may commit its own work, and diffing against HEAD on that path shows nothing at all. |
 | `REVIEW_ROUND` | 1-based round number within one Step's review. Optional; absent or unreadable means `1`. |
 | `REVIEW_OPEN_FINDINGS` | JSON array of the must-fix findings the PREVIOUS round left open, e.g. `[{"key":"sec-unauthenticated-env-dump-app-js","parameter":"security","severity":"critical","location":"0-acme/api/app.js","what":"GET /env returns all of process.env with no auth"}]`. Optional — absent on round 1, supplied by the runner on rounds 2 and 3. Present but unparseable fails the load, the way a malformed `REVIEW_BASE_COMMITS` does: a round that silently dropped the list could report the change clean while every one of them still stands. An entry with no `key` is dropped, because the key is how the status comes back. |
+| `REVIEW_FIX_DIFFS` | JSON object mapping a repository directory relative to `WORK_DIR` (the same keys as `REVIEW_BASE_COMMITS`) to the path, inside the container, of a file holding the diff the LAST fix run made to that repository, e.g. `{"0-acme/api":"/work/.review-fix/0-acme__api.diff"}`. Optional — the deployment.io runner sends it only on the round directly after a kept fix, and only for repositories the fix changed. **Fail-open**: malformed JSON prints `warning: ignoring malformed REVIEW_FIX_DIFFS` to stderr and is ignored; an entry whose directory is not a relative path inside `WORK_DIR`, whose path is not under `WORK_DIR`, or whose path is not a readable regular file is dropped with a warning. It never fails the load — a review without fix diffs reviews the whole change, as always. Used only when `REVIEW_ROUND` > 1 (see above). Review mode only. Stripped from the agent's environment. |
 
 **Pass selection is cost-gated by what the diff touches.** A diff whose every
 changed path is documentation (`*.md`, `*.mdx`, `*.rst`, `*.txt`, `LICENSE`,
