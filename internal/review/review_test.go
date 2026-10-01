@@ -579,3 +579,35 @@ func TestPromptCarriesALongSpecWholeAndMarksOnlyAnOversizedOne(t *testing.T) {
 		t.Error("a cut spec does not say it was cut")
 	}
 }
+
+// Three misses from live Tasks, each now named in the correctness brief:
+//   - downstream: new output (collapsible markup) fed into UNCHANGED code (a
+//     character-count cut) that broke it; the reviewer searched the changed
+//     functions' callers and never opened the cut;
+//   - structure under truncation: that cut split a <details> block, which on
+//     GitHub swallows the rest of the page;
+//   - third-party rules: a GitHub review comment whose range spans two diff
+//     hunks, which GitHub rejects along with the whole review.
+//
+// And a problem in unchanged code is still placed on the diff line that
+// produces the output, so "point at the line in the diff" does not rule it out.
+func TestCorrectnessBriefSendsTheReviewerDownstream(t *testing.T) {
+	brief := passBriefs[PassCorrectness]
+	for _, want := range []string{
+		"Follow what the change PRODUCES as well as who calls it",
+		"even when that code is not in the diff",
+		"can split an HTML tag, a code fence, a JSON value or a multi-byte character",
+		"check each request against that API's documented rules",
+		"that is the diff line producing the output",
+	} {
+		if !strings.Contains(brief, want) {
+			t.Errorf("the correctness brief no longer says %q", want)
+		}
+	}
+	// Correctness only: the security and spec briefs keep their own scope.
+	for _, pass := range []string{PassSecurity, PassSpec} {
+		if strings.Contains(passBriefs[pass], "Follow what the change PRODUCES") {
+			t.Errorf("the %s brief picked up the correctness pass's downstream rule", pass)
+		}
+	}
+}
