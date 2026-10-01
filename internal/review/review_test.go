@@ -611,3 +611,55 @@ func TestCorrectnessBriefSendsTheReviewerDownstream(t *testing.T) {
 		}
 	}
 }
+
+// A re-check after a kept fix is pointed at the fix's own diff first: the
+// section sits between the change index and the previously reported issues,
+// one line per repository, sorted, with each file's size.
+func TestPromptCarriesTheFixDiffSection(t *testing.T) {
+	cfg := reviewConfig(t, []config.ReviewOpenFinding{openFinding})
+	dir := filepath.Join(cfg.WorkDir, ".review-fix")
+	write(t, filepath.Join(dir, "1-acme__web.diff"), "0123456789")
+	write(t, filepath.Join(dir, "0-acme__api.diff"), "abc")
+	cfg.ReviewFixDiffs = map[string]string{
+		"1-acme/web": filepath.Join(dir, "1-acme__web.diff"),
+		"0-acme/api": filepath.Join(dir, "0-acme__api.diff"),
+	}
+	prompt := buildPrompt(cfg, Plan{Passes: []string{PassSecurity}})
+
+	want := "\n[What the last fix changed]\n" +
+		"The last fix run's own changes — everything it changed since the previous review round, and nothing else — are in these files. Read them FIRST, in full. Check each previously reported issue against them, and look for anything the fix broke or introduced. Then run the passes over the whole change as usual: the fix diff is where to start, not a replacement for the full diff.\n" +
+		"- repository 0-acme/api: " + filepath.Join(dir, "0-acme__api.diff") + " (3 bytes)\n" +
+		"- repository 1-acme/web: " + filepath.Join(dir, "1-acme__web.diff") + " (10 bytes)\n" +
+		"Repositories not listed here were not changed by the last fix.\n"
+	section := strings.Index(prompt, want)
+	if section < 0 {
+		t.Fatalf("the prompt does not carry the fix-diff section as specified:\n%s", prompt)
+	}
+	index := strings.Index(prompt, "[The change under review]")
+	previous := strings.Index(prompt, "[Previously reported issues — check each one]")
+	if !(index < section && section < previous) {
+		t.Errorf("section at %d is not between the change index (%d) and the previous issues (%d)", section, index, previous)
+	}
+}
+
+// Round 1, or a round with no fix diffs, gets exactly today's prompt.
+func TestPromptWithoutFixDiffsIsUnchanged(t *testing.T) {
+	cfg := reviewConfig(t, []config.ReviewOpenFinding{openFinding})
+	plan := Plan{Passes: []string{PassSecurity}}
+	today := buildPrompt(cfg, plan)
+
+	cfg.ReviewFixDiffs = map[string]string{}
+	if got := buildPrompt(cfg, plan); got != today {
+		t.Error("an empty fix-diff map changed the prompt")
+	}
+
+	path := filepath.Join(cfg.WorkDir, ".review-fix", "0-acme__api.diff")
+	write(t, path, "abc")
+	cfg.ReviewRound = 1
+	cfg.ReviewFixDiffs = nil
+	round1 := buildPrompt(cfg, plan)
+	cfg.ReviewFixDiffs = map[string]string{"0-acme/api": path}
+	if got := buildPrompt(cfg, plan); got != round1 {
+		t.Error("fix diffs changed the round-1 prompt")
+	}
+}

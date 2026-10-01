@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -145,6 +146,17 @@ type Config struct {
 	// the claim instead of the code — which is exactly how a Critical finding
 	// gets waved through after a round that only added a comment.
 	ReviewOpenFindings []ReviewOpenFinding
+
+	// ReviewFixDiffs maps a repository directory (relative to WorkDir, the
+	// same keys as ReviewBaseCommits) to a file holding the diff the LAST fix
+	// run made to it — what changed since the previous review round, and
+	// nothing else. From the JSON object in REVIEW_FIX_DIFFS, review mode
+	// only; empty on round 1 and whenever the runner could not compute one.
+	//
+	// Fail-open: malformed JSON is ignored with a warning, and an entry whose
+	// path is outside WorkDir or is not a readable file is dropped with one.
+	// A review without fix diffs is simply a review of the whole change.
+	ReviewFixDiffs map[string]string
 
 	// ReviewEffort is the reasoning effort a review run asks its agent for:
 	// one of ReviewEffortLevels, or "" for the model's default. From
@@ -412,6 +424,8 @@ func (c *Config) loadReviewInputs() error {
 
 	c.ReviewVerifyResult = parseReviewVerifyResult(os.Getenv("REVIEW_VERIFY_RESULT"))
 
+	c.ReviewFixDiffs = parseReviewFixDiffs(os.Getenv("REVIEW_FIX_DIFFS"), c.WorkDir)
+
 	c.ReviewEffort = parseReviewEffort(os.Getenv("REVIEW_EFFORT"))
 
 	raw := strings.TrimSpace(os.Getenv("REVIEW_BASE_COMMITS"))
@@ -473,6 +487,88 @@ func parseReviewEffort(raw string) string {
 	fmt.Fprintf(os.Stderr, "warning: REVIEW_EFFORT=%s is not one of %s; using the model's default effort\n",
 		v, strings.Join(ReviewEffortLevels, ", "))
 	return ""
+}
+
+// parseReviewFixDiffs reads the JSON object in REVIEW_FIX_DIFFS: repository
+// directory → path of the last fix run's diff file inside the container.
+//
+// Every failure is ignored with a warning rather than failing the load: the
+// fix diff only tells the reviewer where to START, and a round without it
+// reviews the whole change exactly as a round always has. An entry is dropped
+// when its directory is not a local path, its path is not under workDir, or
+// the path is not a readable regular file — the prompt must never point the
+// reviewer at a file that is not there, or at one outside the workspace.
+func parseReviewFixDiffs(raw, workDir string) map[string]string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	var parsed map[string]string
+	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: ignoring malformed REVIEW_FIX_DIFFS: %v\n", err)
+		return nil
+	}
+	out := map[string]string{}
+	for dir, path := range parsed {
+		dir = strings.TrimSpace(dir)
+		if dir == "" || !filepath.IsLocal(dir) {
+			fmt.Fprintf(os.Stderr, "warning: ignoring REVIEW_FIX_DIFFS entry %q: not a repository directory inside WORK_DIR\n", dir)
+			continue
+		}
+		if !pathUnder(path, workDir) {
+			fmt.Fprintf(os.Stderr, "warning: ignoring REVIEW_FIX_DIFFS entry %q: %q is not under WORK_DIR\n", dir, path)
+			continue
+		}
+		if err := readableFile(path); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: ignoring REVIEW_FIX_DIFFS entry %q: %v\n", dir, err)
+			continue
+		}
+		out[dir] = filepath.Clean(path)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// pathUnder reports whether path is an absolute path strictly inside root,
+// judged lexically after cleaning both.
+func pathUnder(path, root string) bool {
+	if !filepath.IsAbs(path) || root == "" {
+		return false
+	}
+	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(path))
+	return err == nil && rel != "." && filepath.IsLocal(rel)
+}
+
+// readableFile reports why path is not a regular file that can be opened for
+// reading, or nil when it is one.
+//
+// The type is checked before the open: opening a FIFO with no writer blocks,
+// and an unusable optional entry must be dropped, not stall the review. The
+// open is also non-blocking, and the descriptor is checked again, in case the
+// path is replaced between the two.
+func readableFile(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("%s is not a regular file", path)
+	}
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	info, err = f.Stat()
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("%s is not a regular file", path)
+	}
+	return nil
 }
 
 // parseReviewOpenFindings reads the JSON array in REVIEW_OPEN_FINDINGS.

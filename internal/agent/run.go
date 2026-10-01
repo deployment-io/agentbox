@@ -421,6 +421,9 @@ var agentboxInputEnv = map[string]bool{
 	"REVIEW_OPEN_FINDINGS":   true,
 	"REVIEW_READONLY_MOUNTS": true,
 	"REVIEW_VERIFY_RESULT":   true,
+	// REVIEW_FIX_DIFFS is a JSON object of file paths, folded into the
+	// prompt as the [What the last fix changed] section.
+	"REVIEW_FIX_DIFFS": true,
 	// REVIEW_EFFORT reaches the agent as a CLI flag (see each driver's
 	// BuildArgs), not through the environment.
 	"REVIEW_EFFORT": true,

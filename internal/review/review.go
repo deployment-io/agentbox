@@ -2,7 +2,9 @@ package review
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/deployment-io/agentbox/internal/config"
@@ -267,6 +269,9 @@ func buildPrompt(cfg *config.Config, plan Plan) string {
 		}
 	}
 
+	if cfg.ReviewRound > 1 {
+		b.WriteString(fixDiffSection(cfg.ReviewFixDiffs))
+	}
 	b.WriteString(previousIssuesSection(cfg.ReviewOpenFindings))
 	b.WriteString(buildAndTestSection(cfg))
 
@@ -279,6 +284,39 @@ func buildPrompt(cfg *config.Config, plan Plan) string {
 		}
 		b.WriteString(fmt.Sprintf("\n%d. %s pass — %s\n", i+1, pass, brief))
 	}
+	return b.String()
+}
+
+// fixDiffSection points a re-check at the last fix run's OWN diff: what it
+// changed since the previous round, one file per repository it touched. It is
+// where the reviewer starts — the previously reported issues are checked
+// against it, and it is where a fix most likely broke something — but the
+// passes still run over the whole change.
+//
+// Empty when there are no entries, so a round without fix diffs gets exactly
+// the prompt it always did. Entries are sorted by directory so the prompt is
+// stable; a file whose size cannot be read shows 0 bytes rather than vanishing
+// (config already checked it was readable).
+func fixDiffSection(diffs map[string]string) string {
+	if len(diffs) == 0 {
+		return ""
+	}
+	dirs := make([]string, 0, len(diffs))
+	for dir := range diffs {
+		dirs = append(dirs, dir)
+	}
+	sort.Strings(dirs)
+	var b strings.Builder
+	b.WriteString("\n[What the last fix changed]\n")
+	b.WriteString("The last fix run's own changes — everything it changed since the previous review round, and nothing else — are in these files. Read them FIRST, in full. Check each previously reported issue against them, and look for anything the fix broke or introduced. Then run the passes over the whole change as usual: the fix diff is where to start, not a replacement for the full diff.\n")
+	for _, dir := range dirs {
+		var size int64
+		if info, err := os.Stat(diffs[dir]); err == nil {
+			size = info.Size()
+		}
+		b.WriteString(fmt.Sprintf("- repository %s: %s (%d bytes)\n", dir, diffs[dir], size))
+	}
+	b.WriteString("Repositories not listed here were not changed by the last fix.\n")
 	return b.String()
 }
 
