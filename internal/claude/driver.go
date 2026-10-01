@@ -204,6 +204,11 @@ func (d *Driver) BuildArgs(cfg *config.Config) []string {
 		// without a permission prompt.
 		args = append(args, "--mcp-config", mcpConfigJSON(cfg.MCPSocket))
 	}
+	if reviewing && cfg.ReviewEffort != "" {
+		// Before --allowedTools, which would swallow it. buildEnv strips
+		// CLAUDE_CODE_EFFORT_LEVEL, which would otherwise override this.
+		args = append(args, "--effort", cfg.ReviewEffort)
+	}
 	if reviewing {
 		// Appended LAST: --allowedTools is variadic and consumes every
 		// following token. The list is the read-only interactive one, except

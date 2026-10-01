@@ -217,6 +217,12 @@ func (d *Driver) BuildArgs(cfg *config.Config) []string {
 		"-c", "otel.exporter=none",
 		"-c", "otel.metrics_exporter=none",
 	)
+	if reviewing && cfg.ReviewEffort != "" {
+		// Codex sends any string through unvalidated and the API rejects one
+		// the model does not support, so only config's validated levels get
+		// here.
+		args = append(args, "-c", "model_reasoning_effort="+jsonValue(cfg.ReviewEffort))
+	}
 	if cfg.Model != "" {
 		args = append(args, "--model", cfg.Model)
 	}

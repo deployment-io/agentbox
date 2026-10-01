@@ -254,6 +254,25 @@ of pairing the two halves.
 | Variable | Description |
 |---|---|
 | `REVIEW_VERIFY_RESULT` | JSON object with the implementer's self-reported build/test outcome: `{"ran":bool,"passed":bool,"command":string,"skipped_reason":string,"pre_existing":bool,"steps":[{"repo":string,"command":string,"passed":bool}]}` — the same shape agentbox emits as [`verify_result`](#verify_result). All fields optional. Optional as a whole, and **advisory**: unlike `REVIEW_OPEN_FINDINGS`, a malformed value is IGNORED with a line on stderr instead of failing the load, because throwing away the whole examination to protect a line of context is the worse trade. Review mode only. |
+| `REVIEW_EFFORT` | Reasoning effort for the review run: `low`, `medium`, `high`, `xhigh` or `max` (trimmed, case-insensitive). Any other non-empty value prints `warning: REVIEW_EFFORT=<value> is not one of low, medium, high, xhigh, max; using the model's default effort` to stderr and the run uses the model's default; it never fails the load. Empty / unset = the model's default, and the agent's arguments are exactly as without this variable. Review mode only — batch and interactive runs ignore it. Stripped from the agent's environment. |
+
+**How `REVIEW_EFFORT` reaches each agent.** Only when it is set; each driver
+appends one flag to its review invocation:
+
+| `AGENT_TYPE` | Arguments | Notes |
+|---|---|---|
+| `claude-code` | `--effort <level>` | Claude Code validates the level itself (an unknown one prints a warning and runs at the default). |
+| `codex` | `-c model_reasoning_effort="<level>"` | Next to the other `-c` overrides. Codex does NOT validate it: a level the model does not support is rejected by the API and fails the run. |
+| `opencode` | `--variant <level>` | Valid variants come from the model's entry in opencode's catalogue; a model without that variant runs at its default. |
+
+At startup a review run prints `[agentbox] review effort: <level>` to stderr,
+or `[agentbox] review effort: model default` when none is set, and records the
+level in [`review_effort`](#tmpresultjson-or-result_path).
+
+**`CLAUDE_CODE_EFFORT_LEVEL` is removed from every agent process's
+environment**, in every mode. Claude Code lets it override `--effort`, and
+effort is decided by the runner through `REVIEW_EFFORT` — not by whatever the
+container inherited.
 
 **A git failure fails the round.** Each base commit is verified with
 `git rev-parse --verify <sha>^{commit}` before anything is diffed, and any git
@@ -405,6 +424,11 @@ back to the exit status plus a tail of stderr only when the agent
 crashed before reporting anything. A bare `exit status N` is never the
 whole story when the agent told us more. `denied_hosts` is omitted when no allowlist denies happened
 during the run.
+
+`review_effort` appears in review mode only: the effort level the run asked
+its agent for (see `REVIEW_EFFORT`), or `""` when it ran at the model's
+default. It is omitted in batch and interactive mode, and on a review that
+failed before `agent.Run` started (a config, install or proxy error).
 
 `denied_hosts` lists hostnames the in-process CONNECT proxy refused
 because they weren't on the active allowlist (Driver-declared ∪

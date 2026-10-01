@@ -64,6 +64,17 @@ const (
 func Run(ctx context.Context, cfg *config.Config, driver Driver) (outcome result.Outcome) {
 	agentVersion := driver.DetectVersion()
 
+	if cfg.Mode == config.ModeReview {
+		logReviewEffort(cfg, os.Stderr)
+		// Stamped on every return path, including the skipped and failed
+		// outcomes that never reach the agent, so the result file always says
+		// which effort the round was configured for.
+		defer func() {
+			effort := cfg.ReviewEffort
+			outcome.ReviewEffort = &effort
+		}()
+	}
+
 	// Review mode's work item is the diff, not a prompt someone handed us: it
 	// is computed here, before anything else, because the cost gate can decide
 	// that no pass is worth running and that answer needs no agent at all.
@@ -247,6 +258,16 @@ func Run(ctx context.Context, cfg *config.Config, driver Driver) (outcome result
 	return oc
 }
 
+// logReviewEffort names the effort this review run asks its agent for, so the
+// Job log shows it for every round whether or not one was set.
+func logReviewEffort(cfg *config.Config, w io.Writer) {
+	effort := cfg.ReviewEffort
+	if effort == "" {
+		effort = "model default"
+	}
+	fmt.Fprintf(w, "[agentbox] review effort: %s\n", effort)
+}
+
 // liftReview moves the agent's <review> trailer out of its final message and
 // into the outcome, and puts the stripped message back as the changes summary.
 //
@@ -400,16 +421,31 @@ var agentboxInputEnv = map[string]bool{
 	"REVIEW_OPEN_FINDINGS":   true,
 	"REVIEW_READONLY_MOUNTS": true,
 	"REVIEW_VERIFY_RESULT":   true,
+	// REVIEW_EFFORT reaches the agent as a CLI flag (see each driver's
+	// BuildArgs), not through the environment.
+	"REVIEW_EFFORT": true,
+}
+
+// agentEnvDenylist are env vars removed from every agent process's
+// environment, in every mode, even though agentbox itself does not read them.
+//
+// CLAUDE_CODE_EFFORT_LEVEL overrides Claude Code's --effort flag. Effort is
+// decided by the runner (REVIEW_EFFORT, mapped to --effort by the claude
+// driver), not by whatever the container happened to inherit, so a stray
+// value must not be allowed to override — or silently set — it.
+var agentEnvDenylist = map[string]bool{
+	"CLAUDE_CODE_EFFORT_LEVEL": true,
 }
 
 // buildEnv forwards the parent env minus agentbox's own input-contract vars
-// (already captured into cfg). Credential-path dispatch is the agent's
-// responsibility; agentbox just forwards the rest.
+// (already captured into cfg) and agentEnvDenylist. Credential-path dispatch
+// is the agent's responsibility; agentbox just forwards the rest. Every agent
+// process agentbox starts — batch, review and interactive — gets this env.
 func buildEnv() []string {
 	parent := os.Environ()
 	env := make([]string, 0, len(parent))
 	for _, kv := range parent {
-		if eq := strings.IndexByte(kv, '='); eq >= 0 && agentboxInputEnv[kv[:eq]] {
+		if eq := strings.IndexByte(kv, '='); eq >= 0 && (agentboxInputEnv[kv[:eq]] || agentEnvDenylist[kv[:eq]]) {
 			continue
 		}
 		env = append(env, kv)
