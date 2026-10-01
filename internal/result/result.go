@@ -111,6 +111,13 @@ type Outcome struct {
 	// mode, and for a review that produced no parseable trailer.
 	ReviewResult *ReviewResult `json:"review_result,omitempty"`
 
+	// ReviewEffort is the reasoning effort a review-mode run asked its agent
+	// for (config.ReviewEffortLevels), or "" for the model's default. Set on
+	// every review-mode outcome agent.Run returns and nil — so omitted — in
+	// every other mode. A pointer so "" (default effort) still appears in a
+	// review's result.json.
+	ReviewEffort *string `json:"review_effort,omitempty"`
+
 	// ExitCode is the classified exit code (see Exit* constants:
 	// 0 success, 1 generic execution failure, 2 auth/rate-limit,
 	// 3 cancelled, 4 timeout). agentbox's process exits with this

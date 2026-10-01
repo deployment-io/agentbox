@@ -317,6 +317,11 @@ func (d *Driver) BuildArgs(cfg *config.Config) []string {
 	if cfg.Model != "" {
 		args = append(args, "--model", cfg.Model)
 	}
+	if cfg.Mode == config.ModeReview && cfg.ReviewEffort != "" {
+		// opencode's variants come from the model's catalogue entry; a model
+		// without one for this level runs at its default.
+		args = append(args, "--variant", cfg.ReviewEffort)
+	}
 	// A review's prompt travels on stdin (see Stdin). With no message
 	// argument, opencode run takes the piped stdin as the message.
 	if cfg.Mode != config.ModeReview {

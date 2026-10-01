@@ -146,6 +146,15 @@ type Config struct {
 	// gets waved through after a round that only added a comment.
 	ReviewOpenFindings []ReviewOpenFinding
 
+	// ReviewEffort is the reasoning effort a review run asks its agent for:
+	// one of ReviewEffortLevels, or "" for the model's default. From
+	// REVIEW_EFFORT, review mode only — batch and interactive runs ignore it.
+	// Each driver maps it onto its own CLI flag (claude --effort, codex -c
+	// model_reasoning_effort=…, opencode --variant). An unrecognised value
+	// is dropped with a warning rather than failing the load: the review
+	// still runs, at the default effort.
+	ReviewEffort string
+
 	// SessionID, when set, is forwarded to the agent as a stable session
 	// identifier (claude --session-id) so the transcript persists on disk
 	// and can be resumed after a container restart. From SESSION_ID.
@@ -403,6 +412,8 @@ func (c *Config) loadReviewInputs() error {
 
 	c.ReviewVerifyResult = parseReviewVerifyResult(os.Getenv("REVIEW_VERIFY_RESULT"))
 
+	c.ReviewEffort = parseReviewEffort(os.Getenv("REVIEW_EFFORT"))
+
 	raw := strings.TrimSpace(os.Getenv("REVIEW_BASE_COMMITS"))
 	if raw == "" {
 		return fmt.Errorf("REVIEW_BASE_COMMITS is required in %s mode", ModeReview)
@@ -435,6 +446,33 @@ func (c *Config) loadReviewInputs() error {
 		c.ReviewRound = round
 	}
 	return nil
+}
+
+// ReviewEffortLevels are the REVIEW_EFFORT values agentbox accepts, in
+// increasing order of effort. They are Claude Code's --effort levels; the
+// codex and opencode drivers pass the same word through to their own flag.
+var ReviewEffortLevels = []string{"low", "medium", "high", "xhigh", "max"}
+
+// parseReviewEffort reads REVIEW_EFFORT: trimmed, lowercased, and accepted only
+// when it is one of ReviewEffortLevels. Anything else non-empty is dropped with
+// a warning on stderr, and the run uses the model's default effort.
+//
+// Validated here rather than left to the agent CLI because Codex does not
+// validate model_reasoning_effort at all: an unknown value is sent to the API,
+// which rejects it and fails the run.
+func parseReviewEffort(raw string) string {
+	v := strings.ToLower(strings.TrimSpace(raw))
+	if v == "" {
+		return ""
+	}
+	for _, level := range ReviewEffortLevels {
+		if v == level {
+			return v
+		}
+	}
+	fmt.Fprintf(os.Stderr, "warning: REVIEW_EFFORT=%s is not one of %s; using the model's default effort\n",
+		v, strings.Join(ReviewEffortLevels, ", "))
+	return ""
 }
 
 // parseReviewOpenFindings reads the JSON array in REVIEW_OPEN_FINDINGS.
