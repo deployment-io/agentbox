@@ -304,7 +304,7 @@ var defaultReviewPasses = []string{"security", "correctness"}
 // to report what it covered.
 //
 // Deliberately duplicated rather than imported from internal/review — review
-// imports config, so the dependency cannot go the other way. Three names is a
+// imports config, so the dependency cannot go the other way. Four names is a
 // small enough mirror to keep by hand; adding a pass means adding it here and
 // to internal/review's parameterForPass. internal/review's
 // TestConfigAndReviewAgreeOnThePassList pins the two lists to each other.
@@ -312,6 +312,7 @@ var knownReviewPasses = map[string]bool{
 	"security":    true,
 	"correctness": true,
 	"spec":        true,
+	"deploy":      true,
 }
 
 // KnownReviewPasses returns every pass name this release can run, for the

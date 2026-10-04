@@ -1,7 +1,12 @@
 package review
 
 import (
+	"bufio"
+	"encoding/json"
+	"os"
 	"path"
+	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -12,13 +17,14 @@ const (
 	PassSecurity    = "security"
 	PassCorrectness = "correctness"
 	PassSpec        = "spec"
+	PassDeploy      = "deploy"
 )
 
 // Every review parameter, in the numbering kit's review_enums uses. agentbox
 // deliberately does not import kit — it is a standalone module — so these
 // names are a hand-mirror, in the same spirit as the caps in extract.go.
 //
-// ALL EIGHT appear in every coverage list. The six with no pass report
+// ALL EIGHT appear in every coverage list. The four with no pass report
 // NotChecked, which is the whole point of having a coverage list at all: "no
 // findings" and "nothing looked" must not be the same answer.
 var allParameters = []string{
@@ -37,6 +43,7 @@ var parameterForPass = map[string]string{
 	PassSecurity:    "security",
 	PassCorrectness: "correctness",
 	PassSpec:        "spec conformance",
+	PassDeploy:      "deploy readiness",
 }
 
 // Coverage state names, as they cross the wire to the runner and on to kit's
@@ -56,6 +63,8 @@ const (
 	ReasonLockfileOnly = "lockfile-only change"
 	ReasonNoSpec       = "no spec for this change"
 	ReasonNoPass       = "no pass for this parameter in this release"
+
+	ReasonNoDeployContext = "no deployed service found for the changed repositories"
 )
 
 // SelectPasses decides which of the requested passes actually run, and why the
@@ -78,14 +87,20 @@ const (
 // it did is exactly what that pass looks at. It skips on an empty diff like
 // the others, and when there is no spec to judge against.
 //
+// The deploy pass follows the documentation and lockfile rules — neither kind
+// of change alters how a service builds or starts — and then needs something
+// to judge against: a row in <workDir>/context/services.json for one of the
+// changed repositories. Without one there is no deployed service to check the
+// change against, and the pass stands down with ReasonNoDeployContext.
+//
 // Anything else runs every requested pass. The gate is deliberately narrow:
 // it fires only on changes where the skip is obvious, because a pass that
 // skips when it should have run reports a clean review of code nobody read.
-func SelectPasses(requested []string, diff Diff, spec string) (passes []string, skipped map[string]string) {
+func SelectPasses(requested []string, diff Diff, spec, workDir string) (passes []string, skipped map[string]string) {
 	skipped = map[string]string{}
 	noSpec := strings.TrimSpace(spec) == ""
 	for _, p := range requested {
-		if reason := skipReason(p, diff, noSpec); reason != "" {
+		if reason := skipReason(p, diff, noSpec, workDir); reason != "" {
 			skipped[p] = reason
 			continue
 		}
@@ -96,7 +111,7 @@ func SelectPasses(requested []string, diff Diff, spec string) (passes []string, 
 
 // skipReason is the gate for one pass: the reason it stands down, or "" when
 // it runs.
-func skipReason(pass string, diff Diff, noSpec bool) string {
+func skipReason(pass string, diff Diff, noSpec bool, workDir string) string {
 	switch {
 	case diff.Empty():
 		return ReasonNoChanges
@@ -109,8 +124,57 @@ func skipReason(pass string, diff Diff, noSpec bool) string {
 		return ReasonDocsOnly
 	case allPathsAre(diff.Paths, isLockfilePath) && pass != PassSecurity:
 		return ReasonLockfileOnly
+	case pass == PassDeploy && !hasDeployContext(workDir, diff):
+		return ReasonNoDeployContext
 	}
 	return ""
+}
+
+// ServicesFile is where the runner puts the organization's service map,
+// relative to the work dir: one JSON object per line.
+const ServicesFile = "context/services.json"
+
+// repoDirPrefix is the "<digits>-" the runner puts in front of each
+// repository directory to keep two checkouts of the same name apart.
+var repoDirPrefix = regexp.MustCompile(`^[0-9]+-`)
+
+// repoName is a repository directory's name as services.json spells it:
+// "0-deployment-io/kit" is "deployment-io/kit".
+func repoName(dir string) string {
+	return repoDirPrefix.ReplaceAllString(filepath.ToSlash(dir), "")
+}
+
+// hasDeployContext reports whether services.json has a row for a repository
+// this change touches. A missing or unreadable file means no, and a malformed
+// line is skipped: the file is context, and one bad row must not decide the
+// gate for the rest.
+func hasDeployContext(workDir string, diff Diff) bool {
+	changed := map[string]bool{}
+	for _, r := range diff.Repos {
+		changed[strings.ToLower(repoName(r.Dir))] = true
+	}
+	if len(changed) == 0 {
+		return false
+	}
+	f, err := os.Open(filepath.Join(workDir, ServicesFile))
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	for scanner.Scan() {
+		var row struct {
+			Repo string `json:"repo"`
+		}
+		if json.Unmarshal(scanner.Bytes(), &row) != nil {
+			continue
+		}
+		if repo := strings.ToLower(strings.TrimSpace(row.Repo)); repo != "" && changed[repo] {
+			return true
+		}
+	}
+	return false
 }
 
 // BuildCoverage produces the coverage list: EXACTLY ONE ENTRY PER PARAMETER,

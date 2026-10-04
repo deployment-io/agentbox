@@ -74,4 +74,20 @@ type ReviewResult struct {
 	// Previous is omitted entirely when the round was given no open findings
 	// — the round-1 shape, where there is nothing to report a status for.
 	Previous []PreviousFinding `json:"previous,omitempty"`
+
+	// DeployRequirements are the variables the deploy readiness pass found
+	// this change newly reads and the service's environment does not provide.
+	// They are NOT findings: the change is right to need them and only a
+	// person can set their values. Omitted when there are none, and always
+	// when the deploy pass did not run.
+	DeployRequirements []DeployRequirement `json:"deploy_requirements,omitempty"`
+}
+
+// DeployRequirement is one variable a service needs set before this change is
+// deployed. Names only — a value never crosses this contract.
+type DeployRequirement struct {
+	Variable    string `json:"variable"`
+	Service     string `json:"service"`
+	Environment string `json:"environment"`
+	Location    string `json:"location"`
 }

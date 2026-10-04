@@ -419,3 +419,21 @@ func TestLoadRejectsAnUnknownMode(t *testing.T) {
 		t.Errorf("error %q should name AGENT_MODE", err)
 	}
 }
+
+func TestLoadReviewModeAcceptsTheDeployPass(t *testing.T) {
+	setEnv(t, map[string]string{
+		"WORK_DIR":            t.TempDir(),
+		"ANTHROPIC_API_KEY":   "sk-ant-test",
+		"AGENT_MODE":          ModeReview,
+		"REVIEW_BASE_COMMITS": `{"0-acme/api":"abc123"}`,
+		"REVIEW_PASSES":       "security,correctness,spec,deploy",
+	})
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %s", err)
+	}
+	if strings.Join(cfg.ReviewPasses, ",") != "security,correctness,spec,deploy" {
+		t.Errorf("ReviewPasses = %v, want deploy kept", cfg.ReviewPasses)
+	}
+}

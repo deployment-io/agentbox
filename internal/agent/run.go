@@ -296,6 +296,8 @@ func liftReview(oc *result.Outcome, plan review.Plan) {
 		// present" to the consumer, which is the safe reading of a round that
 		// did not finish.
 		reviewResult.Previous = nil
+		// Nor are deploy requirements from a pass that did not finish.
+		reviewResult.DeployRequirements = nil
 	}
 	oc.ReviewResult = reviewResult
 	// A review changes nothing, so the implementer's fields describe work it
