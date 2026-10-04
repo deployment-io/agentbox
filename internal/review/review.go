@@ -50,7 +50,7 @@ func Build(cfg *config.Config) (Plan, error) {
 	if err != nil {
 		return Plan{}, err
 	}
-	passes, skipped := SelectPasses(cfg.ReviewPasses, diff, cfg.ReviewSpec)
+	passes, skipped := SelectPasses(cfg.ReviewPasses, diff, cfg.ReviewSpec, cfg.WorkDir)
 	plan := Plan{Passes: passes, Diff: diff, Open: cfg.ReviewOpenFindings}
 	if len(passes) > 0 {
 		// The diff files are the change the reviewer reads. A round that
@@ -100,11 +100,27 @@ func LiftResult(finalMessage string, planned []Coverage, open []config.ReviewOpe
 		// examined even when the report came back unreadable.
 		return &result.ReviewResult{Findings: []Finding{}, Coverage: planned}, stripped
 	}
-	return &result.ReviewResult{
+	out := &result.ReviewResult{
 		Findings: findings,
 		Coverage: reconcileCoverage(planned, claimed),
 		Previous: previous,
-	}, stripped
+	}
+	// Deploy requirements come only from a round the deploy pass ran in. The
+	// planned coverage is agentbox's own record of that: "deploy readiness"
+	// is checked exactly when the pass was in the plan.
+	if deployPassRan(planned) {
+		out.DeployRequirements = ExtractDeployRequirements(finalMessage)
+	}
+	return out, stripped
+}
+
+func deployPassRan(planned []Coverage) bool {
+	for _, c := range planned {
+		if c.Parameter == parameterForPass[PassDeploy] {
+			return c.State == stateChecked
+		}
+	}
+	return false
 }
 
 // reconcileCoverage merges the agent's claims into agentbox's record, one
@@ -199,6 +215,7 @@ var passBriefs = map[string]string{
 	PassSecurity:    `Look ONLY for security problems this diff introduces or leaves open: injection (SQL, command, template), missing authentication or authorisation on a new path, secrets or credentials committed or logged, unsafe deserialisation, path traversal, SSRF, missing validation of untrusted input crossing a trust boundary, a dependency change that pulls in something unvetted, and weakened crypto or transport security. Report a finding only when you can point at the line in the diff that causes it. ` + severityRule + "\n" + severityRubric,
 	PassSpec:        `Look ONLY at whether the change does what the spec in [What the change is meant to achieve] asks. Not code quality, not security: other passes cover those. When the spec lists acceptance criteria ("Acceptance"), check each one against the change and the code around it; a criterion that is not met, or is met only in part, is a finding. When the spec is a plain description, check its stated goal. A change to something the spec lists as out of scope ("OutOfScope") is a finding, and so are behaviour changes the spec did not ask for. Treat the spec's "Assumptions" as context, not as requirements. Where the spec is ambiguous and the change chose one reading, say which reading at info. Within the scale below: the spec's goal itself not achieved is high; an acceptance criterion not met or met only in part is medium; an out-of-scope or unrequested change is low unless it breaks something, in which case the correctness pass reports the breakage; an ambiguity is info. location is the file where the missing behaviour belongs or the file that contradicts the criterion; when there is no such file, use "spec: acceptance criterion N". key names the criterion, e.g. spec-criterion-3-export-csv, with no line number. ` + severityRule + "\n" + severityRubric,
 	PassCorrectness: `Look ONLY for correctness problems this diff introduces: logic that does not do what the surrounding code and the spec say it should, off-by-one and boundary errors, nil or null dereferences, unhandled errors and swallowed failures, race conditions and unsynchronised shared state, and resource leaks. When the diff changes a function signature, a wire shape or an API contract, check every caller and consumer across the repositories in the workspace, and report a contract change whose other side is not part of this change. Follow what the change PRODUCES as well as who calls it: for every new or changed output — text, markup, a record, a request — find the existing code that later consumes or transforms it (cuts it to a size limit, escapes it, parses it, stores it, sends it) and check the combination, even when that code is not in the diff. Cutting text at a character or byte count can split an HTML tag, a code fence, a JSON value or a multi-byte character, so check that every cut the output can go through leaves it well formed. When the change calls a third-party API, check each request against that API's documented rules as you know them, and say which rule a request breaks. Report a finding only when you can point at the line in the diff that causes it — for a problem in how unchanged code handles the change's output, that is the diff line producing the output — and say what input or state makes it go wrong. ` + severityRule + "\n" + severityRubric,
+	PassDeploy:      `Look ONLY at whether this change will deploy and run the way this organization deploys it. The deployment facts are in /work/context/services.json, one JSON object per line; use the rows whose "repo" is a repository in this change. A row can carry: environment and environmentId; type (Web Service, Private Service or Static Site); variableNames, the NAMES of the variables the service's environment provides, never values, with variablesFrom saying where they came from — no variablesFrom means unknown, not empty; buildArgNames; ports; healthCheckPath; isSpa; rootDirectory; publishDirectory; deployFromImage. Report as findings, each with a location in the diff: a variable the code reads whose name is close to one the environment has but not the same (DATABASE_URL where the environment has DB_URL); a port the server now listens on that is not in ports; a health check path that no longer answers or now requires authentication; a file or directory the code reads at run time that the build does not put into the image; for a static site, build output that no longer lands in publishDirectory, or client-side routes that need isSpa when it is false; a Docker build argument the Dockerfile now requires that buildArgNames lacks; code the service needs that moved outside rootDirectory. A variable that this change newly reads and that the service's variableNames does not contain is NOT a finding: report it as a deploy requirement (see [How to report]). The change is right to need it and only a person can set its value; never suggest removing it, hard-coding it or giving it a default. A variable that was already read before this change is neither a finding nor a requirement. When variablesFrom is missing for a service, you cannot tell what is set: report no requirement for it. Within the scale below: a deploy that fails, or a service that cannot start or serve, is high; a feature that fails at run time in the deployed environment is medium. ` + severityRule + "\n" + severityRubric,
 }
 
 // buildPrompt assembles the review prompt: the spec, an index of the change
@@ -495,6 +512,19 @@ func Instruction(cfg *config.Config) string {
 	return reviewTrailerInstruction(trailerPasses(passes, cfg.ReviewSpec), cfg.ReviewOpenFindings)
 }
 
+// deployTrailerRule documents "deploy_requirements", and only when the deploy
+// pass is one of the passes: a block from a round without it has nothing to
+// put there, and LiftResult discards the field when the pass did not run.
+func deployTrailerRule(passes []string) string {
+	for _, p := range passes {
+		if p == PassDeploy {
+			return `
+- When the deploy readiness pass found a variable this change newly reads that the service's environment does not provide, the block must also carry "deploy_requirements": [{"variable":"<NAME>","service":"<service exactly as in services.json>","environment":"<environment exactly as in services.json, or empty>","location":"<file:line where the code reads it>"}] — one entry per variable and service. Never put a value in it. Leave it out when there are none.`
+		}
+	}
+	return ""
+}
+
 // trailerPasses drops the spec pass when there is no spec, because the gate
 // will stand it down and its parameter must not be offered for findings. The
 // diff-dependent half of the gate is not known here and is not applied.
@@ -543,9 +573,9 @@ Rules for the block:
 %s
 - key is a short stable slug naming the parameter, the file and the rule, e.g. sec-unauthenticated-env-dump-app-js. Never include a line number: lines move between rounds, and the key must stay the same for the same problem.
 - what is what you saw; why is why it matters. Keep both to a few sentences.
-- If a pass found nothing, say so with coverage state "checked" and no findings for it. An empty findings list is a legitimate and common answer.%s
+- If a pass found nothing, say so with coverage state "checked" and no findings for it. An empty findings list is a legitimate and common answer.%s%s
 - Emit the block once, at the very end. Everything outside it is prose for a human and will be shown in the pull request.`,
-		strings.Join(trailerParameters(passes), ", "), severityRule, severityRubric, previousTrailerRule(open))
+		strings.Join(trailerParameters(passes), ", "), severityRule, severityRubric, previousTrailerRule(open), deployTrailerRule(passes))
 }
 
 // previousTrailerRule documents the "previous" field, and only when the round

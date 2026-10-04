@@ -167,3 +167,46 @@ func TestWriteReviewFailureCarriesCoverage(t *testing.T) {
 		t.Errorf("coverage = %v, want the one entry supplied", rr["coverage"])
 	}
 }
+
+// deploy_requirements travels under its own name and is omitted when empty.
+func TestWriteEmitsDeployRequirementsOnlyWhenThereAreSome(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("RESULT_PATH", filepath.Join(dir, "result.json"))
+
+	read := func() map[string]interface{} {
+		t.Helper()
+		raw, err := os.ReadFile(Path())
+		if err != nil {
+			t.Fatal(err)
+		}
+		var doc map[string]interface{}
+		if err := json.Unmarshal(raw, &doc); err != nil {
+			t.Fatal(err)
+		}
+		return doc["review_result"].(map[string]interface{})
+	}
+
+	if err := Write(Outcome{Status: StatusSuccess, ReviewResult: &ReviewResult{Findings: []ReviewFinding{}}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := read()["deploy_requirements"]; ok {
+		t.Error("an empty deploy_requirements was written")
+	}
+
+	if err := Write(Outcome{Status: StatusSuccess, ReviewResult: &ReviewResult{
+		Findings:           []ReviewFinding{},
+		DeployRequirements: []DeployRequirement{{Variable: "STRIPE_KEY", Service: "api", Environment: "prod", Location: "pay.go:3"}},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	reqs, ok := read()["deploy_requirements"].([]interface{})
+	if !ok || len(reqs) != 1 {
+		t.Fatalf("deploy_requirements = %v", read()["deploy_requirements"])
+	}
+	entry := reqs[0].(map[string]interface{})
+	for _, key := range []string{"variable", "service", "environment", "location"} {
+		if _, ok := entry[key]; !ok {
+			t.Errorf("entry is missing %q: %v", key, entry)
+		}
+	}
+}

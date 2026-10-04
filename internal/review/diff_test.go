@@ -437,7 +437,7 @@ func TestComputeHandlesNonASCIIPaths(t *testing.T) {
 	if !contains(diff.Paths, "0-acme/api/café.md") {
 		t.Errorf("paths = %q, want the unescaped non-ASCII path", diff.Paths)
 	}
-	passes, skipped := SelectPasses([]string{PassSecurity, PassCorrectness}, diff, "")
+	passes, skipped := SelectPasses([]string{PassSecurity, PassCorrectness}, diff, "", "")
 	if len(passes) != 0 {
 		t.Errorf("passes = %v, want none — this is a documentation-only change", passes)
 	}

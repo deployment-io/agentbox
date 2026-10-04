@@ -28,6 +28,8 @@ type (
 	Finding  = result.ReviewFinding
 	Coverage = result.ReviewCoverage
 	Previous = result.PreviousFinding
+
+	DeployRequirement = result.DeployRequirement
 )
 
 // Caps applied AT EXTRACTION, mirroring kit's review_models by hand.
@@ -53,6 +55,11 @@ const (
 	MaxParameterRunes = 60
 	MaxSeverityRunes  = 60
 	MaxStateRunes     = 60
+
+	MaxDeployRequirements            = 20
+	MaxDeployRequirementServiceRunes = 200
+	MaxDeployRequirementEnvRunes     = 200
+	MaxDeployRequirementLocRunes     = 300
 )
 
 // StageReview is the stage every finding from a review run carries. Stamped by
@@ -108,6 +115,15 @@ type parsedTrailer struct {
 	Findings []parsedFinding  `json:"findings"`
 	Coverage []parsedCovered  `json:"coverage"`
 	Previous []parsedPrevious `json:"previous"`
+
+	DeployRequirements []parsedDeployRequirement `json:"deploy_requirements"`
+}
+
+type parsedDeployRequirement struct {
+	Variable    string `json:"variable"`
+	Service     string `json:"service"`
+	Environment string `json:"environment"`
+	Location    string `json:"location"`
 }
 
 type parsedFinding struct {
@@ -159,14 +175,69 @@ const (
 // fallback only when the newer ones are malformed.
 func Extract(text string, open []config.ReviewOpenFinding) (findings []Finding, claimed []Coverage, previous []Previous, stripped string, ok bool) {
 	stripped = Strip(text)
+	parsed, ok := latestTrailer(text)
+	if !ok {
+		return nil, nil, nil, stripped, false
+	}
+	return capFindings(parsed.Findings), capCoverage(parsed.Coverage), capPrevious(parsed.Previous, open), stripped, true
+}
+
+// latestTrailer parses the newest <review> block that is valid JSON.
+func latestTrailer(text string) (parsedTrailer, bool) {
 	for _, b := range blocks(text) {
 		var parsed parsedTrailer
 		if err := json.Unmarshal([]byte(strings.TrimSpace(b.body)), &parsed); err != nil {
 			continue
 		}
-		return capFindings(parsed.Findings), capCoverage(parsed.Coverage), capPrevious(parsed.Previous, open), stripped, true
+		return parsed, true
 	}
-	return nil, nil, nil, stripped, false
+	return parsedTrailer{}, false
+}
+
+// ExtractDeployRequirements returns the deploy requirements of the same block
+// Extract reads. The caller decides whether the deploy pass ran: without it,
+// the field is discarded rather than read.
+func ExtractDeployRequirements(text string) []DeployRequirement {
+	parsed, ok := latestTrailer(text)
+	if !ok {
+		return nil
+	}
+	return capDeployRequirements(parsed.DeployRequirements)
+}
+
+// variableNameRe is a name a process environment can carry. Anything else is
+// not a variable a person could add, and is dropped.
+var variableNameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,127}$`)
+
+// capDeployRequirements keeps the entries a person can act on: a valid
+// variable name and a named service, bounded fields, one entry per
+// (variable, service, environment), at most MaxDeployRequirements.
+func capDeployRequirements(in []parsedDeployRequirement) []DeployRequirement {
+	var out []DeployRequirement
+	seen := map[[3]string]bool{}
+	for _, r := range in {
+		variable := strings.TrimSpace(r.Variable)
+		service := truncateRunes(strings.TrimSpace(r.Service), MaxDeployRequirementServiceRunes)
+		if !variableNameRe.MatchString(variable) || service == "" {
+			continue
+		}
+		environment := truncateRunes(strings.TrimSpace(r.Environment), MaxDeployRequirementEnvRunes)
+		key := [3]string{variable, service, environment}
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, DeployRequirement{
+			Variable:    variable,
+			Service:     service,
+			Environment: environment,
+			Location:    truncateRunes(strings.TrimSpace(r.Location), MaxDeployRequirementLocRunes),
+		})
+		if len(out) == MaxDeployRequirements {
+			break
+		}
+	}
+	return out
 }
 
 // capPrevious bounds the status list to the findings that were actually given:

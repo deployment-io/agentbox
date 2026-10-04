@@ -51,6 +51,7 @@ func severityPlaces() []struct {
 		{"the security brief", passBriefs[PassSecurity]},
 		{"the correctness brief", passBriefs[PassCorrectness]},
 		{"the spec brief", passBriefs[PassSpec]},
+		{"the deploy brief", passBriefs[PassDeploy]},
 		{"the trailer rules", reviewTrailerInstruction([]string{PassSecurity, PassCorrectness}, nil)},
 	}
 }

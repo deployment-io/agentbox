@@ -45,7 +45,7 @@ func TestSelectPassesCostGate(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			diff := Diff{Paths: tc.paths}
-			passes, skipped := SelectPasses(requested, diff, "")
+			passes, skipped := SelectPasses(requested, diff, "", "")
 			if !equalStrings(passes, tc.wantPasses) {
 				t.Errorf("passes = %v, want %v", passes, tc.wantPasses)
 			}
@@ -64,7 +64,7 @@ func TestSelectPassesCostGate(t *testing.T) {
 // An empty diff is its own reason, distinct from documentation-only: the PR
 // body says which, and the two mean different things to a reader.
 func TestSelectPassesSkipsEverythingForAnEmptyDiff(t *testing.T) {
-	passes, skipped := SelectPasses(requested, Diff{}, "")
+	passes, skipped := SelectPasses(requested, Diff{}, "", "")
 	if len(passes) != 0 {
 		t.Errorf("passes = %v, want none", passes)
 	}
@@ -181,7 +181,7 @@ func TestSelectPassesGatesTheSpecPassOnItsOwnTerms(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			passes, skipped := SelectPasses(all, Diff{Paths: tc.paths}, tc.spec)
+			passes, skipped := SelectPasses(all, Diff{Paths: tc.paths}, tc.spec, "")
 			if !equalStrings(passes, tc.wantPasses) {
 				t.Errorf("passes = %v, want %v", passes, tc.wantPasses)
 			}

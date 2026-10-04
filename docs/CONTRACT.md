@@ -145,7 +145,7 @@ the prompt is exactly what it is without the variable.
 |---|---|
 | `AGENT_MODE` | `batch` (default), `interactive` or `review`. Any other value is rejected at startup. |
 | `REVIEW_SPEC` | What the change is meant to achieve — JSON of the task spec, or the prose description when there is no structured spec. Passed into the prompt verbatim; agentbox does not parse it. Optional: without it the change is judged on its own terms and the `spec` pass is skipped (`no spec for this change`). |
-| `REVIEW_PASSES` | Comma-separated focused passes to run, e.g. `security,correctness,spec`. Order is honoured. The passes this image can run are `security`, `correctness` and `spec` (spec conformance: does the change do what `REVIEW_SPEC` asks — its acceptance criteria, its goal, and nothing out of scope or unrequested; reported under the parameter `spec conformance`). A name this image cannot run is dropped with a warning on stderr — every accepted pass must map to a review parameter, or its findings would arrive under a parameter no consumer can read. Empty / unset — or emptied by that filter — means `security,correctness`: `spec` runs only when the runner asks for it, so a runner that predates it gets the same review as before. |
+| `REVIEW_PASSES` | Comma-separated focused passes to run, e.g. `security,correctness,spec`. Order is honoured. The passes this image can run are `security`, `correctness`, `spec` (spec conformance: does the change do what `REVIEW_SPEC` asks — its acceptance criteria, its goal, and nothing out of scope or unrequested; reported under the parameter `spec conformance`) and `deploy` (deploy readiness: will the change deploy and run the way the organization deploys it, judged against `<WORK_DIR>/context/services.json`; reported under the parameter `deploy readiness`). A name this image cannot run is dropped with a warning on stderr — every accepted pass must map to a review parameter, or its findings would arrive under a parameter no consumer can read. Empty / unset — or emptied by that filter — means `security,correctness`: `spec` runs only when the runner asks for it, so a runner that predates it gets the same review as before. |
 | `REVIEW_BASE_COMMITS` | **Required in review mode.** JSON object mapping each repository directory relative to `WORK_DIR` to the commit it was checked out at when the Step began, e.g. `{"0-acme/api":"9fceb02…"}`. Each key must be a relative path that stays inside `WORK_DIR`; `..` and absolute paths are rejected at startup. THE BASELINE IS NOT HEAD: an agent may commit its own work, and diffing against HEAD on that path shows nothing at all. |
 | `REVIEW_ROUND` | 1-based round number within one Step's review. Optional; absent or unreadable means `1`. |
 | `REVIEW_OPEN_FINDINGS` | JSON array of the must-fix findings the PREVIOUS round left open, e.g. `[{"key":"sec-unauthenticated-env-dump-app-js","parameter":"security","severity":"critical","location":"0-acme/api/app.js","what":"GET /env returns all of process.env with no auth"}]`. Optional — absent on round 1, supplied by the runner on rounds 2 and 3. Present but unparseable fails the load, the way a malformed `REVIEW_BASE_COMMITS` does: a round that silently dropped the list could report the change clean while every one of them still stands. An entry with no `key` is dropped, because the key is how the status comes back. |
@@ -166,6 +166,15 @@ diff`) and when `REVIEW_SPEC` is empty or blank (`no spec for this change`). A
 skipped pass is recorded in `coverage` with its reason — never silently
 omitted. When every pass is skipped, no agent is spawned at all and the run
 succeeds with the coverage record alone.
+
+The `deploy` pass follows the documentation-only and lockfile-only rules (in
+that order, after the empty-diff rule), and then needs a deployed service to
+judge against: it skips with `no deployed service found for the changed
+repositories` when `<WORK_DIR>/context/services.json` is missing or unreadable,
+or when none of its rows (one JSON object per line; a malformed line is
+skipped) has a `repo` equal, ignoring case, to a changed repository's name. A
+repository's name is its `REVIEW_BASE_COMMITS` key with the leading
+`<digits>-` removed, so `0-deployment-io/kit` is `deployment-io/kit`.
 
 Findings from the `spec` pass are reported under `spec conformance`, and the
 trailer offers that parameter only when the pass was requested and a spec was
@@ -545,6 +554,9 @@ What a review-mode run found and what it actually looked at. Present only for
   ],
   "previous": [
     {"key": "sec-unauthenticated-env-dump-app-js", "status": "still_present", "note": "the route still returns process.env; only a comment was added"}
+  ],
+  "deploy_requirements": [
+    {"variable": "STRIPE_KEY", "service": "app server production", "environment": "acme production", "location": "0-acme/api/billing.go:12"}
   ]
 }
 ```
@@ -560,10 +572,11 @@ What a review-mode run found and what it actually looked at. Present only for
 | `findings[].pass` | agent | Which focused pass produced it. |
 | `coverage[].parameter` | **agentbox** | Every one of the eight parameters appears exactly once. |
 | `coverage[].state` | **agentbox** | `checked` (a pass ran), `skipped` (a pass stood down — see `reason`) or `not checked` (this release ships no pass for it). Built from what actually ran, not from the agent's claim; the agent's own claim is honoured only when it ADMITS a gap agentbox could not see. |
-| `coverage[].reason` | **agentbox** | Why a pass was skipped — `no changes in the diff`, `documentation-only change`, `lockfile-only change` or `no spec for this change` — or that the diff was truncated. |
+| `coverage[].reason` | **agentbox** | Why a pass was skipped — `no changes in the diff`, `documentation-only change`, `lockfile-only change`, `no spec for this change` or `no deployed service found for the changed repositories` — or that the diff was truncated. |
 | `previous[].key` | agent, filtered by **agentbox** | A key from `REVIEW_OPEN_FINDINGS`, echoed back. An entry naming a key that was not given is dropped at extraction, so a reviewer cannot rename a problem into a different one. |
 | `previous[].status` | agent | `resolved` (the code no longer has the problem) or `still_present`. Case is normalised; any other word is dropped along with its entry, because keeping it would mean guessing, and the wrong guess clears a must-fix nobody fixed. |
 | `previous[].note` | agent | One sentence saying what was checked. Capped at 400 runes. |
+| `deploy_requirements[]` | agent, filtered by **agentbox** | Variables the `deploy` pass found this change newly reads and the service's environment (per `services.json`) does not provide: `variable`, `service` and `environment` as spelled in `services.json`, and the `location` that reads it. Names only, never values. NOT findings — the change is right to need them and only a person can set them, so a consumer must never send them back or count them. Kept only when `variable` matches `^[A-Za-z_][A-Za-z0-9_]{0,127}$` and `service` is non-blank; every field trimmed; `service` and `environment` capped at 200 runes, `location` at 300; duplicates of (variable, service, environment) dropped; at most 20. Omitted when there are none, always when the `deploy` pass did not run (an entry in the block is then discarded), and on any outcome other than `success`. |
 
 **What the severity values mean.** The five words are defined, not left to each
 reviewer's sense of likelihood times impact. Every pass brief and the trailer
