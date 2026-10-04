@@ -228,3 +228,16 @@ func TestDeployRequirementsJSONOmittedWhenEmpty(t *testing.T) {
 		t.Errorf("result carries an empty deploy_requirements: %s", raw)
 	}
 }
+
+func TestDeployBriefEnvFiles(t *testing.T) {
+	brief := passBriefs[PassDeploy]
+	for _, want := range []string{
+		"no variablesFrom means unknown, not empty; envFileNames; buildArgNames",
+		"envFileNames are files deployment.io writes into the service's root directory (rootDirectory, or the repository root when it is empty) before every build and deploy: they are in the build and the image although the repository does not contain them, and the variables of dotenv-style ones are already in variableNames.",
+		"A variable defined in a dotenv file the repository itself commits and the build ships (.env, .env.production and the like, read by dotenv, Vite, Next.js or a similar loader) is also provided — report no requirement for it. Report as findings,",
+	} {
+		if !strings.Contains(brief, want) {
+			t.Errorf("deploy brief is missing %q", want)
+		}
+	}
+}
