@@ -6,6 +6,10 @@ on:
   push:
     branches: [main, 'feature/**']
 
+# Every job only reads the repository; none pushes or writes.
+permissions:
+  contents: read
+
 jobs:
   go:
     name: Go build, vet, test
