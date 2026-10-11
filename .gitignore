@@ -43,3 +43,6 @@ build/
 # Local scratch
 tmp/
 scratch/
+
+# verify-browser Node dependencies (installed in the image, not committed)
+node_modules/

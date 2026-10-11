@@ -29,10 +29,22 @@ The multi-stage Dockerfile compiles the Go binary inside a
 `golang:1.24-bookworm` stage, so you don't need a separate
 `go build` step before Docker build.
 
+The verify-browser image (a separate release, `verify-browser-vX.Y.Z`;
+see [docs/VERIFY_BROWSER.md](docs/VERIFY_BROWSER.md)) has Node tests for
+its script's pure logic and its own Dockerfile:
+
+```bash
+(cd verify-browser && node --test)
+docker build --platform linux/amd64 -f verify-browser/Dockerfile -t verify-browser:dev .
+scripts/verify-browser-smoke.sh   # builds and runs two real checks
+```
+
 ## Package Structure
 
 ```
 cmd/agentbox/          # Entry point (main.go)
+cmd/verify-browser/    # Entrypoint of the separate verify-browser image
+verify-browser/        # Its Node/Playwright script, Dockerfile, Node tests
 internal/
 ├── agent/             # Generic orchestrator (agent-agnostic)
 │   ├── driver.go      #   Driver + OutputParser interfaces, registry

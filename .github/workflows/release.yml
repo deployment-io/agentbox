@@ -2,7 +2,11 @@ name: Release
 
 on:
   push:
-    tags: ['v*.*.*']
+    # `verify-browser-v1.0.0` starts with "v" and so matches `v*.*.*` on its
+    # own; those tags release a different image (release-verify-browser.yml).
+    tags:
+      - 'v*.*.*'
+      - '!verify-browser-v*'
 
 env:
   REGISTRY_DOCKERHUB: docker.io/deploymenthq/agentbox
