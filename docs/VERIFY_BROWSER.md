@@ -140,7 +140,7 @@ then rename) and exits.
 | `page_errors` | Uncaught exceptions in the page. |
 | `console_errors` | `console.error` messages (including Chromium's own "Failed to load resource" lines). |
 | `failed_requests` | Requests **to `allowed_hosts`** that failed or returned a status ≥ 400: `url`, `method`, `status` (0 when there was no response), `failure` (Chromium's error, empty for an HTTP status). Requests to other hosts (analytics, CDNs) are not reported, and neither are requests the browser cancelled (`net::ERR_ABORTED`) because the page navigated away or a later navigation in the same frame superseded them; an abort no navigation explains (the app cancelling its own request, an iframe load nothing replaced) is reported. |
-| `blocked_navigations` | Main-frame navigations — link clicks, redirects, gotos — to a host outside `allowed_hosts`, and new windows (`window.open` without a target or with one naming no frame, links and forms with a target). `window.open(url, '_self')` (or `_top`, `_parent`, an iframe's name) navigates in place and is only blocked when `url` is outside `allowed_hosts`. Each blocked navigation makes the step running at the time fail; one that happens after its step finished (a timer it set, while a later step or the assertions run) fails every step that ran on the page it happened on, since any of them may have scheduled it. |
+| `blocked_navigations` | Main-frame navigations — link clicks, redirects, gotos — to a host outside `allowed_hosts`, and new windows (`window.open` without a target or with one naming no frame, links and forms with a target). `window.open(url, '_self')` (or `_top`, `_parent`, an iframe's name) navigates in place and is only blocked when `url` is outside `allowed_hosts`. Each blocked navigation makes the step running at the time fail; one that happens after its step finished (a timer it set, while a later step or the assertions run) fails every step that ran on the page it happened on, since any of them may have scheduled it. A blocked main-frame navigation leaves Chromium's error page in the tab (`final_url` `chrome-error://chromewebdata/`), so the steps and assertions after it run against that page. |
 | `timings_ms` | `dom_content_loaded` and `load` (Navigation Timing) and `lcp` (Largest Contentful Paint) of the first load, in ms. `lcp` is omitted when the browser reports none. |
 | `dom_text_snippet` | The start of `document.body.innerText` at the end. **Untrusted page content.** |
 
@@ -229,7 +229,7 @@ docker build --platform linux/amd64 -f verify-browser/Dockerfile -t verify-brows
 io=$(mktemp -d)
 cat > "$io/input.json" <<'JSON'
 {"schema_version": 1, "url": "https://example.com/", "allowed_hosts": ["example.com"],
- "steps": [], "assertions": [{"type": "text_visible", "text": "Example Domain"}],
+ "steps": [], "assertions": [{"type": "text_visible", "text": "for use in documentation examples"}],
  "timeout_ms": 45000}
 JSON
 chmod 0777 "$io"   # the runner chowns it to 1000:1000 instead

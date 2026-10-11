@@ -182,11 +182,13 @@ function popupGuard(binding) {
   // opensWindow reports whether a link or form with this target (its own,
   // else <base target>) would open a new window rather than stay in a frame.
   const opensWindow = (target) => {
-    const t = (target ?? document.querySelector('base[target]')?.getAttribute('target') ?? '').toLowerCase();
+    // The keywords are ASCII case-insensitive; a frame name matches exactly.
+    const name = target ?? document.querySelector('base[target]')?.getAttribute('target') ?? '';
+    const t = name.toLowerCase();
     if (t === '' || t === '_self' || t === '_top' || t === '_parent') {
       return false;
     }
-    return t === '_blank' || !document.querySelector(`iframe[name="${CSS.escape(t)}"]`);
+    return t === '_blank' || !document.querySelector(`iframe[name="${CSS.escape(name)}"]`);
   };
   // window.open with _self, _top, _parent or an iframe's name navigates an
   // existing frame (main-frame ones are checked by guardNavigations); with

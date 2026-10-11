@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Builds the verify-browser image and runs it twice with the runner's
 # container settings (docs/VERIFY_BROWSER.md):
-#   1. https://example.com with a text_visible "Example Domain" assertion —
+#   1. https://example.com with a text_visible "for use in documentation examples" assertion —
 #      expect status completed, verdict pass.
 #   2. the same page, clicking its link to iana.org (outside allowed_hosts) —
 #      expect a blocked navigation, a failed step and verdict fail.
@@ -53,7 +53,7 @@ run_check pass '{
   "url": "https://example.com/",
   "allowed_hosts": ["example.com"],
   "steps": [],
-  "assertions": [{"type": "text_visible", "text": "Example Domain"}],
+  "assertions": [{"type": "text_visible", "text": "for use in documentation examples"}],
   "timeout_ms": 45000
 }'
 
@@ -62,7 +62,7 @@ run_check blocked '{
   "url": "https://example.com/",
   "allowed_hosts": ["example.com"],
   "steps": [{"action": "click", "selector": "a[href*=\"iana.org\"]"}],
-  "assertions": [{"type": "text_visible", "text": "Example Domain"}],
+  "assertions": [{"type": "text_visible", "text": "for use in documentation examples"}],
   "timeout_ms": 45000
 }'
 
