@@ -185,7 +185,7 @@ func liftStatus(status, reason string) (string, string) {
 	switch s := normalizeWord(status); s {
 	case result.QAStatusCompleted:
 		return s, reason
-	case result.QAStatusSkipped, result.QAStatusCouldntRun:
+	case result.QAStatusCouldntRun:
 		if reason == "" {
 			reason = reasonNoReason
 		}
@@ -193,6 +193,9 @@ func liftStatus(status, reason string) (string, string) {
 	default:
 		// A status this contract does not define cannot be read as
 		// "completed": that is the claim that the criteria were checked.
+		// "skipped" lands here too: it is the runner's word for a change
+		// with no static site to QA, decided before any QA run is spawned,
+		// so an agent that ran and reports it is reporting something else.
 		return result.QAStatusCouldntRun, truncateRunes(fmt.Sprintf("QA reported an unrecognised status %q", status), MaxReasonRunes)
 	}
 }

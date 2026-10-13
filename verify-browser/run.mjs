@@ -385,8 +385,6 @@ async function waitQuietly(page, state, ms, remaining) {
   }
 }
 
-// readTimings runs in the page: Navigation Timing and the latest Largest
-// Contentful Paint entry from a buffered observer (none in some pages).
 // readOutline runs in the page after the steps and assertions: the raw
 // headings, links, buttons and form fields in document order, each with what
 // buildOutline needs to classify, label and cap it. Visibility is decided
@@ -451,6 +449,8 @@ function readOutline(max) {
   return out;
 }
 
+// readTimings runs in the page: Navigation Timing and the latest Largest
+// Contentful Paint entry from a buffered observer (none in some pages).
 function readTimings() {
   return new Promise((resolve) => {
     const nav = performance.getEntriesByType('navigation')[0];

@@ -442,17 +442,22 @@ function headingLevel(el) {
   return fromTag ? Number(fromTag[1]) : 2;
 }
 
-// resolveHref resolves a link's href against the page URL. Any scheme is kept
-// (a mailto: or tel: href is the link's destination, and the outline only
-// reports it, never follows it) except javascript:, which is script, not a
-// destination.
+// OUTLINE_HREF_SCHEMES are the schemes a link's href is reported with: web
+// pages, plus mailto: and tel:, whose href IS the link's destination (the
+// outline only reports it, never follows it). Anything else — javascript:,
+// data:, blob: and the like — is script or inline content, not a destination,
+// and the link is reported by its text alone.
+const OUTLINE_HREF_SCHEMES = new Set(['http:', 'https:', 'mailto:', 'tel:']);
+
+// resolveHref resolves a link's href against the page URL, keeping it only
+// for OUTLINE_HREF_SCHEMES.
 function resolveHref(href, base) {
   if (String(href ?? '').trim() === '') {
     return '';
   }
   try {
     const u = new URL(String(href), String(base ?? ''));
-    return u.protocol === 'javascript:' ? '' : capString(u.href, CAPS.urlChars);
+    return OUTLINE_HREF_SCHEMES.has(u.protocol) ? capString(u.href, CAPS.urlChars) : '';
   } catch {
     return '';
   }

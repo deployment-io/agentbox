@@ -318,7 +318,7 @@ func TestLiftStatuses(t *testing.T) {
 		"completed":    result.QAStatusCompleted,
 		"Couldnt run":  result.QAStatusCouldntRun,
 		"couldn't-run": result.QAStatusCouldntRun,
-		"skipped":      result.QAStatusSkipped,
+		"skipped":      result.QAStatusCouldntRun, // the runner's word, never the agent's
 		"done":         result.QAStatusCouldntRun,
 		"":             result.QAStatusCouldntRun,
 	} {

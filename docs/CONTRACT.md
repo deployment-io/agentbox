@@ -746,8 +746,8 @@ deployment-runner-kit's `tasks.QAResultDtoV1`.
 
 | Field | Meaning |
 |---|---|
-| `status` | `completed`, `skipped` or `couldnt_run`. `couldnt_run` says the previews or the browser could not be used, never anything about the code. No valid `<qa>` trailer is `couldnt_run` with `status_reason` `QA didn't report a result`; a status the contract does not define is `couldnt_run` too. |
-| `status_reason` | Why, for `skipped` and `couldnt_run` (400 characters). |
+| `status` | `completed` or `couldnt_run` (`skipped` is the consumer's word for a change with nothing to QA, decided before any QA run; a run that reports it is read as `couldnt_run`). `couldnt_run` says the previews or the browser could not be used, never anything about the code. No valid `<qa>` trailer is `couldnt_run` with `status_reason` `QA didn't report a result`; a status the contract does not define is `couldnt_run` too. |
+| `status_reason` | Why, for `couldnt_run` (400 characters). |
 | `no_criteria` | `true` when `QA_SPEC` carried no acceptance criteria and the run did a smoke check; `criteria` is then `[]`. |
 | `criteria` | **agentbox's own list, not the agent's**: every criterion parsed from `QA_SPEC` appears exactly once, in spec order, with agentbox's text. The agent's verdict is attached by `index`; an out-of-range or duplicate index is ignored; a criterion it didn't mention is `not_checked` with reason `QA didn't report on this criterion`; an unknown state is `not_checked`. `reason` is capped at 400 characters. |
 | `findings` | Review's finding shape, capped as review findings are; `stage` is always `qa` and `pass` always `criteria`, stamped by agentbox. Always an array. |

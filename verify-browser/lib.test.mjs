@@ -332,7 +332,7 @@ describe('outline', () => {
     assert.deepEqual(levels, [3, 4, 5, 2, 6]);
   });
 
-  it('resolves hrefs to absolute URLs and drops javascript: ones', () => {
+  it('resolves hrefs to absolute URLs and keeps only web, mailto: and tel: ones', () => {
     const outline = buildOutline(
       [
         { tag: 'a', text: 'Docs', href: '/docs?x=1#top' },
@@ -342,6 +342,8 @@ describe('outline', () => {
         { tag: 'a', text: 'JS', href: 'javascript:void(0)' },
         { tag: 'a', href: 'https://preview-abc.example.net/icon', ariaLabel: '' },
         { tag: 'a', href: 'javascript:void(0)' },
+        { tag: 'a', text: 'Inline', href: 'data:text/html,<h1>x</h1>' },
+        { tag: 'a', text: 'VB', href: 'vbscript:msgbox(1)' },
         { tag: 'a', text: 'no href' },
       ],
       BASE,
@@ -353,6 +355,8 @@ describe('outline', () => {
       { kind: 'link', text: 'Call', href: 'tel:+15551234' },
       { kind: 'link', text: 'JS' },
       { kind: 'link', text: '', href: 'https://preview-abc.example.net/icon' },
+      { kind: 'link', text: 'Inline' },
+      { kind: 'link', text: 'VB' },
     ]);
   });
 
