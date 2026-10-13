@@ -3,6 +3,8 @@ package opencode
 import (
 	"encoding/json"
 	"testing"
+
+	"github.com/deployment-io/agentbox/internal/config"
 )
 
 // The config written here is the only thing that gives opencode a tool
@@ -12,7 +14,7 @@ import (
 // that the function returned.
 
 func TestAutonomousConfigWithoutSocketRegistersNoServer(t *testing.T) {
-	cfg := agentConfig("", false)
+	cfg := agentConfig("", config.ModeBatch)
 
 	if _, ok := cfg["mcp"]; ok {
 		t.Error("mcp block present with no socket; a plain run would point at a dangling bridge")
@@ -25,7 +27,7 @@ func TestAutonomousConfigWithoutSocketRegistersNoServer(t *testing.T) {
 // Whitespace is worth covering because the value arrives from the
 // environment, where config.Load trims it but a direct os.Getenv does not.
 func TestAutonomousConfigTreatsBlankSocketAsAbsent(t *testing.T) {
-	if _, ok := agentConfig("   ", false)["mcp"]; ok {
+	if _, ok := agentConfig("   ", config.ModeBatch)["mcp"]; ok {
 		t.Error("whitespace-only socket registered a server")
 	}
 }
@@ -33,7 +35,7 @@ func TestAutonomousConfigTreatsBlankSocketAsAbsent(t *testing.T) {
 func TestAutonomousConfigRegistersBridgeAsLocalServer(t *testing.T) {
 	const socket = "/run/agentbox/tool-rpc.sock"
 
-	raw, err := json.Marshal(agentConfig(socket, false))
+	raw, err := json.Marshal(agentConfig(socket, config.ModeBatch))
 	if err != nil {
 		t.Fatalf("config is not marshalable: %v", err)
 	}
@@ -87,7 +89,7 @@ func TestAutonomousConfigSetsGenerousDiscoveryTimeout(t *testing.T) {
 			Timeout int `json:"timeout"`
 		} `json:"mcp"`
 	}
-	raw, err := json.Marshal(agentConfig("/run/agentbox/tool-rpc.sock", false))
+	raw, err := json.Marshal(agentConfig("/run/agentbox/tool-rpc.sock", config.ModeBatch))
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}

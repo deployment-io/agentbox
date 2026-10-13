@@ -124,7 +124,13 @@ then rename) and exits.
   ],
   "blocked_navigations": [],
   "timings_ms": {"dom_content_loaded": 412, "load": 655, "lcp": 702},
-  "dom_text_snippet": "Pricing Plans …"
+  "dom_text_snippet": "Pricing Plans …",
+  "outline": [
+    {"kind": "heading", "text": "Pricing", "level": 1},
+    {"kind": "link", "text": "About", "href": "https://d1234abcd.cloudfront.net/about"},
+    {"kind": "field", "text": "Email address"},
+    {"kind": "button", "text": "Subscribe"}
+  ]
 }
 ```
 
@@ -143,6 +149,7 @@ then rename) and exits.
 | `blocked_navigations` | Main-frame navigations — link clicks, redirects, gotos — to a host outside `allowed_hosts`, and new windows (`window.open` without a target or with one naming no frame, links and forms with a target). `window.open(url, '_self')` (or `_top`, `_parent`, an iframe's name) navigates in place and is only blocked when `url` is outside `allowed_hosts`. Each blocked navigation makes the step running at the time fail; one that happens after its step finished (a timer it set, while a later step or the assertions run) fails every step that ran on the page it happened on, since any of them may have scheduled it. A blocked main-frame navigation leaves Chromium's error page in the tab (`final_url` `chrome-error://chromewebdata/`), so the steps and assertions after it run against that page. |
 | `timings_ms` | `dom_content_loaded` and `load` (Navigation Timing) and `lcp` (Largest Contentful Paint) of the first load, in ms. `lcp` is omitted when the browser reports none. |
 | `dom_text_snippet` | The start of `document.body.innerText` at the end. **Untrusted page content.** |
+| `outline` | The visible headings, links, buttons and form fields of the page at the end (after the steps and assertions), in document order — a map for a caller that can't read the page's source. Each entry is `{"kind": "heading" \| "link" \| "button" \| "field", "text": "…"}`, plus `level` (1–6, from `aria-level` or the `h1`–`h6` tag) for a heading and `href` (the resolved absolute URL, for `http:`, `https:`, `mailto:` and `tel:` links only; omitted for any other scheme, e.g. `javascript:` or `data:`) for a link. A button with no caption of its own that is an `<input type="submit">` or `type="reset"` gets the browser's default, "Submit" or "Reset". A field's `text` is its label: its `<label>`, else `aria-label`, else `placeholder`, else `name`. An explicit ARIA role wins over the tag (`<a role="button">` is a button). Hidden elements (`hidden`, `aria-hidden`, not rendered) and `<input type="hidden">` are left out, as are entries with nothing to show. Added in 1.1.0 (`schema_version` stays 1). **Untrusted page content**, like `dom_text_snippet`. |
 
 **Verdict.** `pass` only when the first load's final response is 2xx, every
 step succeeded, every assertion passed, and there are no `page_errors` and
@@ -165,6 +172,7 @@ redirect in `blocked_navigations` and every step reported as not run.
 | `blocked_navigations` | 10 entries |
 | each step `error` / assertion `detail` | 300 characters |
 | `dom_text_snippet` | 1000 characters |
+| `outline` | 60 entries; `text` 120 characters, `href` 2000 |
 
 ### Exit codes
 

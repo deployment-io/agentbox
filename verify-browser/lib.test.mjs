@@ -5,6 +5,7 @@ import {
   LIMITS,
   abortedByNavigation,
   blameBlockedNavigation,
+  buildOutline,
   buildResult,
   capString,
   computeVerdict,
@@ -286,5 +287,151 @@ describe('caps', () => {
   it('errorResult has no verdict', () => {
     const r = errorResult('boom\n  at x');
     assert.deepEqual(r, { schema_version: 1, status: 'error', error: 'boom at x' });
+  });
+});
+
+describe('outline', () => {
+  const BASE = 'https://preview-abc.example.net/pricing/';
+
+  it('classifies headings, links, buttons and fields in document order', () => {
+    const outline = buildOutline(
+      [
+        { tag: 'h1', text: 'Pricing' },
+        { tag: 'a', text: 'About us', href: '../about' },
+        { tag: 'button', text: '  Sign\n up  ' },
+        { tag: 'input', type: 'email', labelText: 'Email address', placeholder: 'you@example.com', name: 'email' },
+        { tag: 'input', type: 'submit', value: 'Subscribe' },
+        { tag: 'select', name: 'plan' },
+        { tag: 'textarea', placeholder: 'Message' },
+        { tag: 'div', text: 'not an outline element' },
+      ],
+      BASE,
+    );
+    assert.deepEqual(outline, [
+      { kind: 'heading', text: 'Pricing', level: 1 },
+      { kind: 'link', text: 'About us', href: 'https://preview-abc.example.net/about' },
+      { kind: 'button', text: 'Sign up' },
+      { kind: 'field', text: 'Email address' },
+      { kind: 'button', text: 'Subscribe' },
+      { kind: 'field', text: 'plan' },
+      { kind: 'field', text: 'Message' },
+    ]);
+  });
+
+  it('takes heading levels from the tag, aria-level, or the ARIA default', () => {
+    const levels = buildOutline(
+      [
+        { tag: 'h3', text: 'a' },
+        { tag: 'h2', text: 'b', level: 4 },
+        { tag: 'div', role: 'heading', text: 'c', level: '5' },
+        { tag: 'div', role: 'heading', text: 'd' },
+        { tag: 'h6', text: 'e', level: 9 },
+      ],
+      BASE,
+    ).map((e) => e.level);
+    assert.deepEqual(levels, [3, 4, 5, 2, 6]);
+  });
+
+  it('resolves hrefs to absolute URLs and keeps only web, mailto: and tel: ones', () => {
+    const outline = buildOutline(
+      [
+        { tag: 'a', text: 'Docs', href: '/docs?x=1#top' },
+        { tag: 'a', text: 'Elsewhere', href: 'https://other.example.com/' },
+        { tag: 'a', text: 'Mail', href: 'mailto:a@example.com' },
+        { tag: 'a', text: 'Call', href: 'tel:+15551234' },
+        { tag: 'a', text: 'JS', href: 'javascript:void(0)' },
+        { tag: 'a', href: 'https://preview-abc.example.net/icon', ariaLabel: '' },
+        { tag: 'a', href: 'javascript:void(0)' },
+        { tag: 'a', text: 'Inline', href: 'data:text/html,<h1>x</h1>' },
+        { tag: 'a', text: 'VB', href: 'vbscript:msgbox(1)' },
+        { tag: 'a', text: 'no href' },
+      ],
+      BASE,
+    );
+    assert.deepEqual(outline, [
+      { kind: 'link', text: 'Docs', href: 'https://preview-abc.example.net/docs?x=1#top' },
+      { kind: 'link', text: 'Elsewhere', href: 'https://other.example.com/' },
+      { kind: 'link', text: 'Mail', href: 'mailto:a@example.com' },
+      { kind: 'link', text: 'Call', href: 'tel:+15551234' },
+      { kind: 'link', text: 'JS' },
+      { kind: 'link', text: '', href: 'https://preview-abc.example.net/icon' },
+      { kind: 'link', text: 'Inline' },
+      { kind: 'link', text: 'VB' },
+    ]);
+  });
+
+  it('labels a field by label, then aria-label, placeholder, name', () => {
+    const texts = buildOutline(
+      [
+        { tag: 'input', labelText: 'Label', ariaLabel: 'Aria', placeholder: 'Ph', name: 'n' },
+        { tag: 'input', labelText: ' ', ariaLabel: 'Aria', placeholder: 'Ph', name: 'n' },
+        { tag: 'input', placeholder: 'Ph', name: 'n' },
+        { tag: 'input', name: 'n' },
+        { tag: 'input' },
+        { tag: 'div', role: 'textbox', ariaLabel: 'Editor' },
+      ],
+      BASE,
+    ).map((e) => e.text);
+    assert.deepEqual(texts, ['Label', 'Aria', 'Ph', 'n', 'Editor']);
+  });
+
+  it('gives value-less submit and reset inputs the browser default caption', () => {
+    const texts = buildOutline(
+      [
+        { tag: 'input', type: 'submit' },
+        { tag: 'input', type: 'reset', value: '' },
+        { tag: 'input', type: 'submit', ariaLabel: 'Send' },
+        { tag: 'input', type: 'button' },
+      ],
+      BASE,
+    ).map((e) => e.text);
+    assert.deepEqual(texts, ['Submit', 'Reset', 'Send']);
+  });
+
+  it('lets a role override the tag', () => {
+    const outline = buildOutline(
+      [
+        { tag: 'a', role: 'button', text: 'Open menu', href: '#' },
+        { tag: 'span', role: 'link', text: 'Fake link' },
+        { tag: 'div', role: 'checkbox', ariaLabel: 'Agree' },
+      ],
+      BASE,
+    );
+    assert.deepEqual(outline, [
+      { kind: 'button', text: 'Open menu' },
+      { kind: 'link', text: 'Fake link' },
+      { kind: 'field', text: 'Agree' },
+    ]);
+  });
+
+  it('excludes hidden elements, hidden inputs and empty entries', () => {
+    const outline = buildOutline(
+      [
+        { tag: 'h1', text: 'Hidden', hidden: true },
+        { tag: 'input', type: 'hidden', name: 'csrf' },
+        { tag: 'button', text: '   ' },
+        { tag: 'h2', text: '' },
+        null,
+        'junk',
+        { tag: 'h2', text: 'Shown' },
+      ],
+      BASE,
+    );
+    assert.deepEqual(outline, [{ kind: 'heading', text: 'Shown', level: 2 }]);
+  });
+
+  it('caps entries, text and href', () => {
+    const raw = Array.from({ length: 100 }, (_, i) => ({ tag: 'a', text: 't'.repeat(500) + i, href: '/' + 'p'.repeat(5000) }));
+    const outline = buildOutline(raw, BASE);
+    assert.equal(outline.length, CAPS.outlineEntries);
+    assert.ok(outline.every((e) => [...e.text].length === CAPS.outlineTextChars));
+    assert.ok(outline.every((e) => [...e.href].length <= CAPS.urlChars));
+  });
+
+  it('is empty without input and is part of buildResult', () => {
+    assert.deepEqual(buildOutline(undefined, BASE), []);
+    const r = buildResult({ httpStatus: 200, finalUrl: BASE, outline: [{ tag: 'h1', text: 'Hi' }] });
+    assert.deepEqual(r.outline, [{ kind: 'heading', text: 'Hi', level: 1 }]);
+    assert.deepEqual(buildResult({ httpStatus: 200 }).outline, []);
   });
 });

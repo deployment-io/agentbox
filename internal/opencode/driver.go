@@ -28,6 +28,7 @@ import (
 
 	"github.com/deployment-io/agentbox/internal/agent"
 	"github.com/deployment-io/agentbox/internal/config"
+	"github.com/deployment-io/agentbox/internal/qa"
 	"github.com/deployment-io/agentbox/internal/review"
 )
 
@@ -216,8 +217,8 @@ func (d *Driver) Ensure(ctx context.Context) error {
 // OPENCODE_CONFIG.
 func writeAutonomousConfig() error {
 	path := filepath.Join(os.TempDir(), "opencode-agentbox.json")
-	reviewing := strings.TrimSpace(os.Getenv("AGENT_MODE")) == config.ModeReview
-	cfg, err := json.Marshal(agentConfig(os.Getenv(config.MCPSocketEnv), reviewing))
+	mode := strings.TrimSpace(os.Getenv("AGENT_MODE"))
+	cfg, err := json.Marshal(agentConfig(os.Getenv(config.MCPSocketEnv), mode))
 	if err != nil {
 		return fmt.Errorf("building opencode config: %w", err)
 	}
@@ -248,14 +249,20 @@ func writeAutonomousConfig() error {
 // this is the guarantee. opencode's read, grep, glob and list tools are
 // unaffected by these two denials, so the reviewer keeps everything it needs to
 // read the change.
-func agentConfig(socket string, reviewing bool) map[string]any {
+//
+// A QA run gets the review's permission set — it checks a change and makes
+// none — AND the mcp block, because the runner's preview tools are its whole
+// job.
+func agentConfig(socket, mode string) map[string]any {
+	reviewing := mode == config.ModeReview
+	readOnly := reviewing || mode == config.ModeQA
 	cfg := map[string]any{
 		"$schema": "https://opencode.ai/config.json",
 		// Headless runs must never block on a permission prompt — the
 		// container sandbox and network allowlist are the real guardrails.
 		"permission": "allow",
 	}
-	if reviewing {
+	if readOnly {
 		// Every class named, none left at opencode's "ask" default: a
 		// headless run has nobody to ask, and an un-answered prompt is a
 		// hang or a silent deny. Reads stay open (the reviewer's whole job
@@ -322,9 +329,9 @@ func (d *Driver) BuildArgs(cfg *config.Config) []string {
 		// without one for this level runs at its default.
 		args = append(args, "--variant", cfg.ReviewEffort)
 	}
-	// A review's prompt travels on stdin (see Stdin). With no message
-	// argument, opencode run takes the piped stdin as the message.
-	if cfg.Mode != config.ModeReview {
+	// A review's and a QA run's prompt travels on stdin (see Stdin). With no
+	// message argument, opencode run takes the piped stdin as the message.
+	if cfg.Mode != config.ModeReview && cfg.Mode != config.ModeQA {
 		args = append(args, cfg.StepPrompt+"\n\n"+trailingInstruction(cfg))
 	}
 	return args
@@ -334,7 +341,7 @@ func (d *Driver) BuildArgs(cfg *config.Config) []string {
 // same way the implement path folds them into the argument. See the claude
 // driver's Stdin for why a review prompt does not go in the args.
 func (d *Driver) Stdin(cfg *config.Config) string {
-	if cfg.Mode == config.ModeReview {
+	if cfg.Mode == config.ModeReview || cfg.Mode == config.ModeQA {
 		return cfg.StepPrompt + "\n\n" + trailingInstruction(cfg)
 	}
 	return ""
@@ -344,8 +351,11 @@ func (d *Driver) Stdin(cfg *config.Config) string {
 // claude driver's copy. In review mode the implementer's instruction is not
 // appended, so no <verify> or <pr_title> trailer is requested or produced.
 func trailingInstruction(cfg *config.Config) string {
-	if cfg.Mode == config.ModeReview {
+	switch cfg.Mode {
+	case config.ModeReview:
 		return review.Instruction(cfg)
+	case config.ModeQA:
+		return qa.Instruction(cfg)
 	}
 	return finalMessageInstruction
 }

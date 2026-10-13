@@ -14,6 +14,7 @@ import (
 
 	"github.com/deployment-io/agentbox/internal/agent"
 	"github.com/deployment-io/agentbox/internal/config"
+	"github.com/deployment-io/agentbox/internal/qa"
 	"github.com/deployment-io/agentbox/internal/review"
 )
 
@@ -102,8 +103,11 @@ Emit <verify> and <pr_title> only here, at the very end.`
 // be a claim about someone else's work and a PR title would be a review
 // naming the change it reviewed.
 func trailingInstruction(cfg *config.Config) string {
-	if cfg.Mode == config.ModeReview {
+	switch cfg.Mode {
+	case config.ModeReview:
 		return review.Instruction(cfg)
+	case config.ModeQA:
+		return qa.Instruction(cfg)
 	}
 	return finalMessageInstruction
 }
@@ -172,15 +176,22 @@ func (d *Driver) Binary() string {
 // On verified read-only mounts the allowlist's Bash patterns widen to a plain
 // Bash so the reviewer can run the build and tests; Edit, Write, NotebookEdit
 // and MCP stay absent either way. reviewAllowedTools carries the reasoning.
+//
+// A QA run is held to an allowlist too, but the opposite way round: the
+// runner's preview tools are its whole job, so --mcp-config IS wired, and the
+// allowlist is qaAllowedTools — Read, Grep and Glob for the deploy facts plus
+// the three preview tools, and no Bash, Write or Edit.
 func (d *Driver) BuildArgs(cfg *config.Config) []string {
 	reviewing := cfg.Mode == config.ModeReview
+	qaing := cfg.Mode == config.ModeQA
+	allowlisted := reviewing || qaing
 
 	// Claude Code rejects --output-format=stream-json + -p without --verbose.
 	//
-	// A review's prompt travels on stdin (see Stdin), so -p is left bare:
-	// with no positional prompt, claude -p reads the prompt from stdin.
+	// A review's and a QA run's prompt travels on stdin (see Stdin), so -p is
+	// left bare: with no positional prompt, claude -p reads it from stdin.
 	args := []string{"-p"}
-	if !reviewing {
+	if !allowlisted {
 		args = append(args, cfg.StepPrompt)
 	}
 	args = append(args,
@@ -188,7 +199,7 @@ func (d *Driver) BuildArgs(cfg *config.Config) []string {
 		"--output-format", "stream-json",
 		"--verbose",
 	)
-	if !reviewing {
+	if !allowlisted {
 		args = append(args, "--dangerously-skip-permissions")
 	}
 	if cfg.MaxTurns != "" {
@@ -201,7 +212,8 @@ func (d *Driver) BuildArgs(cfg *config.Config) []string {
 		// Point Claude Code's MCP client at the runner's tool socket via the
 		// `agentbox mcp-bridge` stdio bridge. --dangerously-skip-permissions
 		// (set above) also auto-allows these tools, so the agent invokes them
-		// without a permission prompt.
+		// without a permission prompt; a QA run gets them through its
+		// --allowedTools instead.
 		args = append(args, "--mcp-config", mcpConfigJSON(cfg.MCPSocket))
 	}
 	if reviewing && cfg.ReviewEffort != "" {
@@ -218,7 +230,29 @@ func (d *Driver) BuildArgs(cfg *config.Config) []string {
 		args = append(args, "--allowedTools")
 		args = append(args, reviewAllowedTools(cfg.ReviewReadOnlyMounts)...)
 	}
+	if qaing {
+		// Appended LAST for the same reason.
+		args = append(args, "--allowedTools")
+		args = append(args, qaAllowedTools()...)
+	}
 	return args
+}
+
+// mcpServerName is the name the runner's tool channel is registered under in
+// --mcp-config; Claude Code exposes its tools as mcp__<server>__<tool>.
+const mcpServerName = "deployment-io"
+
+// qaAllowedTools is the allowlist a QA run is held to: Read, Grep and Glob
+// (the deploy facts under /work/context are all a QA run can read) and the
+// runner's three preview tools. No Bash, Write, Edit or NotebookEdit — QA
+// checks a change and makes none, and without --dangerously-skip-permissions
+// a tool not listed here is denied outright.
+func qaAllowedTools() []string {
+	out := []string{"Read", "Grep", "Glob"}
+	for _, tool := range qa.Tools {
+		out = append(out, "mcp__"+mcpServerName+"__"+tool)
+	}
+	return out
 }
 
 // mcpConfigJSON builds the inline --mcp-config value that registers the runner's
@@ -238,8 +272,8 @@ func mcpConfigJSON(socket string) string {
 		quoted[i] = fmt.Sprintf("%q", arg)
 	}
 	return fmt.Sprintf(
-		`{"mcpServers":{"deployment-io":{"command":%q,"args":[%s]}}}`,
-		command, strings.Join(quoted, ","),
+		`{"mcpServers":{%q:{"command":%q,"args":[%s]}}}`,
+		mcpServerName, command, strings.Join(quoted, ","),
 	)
 }
 
@@ -249,7 +283,7 @@ func mcpConfigJSON(socket string) string {
 // prompt in the args: that path is exercised by every Task today and its
 // prompt is a description, not an index.
 func (d *Driver) Stdin(cfg *config.Config) string {
-	if cfg.Mode == config.ModeReview {
+	if cfg.Mode == config.ModeReview || cfg.Mode == config.ModeQA {
 		return cfg.StepPrompt
 	}
 	return ""

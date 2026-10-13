@@ -44,6 +44,18 @@ const (
 	// directory out of the work dir before the round), so the guarantee
 	// does not rest on restraint here.
 	ModeReview = "review"
+	// ModeQA checks a Task's acceptance criteria against live static-site
+	// previews in a real browser, through the runner's preview tools over
+	// MCP, and reports the outcome as a <qa> trailer. One agent run, no
+	// STEP_PROMPT: internal/qa builds the prompt from QA_SPEC and
+	// QA_REPOSITORIES.
+	//
+	// A QA run is BLIND. It is given no diff, no implementer summary and no
+	// repository — during the stages the change is uncommitted in the working
+	// tree, so any repository access would show it through git. Its WORK_DIR
+	// holds only the read-only /work/context; it deploys previews by
+	// repository name and the runner builds them from its own hidden copy.
+	ModeQA = "qa"
 )
 
 // Config captures the validated inputs for one agentbox run.
@@ -63,7 +75,7 @@ type Config struct {
 	// never preempts it.
 	TokenBudget int
 
-	// Mode is batch (default), interactive or review — see the Mode*
+	// Mode is batch (default), interactive, review or qa — see the Mode*
 	// constants. From AGENT_MODE.
 	Mode string
 
@@ -167,6 +179,20 @@ type Config struct {
 	// still runs, at the default effort.
 	ReviewEffort string
 
+	// QASpec is what a QA run checks the previews against: the same text the
+	// runner stamps as the review spec — the Task's spec JSON or its
+	// description, possibly prefixed with re-run instructions. internal/qa
+	// finds the acceptance criteria in it. From QA_SPEC, qa mode only;
+	// optional (no criteria means a smoke check).
+	QASpec string
+
+	// QARepositories are the repository directories (relative to /work, e.g.
+	// "0-acme/website") a QA run deploys previews of. From the comma-separated
+	// QA_REPOSITORIES, qa mode only; required. They are names for the runner's
+	// deploy_static_site_preview tool — the repositories themselves are not
+	// in a QA run's WORK_DIR.
+	QARepositories []string
+
 	// SessionID, when set, is forwarded to the agent as a stable session
 	// identifier (claude --session-id) so the transcript persists on disk
 	// and can be resumed after a container restart. From SESSION_ID.
@@ -243,20 +269,26 @@ func Load() (*Config, error) {
 	}
 
 	switch c.Mode {
-	case ModeBatch, ModeInteractive, ModeReview:
+	case ModeBatch, ModeInteractive, ModeReview, ModeQA:
 	default:
-		return nil, fmt.Errorf("invalid AGENT_MODE %q: must be %q, %q or %q", c.Mode, ModeBatch, ModeInteractive, ModeReview)
+		return nil, fmt.Errorf("invalid AGENT_MODE %q: must be %q, %q, %q or %q", c.Mode, ModeBatch, ModeInteractive, ModeReview, ModeQA)
 	}
 
 	// STEP_PROMPT is the batch-mode work item. Interactive mode receives
-	// user turns over the message pipe, and review mode builds its own
-	// prompt from the diff and the spec, so neither requires it.
+	// user turns over the message pipe, and review and qa mode build their
+	// own prompts, so none of them requires it.
 	if c.Mode == ModeBatch && c.StepPrompt == "" {
 		return nil, fmt.Errorf("STEP_PROMPT is required")
 	}
 
 	if c.Mode == ModeReview {
 		if err := c.loadReviewInputs(); err != nil {
+			return nil, err
+		}
+	}
+
+	if c.Mode == ModeQA {
+		if err := c.loadQAInputs(); err != nil {
 			return nil, err
 		}
 	}
@@ -459,6 +491,40 @@ func (c *Config) loadReviewInputs() error {
 	c.ReviewRound = 1
 	if round, err := strconv.Atoi(strings.TrimSpace(os.Getenv("REVIEW_ROUND"))); err == nil && round > 0 {
 		c.ReviewRound = round
+	}
+	return nil
+}
+
+// loadQAInputs reads and validates the QA_* half of the contract. REVIEW_*
+// vars are not read in qa mode.
+//
+// QA_REPOSITORIES and the MCP socket are required: a QA run with nothing to
+// preview, or without the tools that deploy and drive the previews, cannot
+// check anything, and saying so at load is better than an agent run that
+// reports every criterion "not checked".
+func (c *Config) loadQAInputs() error {
+	c.QASpec = strings.TrimSpace(os.Getenv("QA_SPEC"))
+
+	seen := map[string]bool{}
+	for _, raw := range strings.Split(os.Getenv("QA_REPOSITORIES"), ",") {
+		repo := strings.TrimSpace(raw)
+		if repo == "" || seen[repo] {
+			continue
+		}
+		// The name is handed to the runner's deploy tool as a directory under
+		// /work. One that escapes it ("..", an absolute path) names something
+		// that is not one of this Task's repositories.
+		if !filepath.IsLocal(repo) {
+			return fmt.Errorf("QA_REPOSITORIES entry %q must be a repository directory inside /work", repo)
+		}
+		seen[repo] = true
+		c.QARepositories = append(c.QARepositories, repo)
+	}
+	if len(c.QARepositories) == 0 {
+		return fmt.Errorf("QA_REPOSITORIES is required in %s mode", ModeQA)
+	}
+	if c.MCPSocket == "" {
+		return fmt.Errorf("%s is required in %s mode: QA deploys and checks previews through the runner's tools", MCPSocketEnv, ModeQA)
 	}
 	return nil
 }

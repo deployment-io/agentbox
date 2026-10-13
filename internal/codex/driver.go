@@ -15,6 +15,7 @@ import (
 
 	"github.com/deployment-io/agentbox/internal/agent"
 	"github.com/deployment-io/agentbox/internal/config"
+	"github.com/deployment-io/agentbox/internal/qa"
 	"github.com/deployment-io/agentbox/internal/review"
 )
 
@@ -163,14 +164,21 @@ func (d *Driver) Binary() string {
 // same flags an implement run uses. Without the variable — an older runner —
 // read-only stays: a review that cannot run is safer than one that could
 // write.
+//
+// A QA run uses --sandbox read-only too: it changes nothing and has no shell
+// work to do, so bubblewrap failing in the container costs it no more than
+// shell reads of /work/context (it works from the preview tools' results).
+// Its MCP tools are registered, with approval mode "approve" — see
+// mcpServerArgs.
 func (d *Driver) BuildArgs(cfg *config.Config) []string {
 	reviewing := cfg.Mode == config.ModeReview
+	qaing := cfg.Mode == config.ModeQA
 
 	args := []string{
 		"exec",
 		"--json",
 	}
-	if reviewing && !cfg.ReviewReadOnlyMounts {
+	if (reviewing && !cfg.ReviewReadOnlyMounts) || qaing {
 		args = append(args, "--sandbox", "read-only")
 	} else {
 		args = append(args,
@@ -232,19 +240,14 @@ func (d *Driver) BuildArgs(cfg *config.Config) []string {
 		// has no --mcp-config flag; MCP servers live under mcp_servers.<name> in
 		// its config, which we set with the same -c override mechanism used
 		// above (values parse as JSON). --dangerously-bypass-approvals-and-sandbox
-		// (set above) auto-allows the tools, so no approval prompt.
-		//
-		// NOTE: verify against the pinned codex — if -c overrides don't register
-		// MCP servers, write mcp_servers into ~/.codex/config.toml in Ensure.
-		command, bridgeArgs := agent.BridgeCommand(cfg.MCPSocket)
-		args = append(args,
-			"-c", "mcp_servers.deployment_io.command="+jsonValue(command),
-			"-c", "mcp_servers.deployment_io.args="+jsonList(bridgeArgs),
-		)
+		// (set above) auto-allows the tools, so no approval prompt; a QA run,
+		// which has no bypass, sets an approval mode instead (mcpServerArgs).
+		// The pinned 0.158.0 registers servers from these -c overrides.
+		args = append(args, mcpServerArgs(cfg)...)
 	}
-	// A review's prompt travels on stdin (see Stdin). With no PROMPT
-	// argument, codex exec reads its instructions from stdin.
-	if !reviewing {
+	// A review's and a QA run's prompt travels on stdin (see Stdin). With no
+	// PROMPT argument, codex exec reads its instructions from stdin.
+	if !reviewing && !qaing {
 		args = append(args, cfg.StepPrompt+"\n\n"+trailingInstruction(cfg))
 	}
 	return args
@@ -255,7 +258,7 @@ func (d *Driver) BuildArgs(cfg *config.Config) []string {
 // it does in the argument-borne implement path. See the claude driver's
 // Stdin for why a review prompt does not go in the args.
 func (d *Driver) Stdin(cfg *config.Config) string {
-	if cfg.Mode == config.ModeReview {
+	if cfg.Mode == config.ModeReview || cfg.Mode == config.ModeQA {
 		return cfg.StepPrompt + "\n\n" + trailingInstruction(cfg)
 	}
 	return ""
@@ -265,10 +268,37 @@ func (d *Driver) Stdin(cfg *config.Config) string {
 // claude driver's copy. In review mode the implementer's instruction is not
 // appended, so no <verify> or <pr_title> trailer is requested or produced.
 func trailingInstruction(cfg *config.Config) string {
-	if cfg.Mode == config.ModeReview {
+	switch cfg.Mode {
+	case config.ModeReview:
 		return review.Instruction(cfg)
+	case config.ModeQA:
+		return qa.Instruction(cfg)
 	}
 	return finalMessageInstruction
+}
+
+// mcpServerArgs registers the runner's tool socket as the stdio MCP server
+// mcp_servers.deployment_io.
+//
+// A QA run also sets the server's default_tools_approval_mode to "approve".
+// It runs under --sandbox read-only without
+// --dangerously-bypass-approvals-and-sandbox, where `codex exec` behaves as
+// approval policy "never" — and on the pinned 0.158.0 an MCP tool without
+// read-only annotations then "requires approval, but approval policy is
+// never" and is rejected before it reaches the server (verified end-to-end
+// against the pinned binary with a fake model endpoint and MCP server). With
+// "approve" the tools run without a prompt and the sandbox stays read-only.
+// The implement path needs no such key: the bypass flag auto-allows them.
+func mcpServerArgs(cfg *config.Config) []string {
+	command, bridgeArgs := agent.BridgeCommand(cfg.MCPSocket)
+	args := []string{
+		"-c", "mcp_servers.deployment_io.command=" + jsonValue(command),
+		"-c", "mcp_servers.deployment_io.args=" + jsonList(bridgeArgs),
+	}
+	if cfg.Mode == config.ModeQA {
+		args = append(args, "-c", "mcp_servers.deployment_io.default_tools_approval_mode="+jsonValue("approve"))
+	}
+	return args
 }
 
 // jsonValue renders v as a JSON literal for a `codex -c key=<value>` override

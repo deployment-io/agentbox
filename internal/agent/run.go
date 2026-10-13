@@ -17,6 +17,7 @@ import (
 	"github.com/deployment-io/agentbox/internal/cgroupmem"
 	"github.com/deployment-io/agentbox/internal/config"
 	"github.com/deployment-io/agentbox/internal/progress"
+	"github.com/deployment-io/agentbox/internal/qa"
 	"github.com/deployment-io/agentbox/internal/result"
 	"github.com/deployment-io/agentbox/internal/review"
 	"github.com/deployment-io/agentbox/internal/verify"
@@ -104,6 +105,10 @@ func Run(ctx context.Context, cfg *config.Config, driver Driver) (outcome result
 		// without this a gated-out pass is still named as one the agent may
 		// report against — inviting findings for a pass that never ran.
 		cfg.ReviewPasses = reviewPlan.Passes
+	} else if cfg.Mode == config.ModeQA {
+		// QA is blind: its prompt is the criteria, the repository names and
+		// the rules. No diff, no repository, nothing an implement run wrote.
+		cfg.StepPrompt = qa.Build(cfg)
 	} else {
 		// Steer the agent to write inside the checked-out repo subdirs rather
 		// than the /work root (its cwd). Agent-agnostic; every batch driver
@@ -115,7 +120,11 @@ func Run(ctx context.Context, cfg *config.Config, driver Driver) (outcome result
 	// Snapshot each repository's commit BEFORE the agent can move it. This is
 	// the baseline a failed verify is replayed against — see
 	// recordStartCommits for why HEAD at the end of the run is not one.
-	startCommits := recordStartCommits(cfg.WorkDir)
+	// A QA run has no repositories in its work dir and replays no verify.
+	var startCommits map[string]string
+	if cfg.Mode != config.ModeQA {
+		startCommits = recordStartCommits(cfg.WorkDir)
+	}
 
 	cmd := exec.Command(driver.Binary(), driver.BuildArgs(cfg)...)
 	cmd.Dir = cfg.WorkDir
@@ -190,6 +199,9 @@ func Run(ctx context.Context, cfg *config.Config, driver Driver) (outcome result
 		if cfg.Mode == config.ModeReview {
 			liftReview(&oc, reviewPlan)
 		}
+		if cfg.Mode == config.ModeQA {
+			liftQA(&oc, cfg)
+		}
 		return oc
 	}
 
@@ -254,6 +266,10 @@ func Run(ctx context.Context, cfg *config.Config, driver Driver) (outcome result
 		liftReview(&oc, reviewPlan)
 		return oc
 	}
+	if cfg.Mode == config.ModeQA {
+		liftQA(&oc, cfg)
+		return oc
+	}
 	annotateVerifyBaseline(ctx, cfg, startCommits, &oc)
 	return oc
 }
@@ -306,6 +322,40 @@ func liftReview(oc *result.Outcome, plan review.Plan) {
 	oc.FilesChanged = nil
 	oc.VerifyResult = nil
 	oc.PRTitle = ""
+}
+
+// liftQA moves the agent's <qa> trailer out of its final message and into the
+// outcome, stripping every block from the changes summary and the error on
+// every path, as liftReview does for <review>.
+//
+// A run that did not finish is couldnt_run whatever its trailer said: the
+// status is the claim that the criteria were checked, and agentbox cannot
+// stand behind it for a run that died. What it did report is kept, so a
+// reader can see how far it got.
+func liftQA(oc *result.Outcome, cfg *config.Config) {
+	qaResult, stripped := qa.Lift(cfg, oc.ChangesSummary)
+	oc.ChangesSummary = stripped
+	oc.Error = qa.Strip(oc.Error)
+	if oc.Status != result.StatusSuccess {
+		qaResult.Status = result.QAStatusCouldntRun
+		reason := fmt.Sprintf("the QA run ended as %s before it finished", oc.Status)
+		if oc.Error != "" {
+			reason += ": " + oc.Error
+		}
+		qaResult.StatusReason = truncateQAReason(reason)
+	}
+	oc.QAResult = qaResult
+	// QA changes nothing; clear the implementer's fields as a review does.
+	oc.FilesChanged = nil
+	oc.VerifyResult = nil
+	oc.PRTitle = ""
+}
+
+func truncateQAReason(s string) string {
+	if r := []rune(s); len(r) > qa.MaxReasonRunes {
+		return string(r[:qa.MaxReasonRunes])
+	}
+	return s
 }
 
 // skippedReviewOutcome is the answer when the cost gate stood every pass down:
@@ -429,6 +479,11 @@ var agentboxInputEnv = map[string]bool{
 	// REVIEW_EFFORT reaches the agent as a CLI flag (see each driver's
 	// BuildArgs), not through the environment.
 	"REVIEW_EFFORT": true,
+	// QA-mode inputs, folded into the QA prompt. QA_SPEC is prose or JSON
+	// with embedded quotes and newlines, stripped for the reason STEP_PROMPT
+	// is.
+	"QA_SPEC":         true,
+	"QA_REPOSITORIES": true,
 }
 
 // agentEnvDenylist are env vars removed from every agent process's
@@ -625,7 +680,15 @@ func failureMessage(err error, state ParsedState, stderrText, binary string) str
 		// The agent emitted a result event describing the failure in its
 		// own words — prefer that over the exit status, which fires for
 		// the same run and says nothing useful.
-		return fmt.Sprintf("%s reported error: %s", binary, state.ChangesSummary)
+		// A message that opens with a machine-owned trailer (<review>,
+		// <qa>) keeps its opening tag on a line of its own, so the
+		// trailer's Strip still recognises the block and removes it
+		// rather than leaving raw JSON in the error.
+		sep := " "
+		if strings.HasPrefix(strings.TrimSpace(state.ChangesSummary), "<") {
+			sep = "\n"
+		}
+		return fmt.Sprintf("%s reported error:%s%s", binary, sep, state.ChangesSummary)
 	case state.IsError && state.ErrorSubtype != "":
 		// Classified error with no description — at least name the class
 		// (e.g. error_during_execution) so the subtype isn't lost.
