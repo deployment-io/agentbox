@@ -111,6 +111,10 @@ type Outcome struct {
 	// mode, and for a review that produced no parseable trailer.
 	ReviewResult *ReviewResult `json:"review_result,omitempty"`
 
+	// QAResult is what a qa-mode run concluded. Nil for every other mode;
+	// present on every qa-mode outcome, including failures.
+	QAResult *QAResult `json:"qa_result,omitempty"`
+
 	// ReviewEffort is the reasoning effort a review-mode run asked its agent
 	// for (config.ReviewEffortLevels), or "" for the model's default. Set on
 	// every review-mode outcome agent.Run returns and nil — so omitted — in

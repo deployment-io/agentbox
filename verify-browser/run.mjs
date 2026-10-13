@@ -46,6 +46,9 @@ const ASSERTION_WAIT_MS = 3000;
 const CLOSE_TIMEOUT_MS = 2000;
 const EVALUATE_TIMEOUT_MS = 1500;
 
+// OUTLINE_RAW_MAX bounds how many visible elements readOutline hands back;
+// lib.mjs's buildOutline keeps CAPS.outlineEntries of them.
+const OUTLINE_RAW_MAX = 200;
 const POPUP_BINDING = '__verifyBrowserBlockedPopup';
 
 async function main() {
@@ -110,6 +113,7 @@ function newCollector() {
     blockedNavigations: [],
     timings: {},
     domText: '',
+    outline: [],
     firstLoadError: '',
     blockedCount: 0,
     lastBlocked: '',
@@ -165,6 +169,7 @@ async function checkInBrowser(browser, input, remaining) {
     EVALUATE_TIMEOUT_MS,
     '',
   );
+  c.outline = await withTimeout(page.evaluate(readOutline, OUTLINE_RAW_MAX), EVALUATE_TIMEOUT_MS, []);
   return buildResult(c);
 }
 
@@ -382,6 +387,70 @@ async function waitQuietly(page, state, ms, remaining) {
 
 // readTimings runs in the page: Navigation Timing and the latest Largest
 // Contentful Paint entry from a buffered observer (none in some pages).
+// readOutline runs in the page after the steps and assertions: the raw
+// headings, links, buttons and form fields in document order, each with what
+// buildOutline needs to classify, label and cap it. Visibility is decided
+// here, where layout is known, and passed on as `hidden`.
+function readOutline(max) {
+  const selector = [
+    'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'a', 'button', 'input', 'select', 'textarea',
+    ...['heading', 'link', 'button', 'textbox', 'searchbox', 'combobox', 'listbox', 'checkbox', 'radio', 'switch', 'slider', 'spinbutton'].map(
+      (r) => `[role="${r}"]`,
+    ),
+  ].join(',');
+  const isHidden = (el) => {
+    if (el.closest('[aria-hidden="true"], [hidden]')) {
+      return true;
+    }
+    if (typeof el.checkVisibility === 'function') {
+      return !el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
+    }
+    return el.getClientRects().length === 0;
+  };
+  const text = (el) => (el && typeof el.innerText === 'string' ? el.innerText : '');
+  const labelledBy = (el) =>
+    (el.getAttribute('aria-labelledby') || '')
+      .split(/\s+/)
+      .map((id) => text(id ? document.getElementById(id) : null))
+      .join(' ');
+  const out = [];
+  let visible = 0;
+  let hidden = 0;
+  for (const el of document.querySelectorAll(selector)) {
+    if (visible >= max) {
+      break;
+    }
+    const h = isHidden(el);
+    if (h) {
+      hidden++;
+      if (hidden > max) {
+        continue;
+      }
+    } else {
+      visible++;
+    }
+    const tag = el.tagName.toLowerCase();
+    const rawHref = el.getAttribute('href');
+    out.push({
+      tag,
+      role: el.getAttribute('role') || '',
+      type: el.getAttribute('type') || '',
+      level: el.getAttribute('aria-level') || '',
+      text: tag === 'select' || tag === 'textarea' ? '' : text(el),
+      ariaLabel: el.getAttribute('aria-label') || labelledBy(el),
+      labelText: el.labels && el.labels.length > 0 ? text(el.labels[0]) : '',
+      placeholder: el.getAttribute('placeholder') || '',
+      name: el.getAttribute('name') || '',
+      value: tag === 'input' ? el.getAttribute('value') || '' : '',
+      alt: el.getAttribute('alt') || (el.querySelector && el.querySelector('img[alt]')?.getAttribute('alt')) || '',
+      title: el.getAttribute('title') || '',
+      href: rawHref === null ? '' : typeof el.href === 'string' ? el.href : rawHref,
+      hidden: h,
+    });
+  }
+  return out;
+}
+
 function readTimings() {
   return new Promise((resolve) => {
     const nav = performance.getEntriesByType('navigation')[0];

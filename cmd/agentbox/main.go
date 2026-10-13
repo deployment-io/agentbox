@@ -165,19 +165,31 @@ func runAgent() {
 
 func exitWithFailure(label string, err error) {
 	fmt.Fprintf(os.Stderr, "[agentbox] %s: %v\n", label, err)
-	if os.Getenv("AGENT_MODE") == config.ModeReview {
+	writeFailureResult(label, err)
+	os.Exit(result.ExitExecutionFailure)
+}
+
+// writeFailureResult writes the result.json for a run that failed before the
+// agent ran, in the shape its mode owes the consumer. AGENT_MODE is read from
+// the environment because config may be the thing that failed to load.
+func writeFailureResult(label string, err error) {
+	switch os.Getenv("AGENT_MODE") {
+	case config.ModeReview:
 		// A review run that dies before the agent starts (bad REVIEW_*
 		// input, CLI install failure, proxy failure) still owes the consumer
 		// a review_result: the contract says one is present on every
 		// review-mode outcome, and the runner reads its absence as "no
 		// review happened" rather than "the review failed here, for this
-		// reason". Read AGENT_MODE from the environment because config may
-		// be the thing that failed to load.
+		// reason".
 		_ = result.WriteReviewFailure(err, review.FailedCoverage(label+": "+err.Error()))
-		os.Exit(result.ExitExecutionFailure)
+	case config.ModeQA:
+		// The same for QA: a qa_result saying it couldn't run, and why, so
+		// the consumer never mistakes a QA that died early for one that
+		// never happened. Never a finding — nothing about the code is known.
+		_ = result.WriteQAFailure(err, label+": "+err.Error())
+	default:
+		_ = result.WriteFailure(err, "")
 	}
-	_ = result.WriteFailure(err, "")
-	os.Exit(result.ExitExecutionFailure)
 }
 
 // startProxy starts the CONNECT proxy and exports HTTP(S)_PROXY/NO_PROXY into

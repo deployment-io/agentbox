@@ -54,7 +54,7 @@ func TestBuildArgsKeepsTheImplementerContractInBatchMode(t *testing.T) {
 // and bash are denied; opencode's read / grep / glob tools are untouched, which
 // is everything a reviewer needs.
 func TestAgentConfigDeniesWritesInReviewMode(t *testing.T) {
-	cfg := agentConfig("/run/agentbox/tool-rpc.sock", true)
+	cfg := agentConfig("/run/agentbox/tool-rpc.sock", config.ModeReview)
 
 	perms, ok := cfg["permission"].(map[string]any)
 	if !ok {
@@ -86,7 +86,7 @@ func TestAgentConfigDeniesWritesInReviewMode(t *testing.T) {
 // Batch mode keeps full autonomy — a headless implement run must never block
 // on a permission prompt.
 func TestAgentConfigKeepsBatchModeAutonomous(t *testing.T) {
-	cfg := agentConfig("", false)
+	cfg := agentConfig("", config.ModeBatch)
 	if cfg["permission"] != "allow" {
 		t.Errorf("permission = %v, want \"allow\" for an implement run", cfg["permission"])
 	}

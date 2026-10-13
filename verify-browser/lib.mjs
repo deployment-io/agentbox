@@ -24,6 +24,8 @@ export const CAPS = Object.freeze({
   detailChars: 300,
   urlChars: 2000,
   domTextChars: 1000,
+  outlineEntries: 60,
+  outlineTextChars: 120,
 });
 
 export const ACTIONS = Object.freeze(['goto', 'click', 'fill', 'press', 'wait_for']);
@@ -352,6 +354,7 @@ export function buildResult(c) {
       .map((u) => capString(u, CAPS.urlChars)),
     timings_ms: {},
     dom_text_snippet: capString(String(c.domText ?? '').trim(), CAPS.domTextChars),
+    outline: buildOutline(c.outline, c.finalUrl),
   };
   const t = c.timings ?? {};
   for (const [key, value] of [
@@ -366,6 +369,142 @@ export function buildResult(c) {
   }
   result.verdict = computeVerdict(result);
   return result;
+}
+
+// FIELD_ROLES are ARIA roles that make an element a form field.
+const FIELD_ROLES = new Set(['textbox', 'searchbox', 'combobox', 'listbox', 'checkbox', 'radio', 'switch', 'slider', 'spinbutton']);
+// BUTTON_INPUT_TYPES are <input> types that render as a button.
+const BUTTON_INPUT_TYPES = new Set(['submit', 'button', 'reset', 'image']);
+
+function firstText(...values) {
+  for (const v of values) {
+    const t = oneLine(v);
+    if (t !== '') {
+      return t;
+    }
+  }
+  return '';
+}
+
+// defaultButtonText is the caption a browser draws on an <input type=submit>
+// or <input type=reset> with no value. It is not in innerText either, so
+// without it the outline would drop a real form action.
+function defaultButtonText(el) {
+  if (String(el.tag ?? '').trim().toLowerCase() !== 'input') {
+    return '';
+  }
+  const type = String(el.type ?? '').trim().toLowerCase();
+  return type === 'submit' ? 'Submit' : type === 'reset' ? 'Reset' : '';
+}
+
+// outlineKind classifies one raw element: an explicit role wins over the tag
+// (an <a role="button"> is a button). It returns '' for anything that is not
+// a heading, link, button or field.
+function outlineKind(el) {
+  const role = String(el.role ?? '').trim().toLowerCase();
+  const tag = String(el.tag ?? '').trim().toLowerCase();
+  const type = String(el.type ?? '').trim().toLowerCase();
+  if (role === 'heading' || role === 'link' || role === 'button') {
+    return role;
+  }
+  if (FIELD_ROLES.has(role)) {
+    return 'field';
+  }
+  if (/^h[1-6]$/.test(tag)) {
+    return 'heading';
+  }
+  if (tag === 'a') {
+    return el.href ? 'link' : '';
+  }
+  if (tag === 'button') {
+    return 'button';
+  }
+  if (tag === 'input') {
+    if (type === 'hidden') {
+      return '';
+    }
+    return BUTTON_INPUT_TYPES.has(type) ? 'button' : 'field';
+  }
+  if (tag === 'select' || tag === 'textarea') {
+    return 'field';
+  }
+  return '';
+}
+
+// headingLevel is aria-level when it is 1–6 (it overrides the tag, as in the
+// accessibility tree), else the hN tag's number, else ARIA's default of 2.
+function headingLevel(el) {
+  const aria = Number(el.level);
+  if (Number.isInteger(aria) && aria >= 1 && aria <= 6) {
+    return aria;
+  }
+  const fromTag = /^h([1-6])$/.exec(String(el.tag ?? '').trim().toLowerCase());
+  return fromTag ? Number(fromTag[1]) : 2;
+}
+
+// resolveHref resolves a link's href against the page URL. Any scheme is kept
+// (a mailto: or tel: href is the link's destination, and the outline only
+// reports it, never follows it) except javascript:, which is script, not a
+// destination.
+function resolveHref(href, base) {
+  if (String(href ?? '').trim() === '') {
+    return '';
+  }
+  try {
+    const u = new URL(String(href), String(base ?? ''));
+    return u.protocol === 'javascript:' ? '' : capString(u.href, CAPS.urlChars);
+  } catch {
+    return '';
+  }
+}
+
+// buildOutline turns the raw elements run.mjs collected from the final page
+// (in document order) into the result's outline: visible headings, links,
+// buttons and form fields, each {kind, text} plus level for headings and the
+// resolved href for links. A field's text is its label: a <label>, then
+// aria-label, placeholder, name. Hidden elements, and entries with nothing to
+// show, are dropped; at most CAPS.outlineEntries are kept. Page content is
+// untrusted: this only normalises and caps it.
+export function buildOutline(raw, baseUrl) {
+  const out = [];
+  for (const el of Array.isArray(raw) ? raw : []) {
+    if (out.length >= CAPS.outlineEntries) {
+      break;
+    }
+    if (el === null || typeof el !== 'object' || el.hidden === true) {
+      continue;
+    }
+    const kind = outlineKind(el);
+    let entry;
+    switch (kind) {
+      case 'heading':
+        entry = { kind, text: firstText(el.text, el.ariaLabel), level: headingLevel(el) };
+        break;
+      case 'link':
+        entry = { kind, text: firstText(el.text, el.ariaLabel, el.alt, el.title), href: resolveHref(el.href ?? '', baseUrl) };
+        if (entry.text === '' && entry.href === '') {
+          continue;
+        }
+        break;
+      case 'button':
+        entry = { kind, text: firstText(el.text, el.ariaLabel, el.value, el.alt, el.title, defaultButtonText(el)) };
+        break;
+      case 'field':
+        entry = { kind, text: firstText(el.labelText, el.ariaLabel, el.placeholder, el.name) };
+        break;
+      default:
+        continue;
+    }
+    if (entry.text === '' && kind !== 'link') {
+      continue;
+    }
+    entry.text = capString(entry.text, CAPS.outlineTextChars);
+    if (kind === 'link' && entry.href === '') {
+      delete entry.href;
+    }
+    out.push(entry);
+  }
+  return out;
 }
 
 // errorResult is result.json for a check that could not run.
