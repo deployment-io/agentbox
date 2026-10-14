@@ -20,6 +20,7 @@ type codexFakeIO struct {
 	chunks      []string
 	finals      []string
 	specs       []agent.SpecSnapshot
+	problems    []string
 	suggestions []agent.RepoSuggestion
 	turnEnds    int
 }
@@ -46,6 +47,10 @@ func (f *codexFakeIO) ForwardFinal(m agent.AssistantMessage) error {
 }
 func (f *codexFakeIO) ForwardSpecUpdate(s agent.SpecSnapshot) error {
 	f.specs = append(f.specs, s)
+	return nil
+}
+func (f *codexFakeIO) ForwardSpecProblem(p string) error {
+	f.problems = append(f.problems, p)
 	return nil
 }
 func (f *codexFakeIO) ForwardRepoSuggestion(s agent.RepoSuggestion) error {
@@ -186,8 +191,36 @@ func TestRunTurn_MultipleAgentMessages(t *testing.T) {
 	if len(sink.specs) != 1 || sink.specs[0].Goal != "G" {
 		t.Errorf("specs = %v, want one with goal G", sink.specs)
 	}
+	if len(sink.problems) != 0 {
+		t.Errorf("problems = %q, want none for a valid spec", sink.problems)
+	}
 	if sink.turnEnds != 1 {
 		t.Errorf("turnEnds = %d, want 1 (emitted at turn/completed, after the finals)", sink.turnEnds)
+	}
+}
+
+// TestRunTurn_BrokenSpecReportsProblem: a block that doesn't parse is
+// reported via ForwardSpecProblem (no spec update) and still stripped.
+func TestRunTurn_BrokenSpecReportsProblem(t *testing.T) {
+	specText := "Here is the plan.\n\n```task-spec\n{\"title\":\"T\",\"acceptance_criteria\":[\"<a href=\"#x\">\"]}\n```"
+	lines := strings.Join([]string{
+		notifLine("item/completed", map[string]any{"item": map[string]any{"type": "agentMessage", "id": "b", "text": specText}}),
+		notifLine("turn/completed", map[string]any{"turn": map[string]any{"id": "t", "status": "completed"}}),
+	}, "\n") + "\n"
+
+	sink := &codexFakeIO{}
+	r := newRPCReader(strings.NewReader(lines), io.Discard)
+	if err := r.runTurn(sink); err != nil {
+		t.Fatalf("runTurn: %v", err)
+	}
+	if len(sink.specs) != 0 {
+		t.Errorf("specs = %v, want none", sink.specs)
+	}
+	if len(sink.problems) != 1 || !strings.Contains(sink.problems[0], "line 1, column") {
+		t.Errorf("problems = %q, want one with a position", sink.problems)
+	}
+	if len(sink.finals) != 1 || sink.finals[0] != "Here is the plan." {
+		t.Errorf("finals = %q, want the prose with the block stripped", sink.finals)
 	}
 }
 

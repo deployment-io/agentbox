@@ -80,6 +80,14 @@ type InteractiveSink interface {
 	// message. Called only when the message carried a valid spec block.
 	ForwardSpecUpdate(spec SpecSnapshot) error
 
+	// ForwardSpecProblem reports that an assistant message's newest
+	// task-spec block couldn't be read (invalid JSON or a field of the wrong
+	// type); problem is a one-line description built from the block. Called
+	// from the same place as ForwardSpecUpdate — after it, when one message
+	// yields both an older valid spec and a newer broken block — so the
+	// problem stands.
+	ForwardSpecProblem(problem string) error
+
 	// ForwardRepoSuggestion delivers the repositories the agent suggested
 	// adding to the session. Called only when the message carried a valid
 	// repo-suggestion block; latest wins and a suggestion is never cleared, so
@@ -252,11 +260,17 @@ func RunInteractive(ctx context.Context, cfg *config.Config, driver Driver, iio 
 
 	// The driver owns the wire protocol. It reads stdout (tee'd to the
 	// activity tracker so the no-output watchdog still works) and writes its
-	// protocol to stdin, closing stdin when done sending.
+	// protocol to stdin, closing stdin when done sending. Its IO is wrapped
+	// so a task-spec block the agent broke gets one correction turn
+	// (specrepair.go) whichever driver runs; finish releases a turn end
+	// still held for it when the session ends (deferred, so it runs after
+	// the driver has been drained).
+	repair := newSpecRepairIO(iio)
+	defer repair.finish()
 	sess := &InteractiveSession{
 		Stdin:  stdin,
 		Stdout: io.TeeReader(stdoutPipe, tracker),
-		IO:     iio,
+		IO:     repair,
 		Log:    os.Stdout,
 	}
 	sessCtx, stopSession := context.WithCancel(ctx)

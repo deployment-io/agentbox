@@ -214,6 +214,14 @@ func (f *FSIO) ForwardSpecUpdate(s agent.SpecSnapshot) error {
 	})
 }
 
+// ForwardSpecProblem logs that the agent's newest task-spec block couldn't be
+// read. It writes no output record: the spec-repair wrapper in RunInteractive
+// decides what, if anything, the user sees.
+func (f *FSIO) ForwardSpecProblem(problem string) error {
+	fmt.Fprintf(os.Stderr, "[agentbox] task-spec block unreadable: %s\n", problem)
+	return nil
+}
+
 type repoSuggestionRecord struct {
 	Repositories []suggestedRepoRecord `json:"repositories"`
 }

@@ -323,8 +323,12 @@ func (r *rpcReader) runTurn(out agent.InteractiveSink) error {
 // wasn't already streamed via deltas — and the final. Both blocks are stripped
 // from the display text; a message can carry either, both, or neither.
 func (r *rpcReader) finalizeMessage(out agent.InteractiveSink, text string, streamed bool) {
-	if s, ok := spec.Extract(text); ok {
+	s, ok, problem := spec.Inspect(text)
+	if ok {
 		_ = out.ForwardSpecUpdate(s)
+	}
+	if problem != "" {
+		_ = out.ForwardSpecProblem(problem)
 	}
 	if rs, ok := reposuggestion.Extract(text); ok {
 		_ = out.ForwardRepoSuggestion(rs)

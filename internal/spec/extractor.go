@@ -11,8 +11,12 @@ package spec
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
+	"reflect"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/deployment-io/agentbox/internal/agent"
 )
@@ -92,10 +96,29 @@ type parsedSpec struct {
 // scanned newest-first, so the most recent valid spec wins and an older
 // one is used only as a fallback when newer blocks are malformed.
 func Extract(text string) (agent.SpecSnapshot, bool) {
-	for _, b := range blocks(text) {
+	s, ok, _ := Inspect(text)
+	return s, ok
+}
+
+// Inspect returns what Extract returns plus a problem: a one-line
+// description of why the NEWEST ```task-spec``` block in text can't be
+// read (invalid JSON, or a field of the wrong type), naming the error, its
+// line and column within the block, and an excerpt around it. problem is
+// empty when the newest block parses, when it parses but is content-free
+// (skipped, as in Extract), and when text has no block at all. A newer
+// broken block after an older valid one yields both the older spec and a
+// problem: the spec the agent meant to send is the broken one.
+//
+// The problem is built only from fixed wording and the block's own text,
+// and capped at maxProblemLen characters.
+func Inspect(text string) (spec agent.SpecSnapshot, ok bool, problem string) {
+	for i, b := range blocks(text) {
 		raw := strings.TrimSpace(b.body)
 		var p parsedSpec
 		if err := json.Unmarshal([]byte(raw), &p); err != nil {
+			if i == 0 {
+				problem = describeProblem(b.body, err)
+			}
 			continue
 		}
 		// A content-free block ({} or whitespace) isn't a spec — keep
@@ -115,9 +138,114 @@ func Extract(text string) (agent.SpecSnapshot, bool) {
 			Notes:       p.Notes,
 			Complexity:  p.Complexity,
 			Raw:         raw,
-		}, true
+		}, true, problem
 	}
-	return agent.SpecSnapshot{}, false
+	return agent.SpecSnapshot{}, false, problem
+}
+
+const (
+	// maxProblemLen caps the whole problem string, in characters. It is
+	// quoted back to the agent and may be shown to the user.
+	maxProblemLen = 300
+	// excerptRadius is how many characters of the block are shown on each
+	// side of the error position.
+	excerptRadius = 30
+)
+
+// describeProblem turns an unmarshal error on a block's body into the
+// one-line problem Inspect reports. Line and column are 1-based and count
+// from the first line of JSON inside the block (the line after the
+// opening fence).
+func describeProblem(body string, err error) string {
+	// The body starts with the newline that ends the opening fence's line;
+	// drop it so line 1 is the block's first content line.
+	body = strings.TrimPrefix(body, "\n")
+	lead := len(body) - len(strings.TrimLeft(body, " \t\r\n"))
+	raw := strings.TrimSpace(body)
+
+	var (
+		msg    string
+		offset int64
+	)
+	var syn *json.SyntaxError
+	var typ *json.UnmarshalTypeError
+	switch {
+	case errors.As(err, &syn):
+		msg = syn.Error()
+		offset = syn.Offset - 1 // Offset is just past the offending byte
+	case errors.As(err, &typ):
+		msg = fmt.Sprintf("%q is %s, want %s", typ.Field, article(typ.Value), describeType(typ.Type))
+		offset = typ.Offset - 1 // Offset is just past the offending value
+	default:
+		msg = "invalid JSON"
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > int64(len(raw)) {
+		offset = int64(len(raw))
+	}
+	pos := lead + int(offset)
+
+	before := body[:pos]
+	line := strings.Count(before, "\n") + 1
+	col := utf8.RuneCountInString(before[strings.LastIndex(before, "\n")+1:]) + 1
+
+	out := fmt.Sprintf("%s at line %d, column %d", msg, line, col)
+	if ex := excerpt(raw, int(offset)); ex != "" {
+		out += ", near: " + ex
+	}
+	return capRunes(out, maxProblemLen)
+}
+
+// excerpt returns about 2*excerptRadius characters of raw centred on byte
+// offset pos, on one line, with "…" marking a cut at either end.
+func excerpt(raw string, pos int) string {
+	rs := []rune(raw)
+	at := utf8.RuneCountInString(raw[:pos])
+	start, end := max(at-excerptRadius, 0), min(at+excerptRadius, len(rs))
+	ex := strings.Join(strings.Fields(string(rs[start:end])), " ")
+	if ex == "" {
+		return ""
+	}
+	if start > 0 {
+		ex = "…" + ex
+	}
+	if end < len(rs) {
+		ex += "…"
+	}
+	return ex
+}
+
+// article prefixes a JSON value kind as encoding/json names it ("string",
+// "number", "array", "object", "bool") with "a" / "an".
+func article(kind string) string {
+	switch kind {
+	case "array", "object":
+		return "an " + kind
+	case "bool":
+		return "a boolean"
+	}
+	return "a " + kind
+}
+
+// describeType names the JSON shape a parsedSpec field expects.
+func describeType(t reflect.Type) string {
+	switch t.Kind() {
+	case reflect.Slice:
+		return "an array of " + describeType(t.Elem()) + "s"
+	case reflect.String:
+		return "string"
+	}
+	return t.String()
+}
+
+// capRunes truncates s to at most n characters, ending in "…" when cut.
+func capRunes(s string, n int) string {
+	if utf8.RuneCountInString(s) <= n {
+		return s
+	}
+	return string([]rune(s)[:n-1]) + "…"
 }
 
 // Strip removes all ```task-spec``` blocks from text and trims surrounding

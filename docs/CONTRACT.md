@@ -69,9 +69,36 @@ not yet wired.
 |---|---|---|
 | `.agentbox-input/messages/<name>.json` | consumer → agentbox | one user turn `{"id","content","ts"}`; consumed (deleted) in filename order. Optional `"images"`: `[{"path","mediaType","width","height"}]`, images to attach to that turn — `path` is in-container (e.g. `/work/uploads/a1b2c3-1-shot.png`) and the consumer must write the file **before** the record. agentbox hands each one to the agent with the message (a base64 content block for **claude-code**, a `localImage` input item for **codex**); an image it cannot read is reported in the turn's text instead of dropping the turn. The key is additive — an older agentbox ignores it, and the turn still names the file in its text. |
 | `.agentbox-output/messages/<seq>.json` | agentbox → consumer | assistant output `{"seq","type":"chunk"\|"final"\|"turn_end","text"}`; zero-padded `seq` so lexical order is chronological. A `turn_end` record (no `text`) follows the turn's last `final` — emitted when the agent finishes (or fails) a turn and is back to waiting for input, so the consumer can gate its composer on the boundary. A failed turn (Claude Code result `is_error` / non-`success` subtype) is first forwarded as an ordinary `chunk` + `final` naming the reason (e.g. "The agent reached its turn limit after 26 turns; send a message to continue.", "The agent's turn failed (error_during_execution): …") so the failure is chat-visible, then the `turn_end`. |
-| `.agentbox-output/task-spec.json` | agentbox → consumer | latest extracted task-spec (overwritten): the structured fields plus `raw`. |
+| `.agentbox-output/task-spec.json` | agentbox → consumer | latest extracted task-spec (overwritten): the structured fields plus `raw`. A block that can't be read leaves it unchanged — see **Spec repair** below. |
 | `.agentbox-output/repo-suggestion.json` | agentbox → consumer | latest repository suggestion the agent emitted (overwritten): `{"repositories":[{"name","reason","confidence"}]}`, at most 5 entries, `confidence` one of `high`\|`medium`\|`low`. Display data only — `name` is a lookup key the consumer resolves against its own repository list. Latest wins and the file is never cleared, so a turn that suggests nothing leaves the previous suggestion in place. Written only once the agent emits a block, so a consumer polling for it sees nothing until then. |
 | `.agentbox-output/heartbeat.json` | agentbox → consumer | liveness `{"ts","turns","input_tokens","output_tokens"}` (overwritten ~every 30s). |
+
+**Spec repair.** The agent keeps a fenced ` ```task-spec``` ` JSON block at the
+end of its messages; agentbox parses it into `task-spec.json` and strips it
+from the chat text. When the newest block in a message can't be read (invalid
+JSON, e.g. unescaped double quotes inside a string, or a field of the wrong
+type) agentbox logs one line to the container log and, if no valid block
+follows in the same turn, does not write that turn's `turn_end` yet. Instead it
+sends the agent one **repair turn**: a message naming the problem (the error,
+its line and column within the block, and an excerpt of about 60 characters of
+the block, at most 300 characters in all) and asking it to re-send the complete
+block as valid JSON. The repair turn is never written to the output records and
+never appears as a user message; it runs ahead of any user message that arrived
+meanwhile, and the user turn's `turn_end` is held until the repair turn ends —
+so the consumer keeps showing the agent as working. The agent's reply arrives
+as ordinary `chunk` / `final` records (a second assistant message, with no user
+message between). If the reply carries a valid spec, `task-spec.json` is
+updated and a single `turn_end` follows. If it still doesn't, agentbox writes a
+notice as an ordinary `chunk` + `final` — "The Assistant's spec couldn't be
+read (<problem>), so it isn't shown. Ask the Assistant to re-send the spec." —
+then the `turn_end`. At most one repair turn per user turn: never a loop. A
+repair turn counts against the session's turns and budget like any other; if it
+fails, or the session ends before the repair turn does (the agent exits on its
+budget, crashes, or the session is stopped), the notice and the held `turn_end`
+are still written before agentbox exits. User messages that arrive after the
+problem is seen are held until that turn ends (if a valid block followed in the
+same turn) or until its repair turn has ended. A turn whose spec reads cleanly
+(or carries none) is unaffected.
 
 The session ends when the agent exits (e.g. `MAX_BUDGET_USD` reached), the
 container receives SIGTERM (graceful: stdin is closed, then SIGTERM with a
