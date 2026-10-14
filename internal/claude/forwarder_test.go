@@ -12,6 +12,8 @@ type captureSink struct {
 	chunks      []string
 	finals      []string
 	specs       []agent.SpecSnapshot
+	problems    []string
+	specCalls   []string // "update" / "problem", in call order
 	suggestions []agent.RepoSuggestion
 	turnEnds    int
 }
@@ -26,6 +28,12 @@ func (s *captureSink) ForwardFinal(m agent.AssistantMessage) error {
 }
 func (s *captureSink) ForwardSpecUpdate(sp agent.SpecSnapshot) error {
 	s.specs = append(s.specs, sp)
+	s.specCalls = append(s.specCalls, "update")
+	return nil
+}
+func (s *captureSink) ForwardSpecProblem(p string) error {
+	s.problems = append(s.problems, p)
+	s.specCalls = append(s.specCalls, "problem")
 	return nil
 }
 func (s *captureSink) ForwardRepoSuggestion(rs agent.RepoSuggestion) error {
@@ -83,6 +91,9 @@ func TestForwarder_StripsSpecBlock(t *testing.T) {
 	if len(sink.specs) != 1 {
 		t.Fatalf("expected 1 spec update, got %d", len(sink.specs))
 	}
+	if len(sink.problems) != 0 {
+		t.Errorf("problems = %q, want none for a valid spec", sink.problems)
+	}
 	if sink.specs[0].Goal != "G" {
 		t.Errorf("spec goal = %q, want G", sink.specs[0].Goal)
 	}
@@ -91,6 +102,41 @@ func TestForwarder_StripsSpecBlock(t *testing.T) {
 	}
 	if !strings.Contains(sink.finals[0], "Here is the plan.") {
 		t.Errorf("final should keep prose: %v", sink.finals)
+	}
+}
+
+// A broken task-spec block is reported as a problem rather than skipped
+// silently, and is still stripped from the display text.
+func TestForwarder_BrokenSpecReportsProblem(t *testing.T) {
+	sink := &captureSink{}
+	fwd := newChunkForwarder(sink)
+	text := "Here is the plan.\n\n```task-spec\n{\"title\":\"T\",\"acceptance_criteria\":[\"<a href=\"#x\">\"]}\n```"
+	fwd.handleLine([]byte(assistantLine(text)))
+
+	if len(sink.specs) != 0 {
+		t.Errorf("spec updates = %v, want none", sink.specs)
+	}
+	if len(sink.problems) != 1 || !strings.Contains(sink.problems[0], "line 1, column") {
+		t.Errorf("problems = %q, want one with a position", sink.problems)
+	}
+	if len(sink.finals) != 1 || sink.finals[0] != "Here is the plan." {
+		t.Errorf("finals = %q, want the prose with the block stripped", sink.finals)
+	}
+}
+
+// A message with an older valid block and a newer broken one forwards the
+// spec first, then the problem, so the problem stands.
+func TestForwarder_ValidThenBrokenSpecOrder(t *testing.T) {
+	sink := &captureSink{}
+	fwd := newChunkForwarder(sink)
+	text := "```task-spec\n{\"title\":\"Old\"}\n```\n\nUpdated:\n\n```task-spec\n{\"title\": \"a\"b\"}\n```"
+	fwd.handleLine([]byte(assistantLine(text)))
+
+	if got := strings.Join(sink.specCalls, ","); got != "update,problem" {
+		t.Errorf("spec calls = %s, want update,problem", got)
+	}
+	if len(sink.finals) != 1 || sink.finals[0] != "Updated:" {
+		t.Errorf("finals = %q, want both blocks stripped", sink.finals)
 	}
 }
 

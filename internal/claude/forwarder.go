@@ -148,8 +148,12 @@ func (f *chunkForwarder) handleAssistant(raw json.RawMessage) {
 	streamed := f.streamedThisMsg
 	f.streamedThisMsg = false
 
-	if s, ok := spec.Extract(full); ok {
+	s, ok, problem := spec.Inspect(full)
+	if ok {
 		_ = f.sink.ForwardSpecUpdate(s)
+	}
+	if problem != "" {
+		_ = f.sink.ForwardSpecProblem(problem)
 	}
 	if rs, ok := reposuggestion.Extract(full); ok {
 		_ = f.sink.ForwardRepoSuggestion(rs)
