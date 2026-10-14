@@ -55,7 +55,8 @@ carrying data.
     {"type": "text_visible", "text": "Plans"},
     {"type": "url_path", "path": "/pricing"}
   ],
-  "timeout_ms": 45000
+  "timeout_ms": 45000,
+  "viewport": {"preset": "mobile"}
 }
 ```
 
@@ -67,8 +68,29 @@ carrying data.
 | `steps` | At most 30, run in order after the first page load. |
 | `assertions` | At most 30, checked after the steps against the current page. |
 | `timeout_ms` | 5000–90000. The whole check's budget. |
+| `viewport` | Optional: the window size, `{"preset": "desktop" \| "tablet" \| "mobile"}` or `{"width": W, "height": H}` (see [Viewport](#viewport)). Absent is `desktop`. Added in 1.2.0; earlier images ignore it. |
 
 Every string is at most 2000 characters.
+
+### Viewport
+
+One check uses one window size for its whole run (no resizing, no
+orientation changes).
+
+| Viewport | Size (CSS px) | Emulation |
+|---|---|---|
+| absent, or `{"preset": "desktop"}` | 1280×720 | None: device scale factor 1, no touch, Chromium's desktop user agent (Playwright's default context). |
+| `{"preset": "tablet"}` | 712×1138 | playwright-core's `Galaxy Tab S4` descriptor: device scale factor 2.25, `isMobile`, `hasTouch`, its Android Chrome user agent. |
+| `{"preset": "mobile"}` | 412×839 (on a 412×915 screen) | playwright-core's `Pixel 7` descriptor: device scale factor 2.625, `isMobile`, `hasTouch`, its Android Chrome user agent. |
+| `{"width": W, "height": H}` | W×H; integers, 320 ≤ W ≤ 2560, 480 ≤ H ≤ 1600 | None, as desktop. |
+
+The presets use their descriptor's context options (not its
+`defaultBrowserType`); both are Android Chromium devices, so the user agent
+matches the engine. This is Chromium imitating a device: layout,
+breakpoints, touch and the user agent are right; Safari-only rendering
+differences are not covered. Anything else — an unknown preset, both forms,
+a missing or out-of-range size, a non-integer, any other key — is invalid
+input.
 
 ### Steps
 
@@ -109,6 +131,7 @@ then rename) and exits.
   "verdict": "fail",
   "http_status": 200,
   "final_url": "https://d1234abcd.cloudfront.net/pricing",
+  "viewport": {"width": 412, "height": 839, "preset": "mobile", "mobile": true},
   "steps": [
     {"index": 0, "action": "click", "ok": true, "error": ""},
     {"index": 1, "action": "wait_for", "ok": true, "error": ""}
@@ -141,6 +164,7 @@ then rename) and exits.
 | `verdict` | `pass` or `fail`. `status: "completed"` only. |
 | `http_status` | Status of the first page load's final response (after redirects); `0` when there was none. |
 | `final_url` | The main frame's URL at the end. |
+| `viewport` | The window size the check used, including the desktop default: `width`, `height` (CSS px), `preset` (only when the input named one, or `desktop` when it had no `viewport`), and `mobile` (`true` when a device was emulated). `status: "completed"` only. Added in 1.2.0 (`schema_version` stays 1); a caller that asked for a viewport and gets a completed result without this field is talking to an older image, which ignored the request. |
 | `steps` | One entry per input step: `index`, `action`, `ok`, `error`. |
 | `assertions` | One entry per input assertion: `index`, `type`, `passed`, `detail`. |
 | `page_errors` | Uncaught exceptions in the page. |

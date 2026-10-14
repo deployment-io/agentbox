@@ -19,7 +19,7 @@
 
 import { readFile, writeFile } from 'node:fs/promises';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { chromium } from 'playwright-core';
+import { chromium, devices } from 'playwright-core';
 import {
   CAPS,
   LIMITS,
@@ -32,6 +32,7 @@ import {
   normalizeInput,
   oneLine,
   pushCapped,
+  viewportContextOptions,
 } from './lib.mjs';
 
 // The script finishes this long before timeout_ms (at most), leaving time to
@@ -136,8 +137,13 @@ function newCollector() {
 
 async function checkInBrowser(browser, input, remaining) {
   const c = newCollector();
+  c.viewport = input.viewport;
   const allowed = (url) => isAllowedUrl(url, input.allowedHosts);
-  const context = await browser.newContext({ serviceWorkers: 'block', acceptDownloads: false });
+  const context = await browser.newContext({
+    ...viewportContextOptions(input.viewport, devices),
+    serviceWorkers: 'block',
+    acceptDownloads: false,
+  });
   await context.exposeBinding(POPUP_BINDING, (_source, url) => c.blocked(url));
   await context.addInitScript(popupGuard, POPUP_BINDING);
   let page = null;

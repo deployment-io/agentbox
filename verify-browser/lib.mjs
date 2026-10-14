@@ -28,6 +28,23 @@ export const CAPS = Object.freeze({
   outlineTextChars: 120,
 });
 
+// VIEWPORT_LIMITS bound a custom {width, height} viewport.
+export const VIEWPORT_LIMITS = Object.freeze({
+  minWidth: 320,
+  maxWidth: 2560,
+  minHeight: 480,
+  maxHeight: 1600,
+});
+
+// VIEWPORT_PRESETS are the named window sizes. tablet and mobile are
+// playwright-core's device descriptors (device), whose viewport must be the
+// size given here; desktop is Playwright's default context, no emulation.
+export const VIEWPORT_PRESETS = Object.freeze({
+  desktop: Object.freeze({ width: 1280, height: 720, mobile: false, device: '' }),
+  tablet: Object.freeze({ width: 712, height: 1138, mobile: true, device: 'Galaxy Tab S4' }),
+  mobile: Object.freeze({ width: 412, height: 839, mobile: true, device: 'Pixel 7' }),
+});
+
 export const ACTIONS = Object.freeze(['goto', 'click', 'fill', 'press', 'wait_for']);
 export const ASSERTION_TYPES = Object.freeze(['text_visible', 'text_absent', 'selector_visible', 'url_path']);
 
@@ -160,6 +177,84 @@ function normalizeAssertion(a, i) {
   }
 }
 
+// normalizeViewport validates input.json's optional viewport: absent is the
+// desktop preset; else exactly {preset} or {width, height}. It returns
+// {preset, width, height, mobile, device}, preset and device '' for a custom
+// size.
+export function normalizeViewport(raw) {
+  if (raw === undefined) {
+    return { preset: 'desktop', ...VIEWPORT_PRESETS.desktop };
+  }
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new Error('viewport must be an object: {"preset": ...} or {"width": ..., "height": ...}');
+  }
+  const keys = Object.keys(raw).sort().join(',');
+  if (keys === 'preset') {
+    const p = raw.preset;
+    if (typeof p !== 'string' || !Object.hasOwn(VIEWPORT_PRESETS, p)) {
+      throw new Error(`viewport.preset must be desktop, tablet or mobile, got ${JSON.stringify(p)}`);
+    }
+    return { preset: p, ...VIEWPORT_PRESETS[p] };
+  }
+  if (keys === 'height,width') {
+    const L = VIEWPORT_LIMITS;
+    for (const [key, min, max] of [
+      ['width', L.minWidth, L.maxWidth],
+      ['height', L.minHeight, L.maxHeight],
+    ]) {
+      const v = raw[key];
+      if (!Number.isInteger(v) || v < min || v > max) {
+        throw new Error(`viewport.${key} must be an integer between ${min} and ${max}, got ${JSON.stringify(v)}`);
+      }
+    }
+    return { preset: '', width: raw.width, height: raw.height, mobile: false, device: '' };
+  }
+  if (Object.hasOwn(raw, 'preset') && (Object.hasOwn(raw, 'width') || Object.hasOwn(raw, 'height'))) {
+    throw new Error('viewport takes either preset or width and height, not both');
+  }
+  throw new Error('viewport must be {"preset": ...} or {"width": ..., "height": ...}');
+}
+
+// viewportContextOptions returns the browser context options for a
+// normalised viewport. devices is playwright-core's descriptor map; a preset
+// uses its descriptor's context options (not defaultBrowserType), and throws
+// when the descriptor's viewport is not the documented size.
+export function viewportContextOptions(viewport, devices) {
+  if (viewport.device === '') {
+    return {
+      viewport: { width: viewport.width, height: viewport.height },
+      deviceScaleFactor: 1,
+      isMobile: false,
+      hasTouch: false,
+    };
+  }
+  const d = devices?.[viewport.device];
+  if (!d) {
+    throw new Error(`playwright-core has no "${viewport.device}" device descriptor`);
+  }
+  if (d.viewport?.width !== viewport.width || d.viewport?.height !== viewport.height) {
+    throw new Error(
+      `playwright-core's "${viewport.device}" viewport is ${d.viewport?.width}×${d.viewport?.height}, ` +
+        `not ${viewport.width}×${viewport.height}`,
+    );
+  }
+  // eslint-disable-next-line no-unused-vars
+  const { defaultBrowserType, ...options } = d;
+  return options;
+}
+
+// resultViewport is the result's viewport: the size used, the preset when
+// there was one, and whether the browser emulated a mobile device.
+export function resultViewport(viewport) {
+  const v = viewport ?? normalizeViewport(undefined);
+  const out = { width: v.width, height: v.height };
+  if (v.preset) {
+    out.preset = v.preset;
+  }
+  out.mobile = v.mobile === true;
+  return out;
+}
+
 // normalizeInput validates input.json (the Go entrypoint has already checked
 // it; this is the script's own guard) and returns a clean copy. It throws an
 // Error whose message says what is wrong.
@@ -201,6 +296,7 @@ export function normalizeInput(raw) {
     steps: steps.map((s, i) => normalizeStep(s, i, allowedHosts)),
     assertions: assertions.map((a, i) => normalizeAssertion(a, i)),
     timeoutMs: t,
+    viewport: normalizeViewport(raw.viewport),
   };
 }
 
@@ -334,6 +430,7 @@ export function buildResult(c) {
     verdict: 'fail',
     http_status: Number.isInteger(c.httpStatus) ? c.httpStatus : 0,
     final_url: capString(c.finalUrl ?? '', CAPS.urlChars),
+    viewport: resultViewport(c.viewport),
     steps: (c.steps ?? []).map((s, i) => ({
       index: i,
       action: s.action,
