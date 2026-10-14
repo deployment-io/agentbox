@@ -147,6 +147,45 @@ func TestParseInputAcceptsLimits(t *testing.T) {
 	}
 }
 
+func TestParseInputViewport(t *testing.T) {
+	good := []any{
+		map[string]any{"preset": "desktop"},
+		map[string]any{"preset": "tablet"},
+		map[string]any{"preset": "mobile"},
+		map[string]any{"width": 320, "height": 480},
+		map[string]any{"width": 2560, "height": 1600},
+		map[string]any{"width": 1279.0, "height": 720},
+	}
+	for _, v := range good {
+		if _, err := parseInput(mutate(t, func(m map[string]any) { m["viewport"] = v })); err != nil {
+			t.Errorf("viewport %v: %v", v, err)
+		}
+	}
+	bad := map[string]any{
+		"width 319":      map[string]any{"width": 319, "height": 600},
+		"width 2561":     map[string]any{"width": 2561, "height": 600},
+		"height 479":     map[string]any{"width": 800, "height": 479},
+		"height 1601":    map[string]any{"width": 800, "height": 1601},
+		"fractional":     map[string]any{"width": 800.5, "height": 600},
+		"string height":  map[string]any{"width": 800, "height": "600"},
+		"unknown preset": map[string]any{"preset": "watch"},
+		"both forms":     map[string]any{"preset": "mobile", "width": 800, "height": 600},
+		"width alone":    map[string]any{"width": 800},
+		"unknown key":    map[string]any{"preset": "mobile", "orientation": "landscape"},
+		"empty object":   map[string]any{},
+		"null":           nil,
+		"not an object":  "mobile",
+	}
+	for name, v := range bad {
+		t.Run(name, func(t *testing.T) {
+			_, err := parseInput(mutate(t, func(m map[string]any) { m["viewport"] = v }))
+			if err == nil || !strings.Contains(err.Error(), "viewport") {
+				t.Fatalf("parseInput: %v, want an error naming viewport", err)
+			}
+		})
+	}
+}
+
 // harness is an /io directory and a fake browser script run by sh.
 type harness struct {
 	t   *testing.T

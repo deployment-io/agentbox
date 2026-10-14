@@ -13,7 +13,10 @@ import {
   firstPartyFailure,
   isAllowedUrl,
   normalizeInput,
+  normalizeViewport,
   pushCapped,
+  resultViewport,
+  viewportContextOptions,
 } from './lib.mjs';
 
 const HOSTS = ['preview-abc.example.net'];
@@ -112,6 +115,140 @@ describe('normalizeInput', () => {
       assert.throws(() => normalizeInput(validInput(overrides)));
     });
   }
+});
+
+describe('viewport', () => {
+  // DEVICES mirrors playwright-core 1.64.0's descriptors for the presets.
+  const DEVICES = {
+    'Pixel 7': {
+      userAgent: 'Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.8078.4 Mobile Safari/537.36',
+      viewport: { width: 412, height: 839 },
+      screen: { width: 412, height: 915 },
+      deviceScaleFactor: 2.625,
+      isMobile: true,
+      hasTouch: true,
+      defaultBrowserType: 'chromium',
+    },
+    'Galaxy Tab S4': {
+      userAgent: 'Mozilla/5.0 (Linux; Android 8.1.0; SM-T837A) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.8078.4 Safari/537.36',
+      viewport: { width: 712, height: 1138 },
+      deviceScaleFactor: 2.25,
+      isMobile: true,
+      hasTouch: true,
+      defaultBrowserType: 'chromium',
+    },
+  };
+  const options = (raw) => viewportContextOptions(normalizeViewport(raw), DEVICES);
+
+  it('defaults to desktop when absent, leaving the rest of the input as it was', () => {
+    const got = normalizeInput(validInput());
+    assert.deepEqual(got.viewport, { preset: 'desktop', width: 1280, height: 720, mobile: false, device: '' });
+    const { viewport, ...rest } = got;
+    assert.deepEqual(rest, {
+      url: 'https://preview-abc.example.net/',
+      allowedHosts: HOSTS,
+      steps: [],
+      assertions: [],
+      timeoutMs: 30000,
+    });
+    assert.deepEqual(options(undefined), {
+      viewport: { width: 1280, height: 720 },
+      deviceScaleFactor: 1,
+      isMobile: false,
+      hasTouch: false,
+    });
+  });
+  it('desktop preset is 1280×720 without emulation', () => {
+    assert.deepEqual(options({ preset: 'desktop' }), options(undefined));
+  });
+  it('mobile preset is the Pixel 7 descriptor', () => {
+    const o = options({ preset: 'mobile' });
+    assert.deepEqual(o.viewport, { width: 412, height: 839 });
+    assert.deepEqual(o.screen, { width: 412, height: 915 });
+    assert.equal(o.deviceScaleFactor, 2.625);
+    assert.equal(o.isMobile, true);
+    assert.equal(o.hasTouch, true);
+    assert.match(o.userAgent, /Android .*Pixel 7.*Chrome/);
+    assert.equal('defaultBrowserType' in o, false);
+  });
+  it('tablet preset is the Galaxy Tab S4 descriptor', () => {
+    const o = options({ preset: 'tablet' });
+    assert.deepEqual(o.viewport, { width: 712, height: 1138 });
+    assert.equal(o.deviceScaleFactor, 2.25);
+    assert.equal(o.isMobile, true);
+    assert.equal(o.hasTouch, true);
+    assert.match(o.userAgent, /Android .*SM-T837A.*Chrome/);
+    assert.equal('defaultBrowserType' in o, false);
+  });
+  it('a preset whose descriptor changed size is an error', () => {
+    const changed = { ...DEVICES, 'Pixel 7': { ...DEVICES['Pixel 7'], viewport: { width: 400, height: 800 } } };
+    assert.throws(() => viewportContextOptions(normalizeViewport({ preset: 'mobile' }), changed), /Pixel 7/);
+    assert.throws(() => viewportContextOptions(normalizeViewport({ preset: 'tablet' }), {}), /Galaxy Tab S4/);
+  });
+  it('a custom size has no emulation', () => {
+    assert.deepEqual(options({ width: 1279, height: 800 }), {
+      viewport: { width: 1279, height: 800 },
+      deviceScaleFactor: 1,
+      isMobile: false,
+      hasTouch: false,
+    });
+  });
+  for (const [w, h] of [
+    [320, 480],
+    [2560, 1600],
+    [320, 1600],
+    [2560, 480],
+  ]) {
+    it(`accepts ${w}×${h}`, () => {
+      assert.deepEqual(normalizeViewport({ width: w, height: h }), { preset: '', width: w, height: h, mobile: false, device: '' });
+    });
+  }
+  const bad = [
+    ['width 319', { width: 319, height: 600 }, /viewport\.width/],
+    ['width 2561', { width: 2561, height: 600 }, /viewport\.width/],
+    ['height 479', { width: 800, height: 479 }, /viewport\.height/],
+    ['height 1601', { width: 800, height: 1601 }, /viewport\.height/],
+    ['a fractional width', { width: 800.5, height: 600 }, /viewport\.width/],
+    ['a string height', { width: 800, height: '600' }, /viewport\.height/],
+    ['an unknown preset', { preset: 'watch' }, /viewport\.preset/],
+    ['a non-string preset', { preset: 1 }, /viewport\.preset/],
+    ['both forms', { preset: 'mobile', width: 800, height: 600 }, /not both/],
+    ['preset and width', { preset: 'mobile', width: 800 }, /not both/],
+    ['width alone', { width: 800 }, /viewport/],
+    ['an unknown key', { preset: 'mobile', orientation: 'landscape' }, /viewport/],
+    ['an empty object', {}, /viewport/],
+    ['null', null, /viewport/],
+    ['a string', 'mobile', /viewport/],
+    ['an array', [412, 839], /viewport/],
+  ];
+  for (const [name, viewport, want] of bad) {
+    it(`rejects ${name}`, () => {
+      assert.throws(() => normalizeInput(validInput({ viewport })), want);
+    });
+  }
+  it('the result reports a preset with its size', () => {
+    assert.deepEqual(resultViewport(normalizeViewport({ preset: 'mobile' })), {
+      width: 412,
+      height: 839,
+      preset: 'mobile',
+      mobile: true,
+    });
+    assert.deepEqual(resultViewport(normalizeViewport({ preset: 'tablet' })), {
+      width: 712,
+      height: 1138,
+      preset: 'tablet',
+      mobile: true,
+    });
+  });
+  it('the result reports a custom size without a preset', () => {
+    const r = buildResult({ httpStatus: 200, viewport: normalizeViewport({ width: 1279, height: 720 }) });
+    assert.deepEqual(r.viewport, { width: 1279, height: 720, mobile: false });
+  });
+  it('the result reports the desktop default', () => {
+    const want = { width: 1280, height: 720, preset: 'desktop', mobile: false };
+    assert.deepEqual(buildResult({ httpStatus: 200, viewport: normalizeInput(validInput()).viewport }).viewport, want);
+    assert.deepEqual(buildResult({ httpStatus: 200 }).viewport, want);
+  });
 });
 
 describe('computeVerdict', () => {

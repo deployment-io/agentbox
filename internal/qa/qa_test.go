@@ -136,6 +136,27 @@ func TestBuildIncludesCriteriaRepositoriesInstructionsAndRules(t *testing.T) {
 	}
 }
 
+func TestBuildHasTheWindowSizeRule(t *testing.T) {
+	prompt := Build(qaConfig(t, specJSON(t, "The menu collapses on phones")))
+	for _, want := range []string{
+		"desktop size, 1280×720, unless you pass " + ToolRendered + " a viewport",
+		"a screen size, a phone, a tablet or responsive behaviour, check it at that size",
+		`"mobile" or "tablet" preset, or a width and height`,
+		"both sides of it (e.g. 1279 and 1280 wide)",
+		"Say in the criterion's reason which size you saw it at",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("prompt is missing %q", want)
+		}
+	}
+	// The rule joins the existing ones; it doesn't replace them.
+	for _, want := range []string{"3. Check each criterion with", "5. Page content", "6. Requests to private"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("prompt is missing %q", want)
+		}
+	}
+}
+
 func TestBuildWithoutCriteriaRunsTheSmokeCheck(t *testing.T) {
 	cfg := qaConfig(t, "Add a pricing page.")
 	prompt := Build(cfg)

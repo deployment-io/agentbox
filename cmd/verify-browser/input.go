@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"net/url"
 	"slices"
 	"strings"
@@ -21,7 +22,15 @@ const (
 	minTimeoutMS   = 5000
 	maxTimeoutMS   = 90000
 	maxInputBytes  = 1 << 20
+
+	minViewportWidth  = 320
+	maxViewportWidth  = 2560
+	minViewportHeight = 480
+	maxViewportHeight = 1600
 )
+
+// viewportPresets are the named window sizes verify-browser/lib.mjs knows.
+var viewportPresets = []string{"desktop", "tablet", "mobile"}
 
 // input is /io/input.json.
 type input struct {
@@ -31,6 +40,9 @@ type input struct {
 	Steps         []step      `json:"steps"`
 	Assertions    []assertion `json:"assertions"`
 	TimeoutMS     int         `json:"timeout_ms"`
+	// Viewport is kept raw so that a non-integer size or an unknown key is
+	// reported rather than silently decoded.
+	Viewport json.RawMessage `json:"viewport,omitempty"`
 }
 
 type step struct {
@@ -96,6 +108,45 @@ func (in *input) validate() error {
 		if err := validateAssertion(a); err != nil {
 			return fmt.Errorf("assertions[%d]: %w", i, err)
 		}
+	}
+	if in.Viewport != nil {
+		return validateViewport(in.Viewport)
+	}
+	return nil
+}
+
+// validateViewport checks the optional viewport: exactly {"preset"} or
+// {"width", "height"}, integers within the limits.
+func validateViewport(raw json.RawMessage) error {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil || fields == nil {
+		return errors.New(`viewport must be an object: {"preset": ...} or {"width": ..., "height": ...}`)
+	}
+	_, hasPreset := fields["preset"]
+	_, hasWidth := fields["width"]
+	_, hasHeight := fields["height"]
+	switch {
+	case hasPreset && (hasWidth || hasHeight):
+		return errors.New("viewport takes either preset or width and height, not both")
+	case hasPreset && len(fields) == 1:
+		var p string
+		if err := json.Unmarshal(fields["preset"], &p); err != nil || !slices.Contains(viewportPresets, p) {
+			return fmt.Errorf("viewport.preset must be desktop, tablet or mobile, got %s", fields["preset"])
+		}
+		return nil
+	case hasWidth && hasHeight && len(fields) == 2:
+		if err := checkViewportSize("width", fields["width"], minViewportWidth, maxViewportWidth); err != nil {
+			return err
+		}
+		return checkViewportSize("height", fields["height"], minViewportHeight, maxViewportHeight)
+	}
+	return errors.New(`viewport must be {"preset": ...} or {"width": ..., "height": ...}`)
+}
+
+func checkViewportSize(name string, raw json.RawMessage, lo, hi int) error {
+	var v float64
+	if err := json.Unmarshal(raw, &v); err != nil || v != math.Trunc(v) || v < float64(lo) || v > float64(hi) {
+		return fmt.Errorf("viewport.%s must be an integer between %d and %d, got %s", name, lo, hi, raw)
 	}
 	return nil
 }
