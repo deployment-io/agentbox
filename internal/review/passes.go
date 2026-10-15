@@ -238,9 +238,10 @@ var imageExtensions = map[string]bool{
 // isDocumentationPath reports whether a path is prose or an image — the
 // documentation-only gate's unit.
 //
-// A path under a docs/ directory counts wherever that directory sits, because
-// a monorepo's docs live at every level. LICENSE counts by name: it has no
-// extension and is the one such file that shows up in real diffs.
+// It decides by file name and extension only: a path's folder never makes it
+// documentation, so code inside a docs/ directory (a docs site's components,
+// a Sphinx conf.py) is code and gets reviewed. LICENSE counts by name: it has
+// no extension and is the one such file that shows up in real diffs.
 func isDocumentationPath(p string) bool {
 	p = strings.TrimPrefix(path.Clean(strings.ReplaceAll(p, "\\", "/")), "./")
 	base := path.Base(p)
@@ -248,15 +249,7 @@ func isDocumentationPath(p string) bool {
 		return true
 	}
 	ext := strings.ToLower(path.Ext(base))
-	if documentationExtensions[ext] || imageExtensions[ext] {
-		return true
-	}
-	for _, segment := range strings.Split(p, "/") {
-		if segment == "docs" {
-			return true
-		}
-	}
-	return false
+	return documentationExtensions[ext] || imageExtensions[ext]
 }
 
 // lockfileNames are the dependency lockfiles a security pass still wants to

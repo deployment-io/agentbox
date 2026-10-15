@@ -29,6 +29,25 @@ func TestSelectPassesCostGate(t *testing.T) {
 			},
 		},
 		{
+			name:        "documentation under docs/ skips both",
+			paths:       []string{"0-acme/api/docs/guide.md", "0-acme/api/docs/design.mdx", "0-acme/api/docs/img/arch.png", "0-acme/api/README.md", "0-acme/api/LICENSE"},
+			wantPasses:  nil,
+			wantSkipped: map[string]string{PassSecurity: ReasonDocsOnly, PassCorrectness: ReasonDocsOnly},
+		},
+		{
+			// A docs/ folder holds a docs site's code as often as its prose.
+			name:        "code under docs/ runs both passes",
+			paths:       []string{"1-acme/web/components/docs/DocsContent.tsx", "1-acme/web/app/docs/[topic]/page.tsx", "0-acme/api/docs/x.go", "0-acme/api/docs/conf.py"},
+			wantPasses:  []string{PassSecurity, PassCorrectness},
+			wantSkipped: map[string]string{},
+		},
+		{
+			name:        "prose beside code under docs/ is an ordinary change",
+			paths:       []string{"0-acme/api/docs/guide.md", "0-acme/api/docs/x.go"},
+			wantPasses:  []string{PassSecurity, PassCorrectness},
+			wantSkipped: map[string]string{},
+		},
+		{
 			name:        "lockfiles only keep security and stand correctness down",
 			paths:       []string{"0-acme/api/go.sum", "1-acme/web/package-lock.json", "1-acme/web/yarn.lock"},
 			wantPasses:  []string{PassSecurity},
@@ -107,6 +126,27 @@ func TestBuildCoverageCoversEveryParameterExactlyOnce(t *testing.T) {
 	for _, parameter := range []string{"spec conformance", "testing", "deploy readiness", "performance", "maintainability", "reliability"} {
 		if got := byParameter[parameter]; got.State != stateNotChecked || got.Reason != ReasonNoPass {
 			t.Errorf("%s = %+v, want not checked", parameter, got)
+		}
+	}
+}
+
+// The folder never decides: only a file's name or extension makes it
+// documentation.
+func TestIsDocumentationPathIgnoresTheFolder(t *testing.T) {
+	for p, want := range map[string]bool{
+		"components/docs/DocsContent.tsx": false,
+		"app/docs/[topic]/page.tsx":       false,
+		"docs/x.go":                       false,
+		"docs/conf.py":                    false,
+		"docs":                            false,
+		"docs/guide.md":                   true,
+		"docs/design.mdx":                 true,
+		"docs/img/arch.png":               true,
+		"README.md":                       true,
+		"LICENSE":                         true,
+	} {
+		if got := isDocumentationPath(p); got != want {
+			t.Errorf("isDocumentationPath(%q) = %v, want %v", p, got, want)
 		}
 	}
 }
