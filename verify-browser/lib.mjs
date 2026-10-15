@@ -20,6 +20,7 @@ export const CAPS = Object.freeze({
   consoleErrors: 20,
   consoleErrorChars: 300,
   failedRequests: 20,
+  blockedRequests: 20,
   blockedNavigations: 10,
   detailChars: 300,
   urlChars: 2000,
@@ -297,7 +298,81 @@ export function normalizeInput(raw) {
     assertions: assertions.map((a, i) => normalizeAssertion(a, i)),
     timeoutMs: t,
     viewport: normalizeViewport(raw.viewport),
+    readOnly: normalizeReadOnly(raw.read_only),
   };
+}
+
+// normalizeReadOnly validates input.json's optional read_only: absent is
+// false; anything but true or false is an error.
+export function normalizeReadOnly(raw) {
+  if (raw === undefined) {
+    return false;
+  }
+  if (typeof raw !== 'boolean') {
+    throw new Error(`read_only must be true or false, got ${JSON.stringify(raw)}`);
+  }
+  return raw;
+}
+
+// READ_ONLY_METHODS are the methods a read_only check lets through: the ones
+// that by HTTP's definition change nothing.
+export const READ_ONLY_METHODS = Object.freeze(['GET', 'HEAD', 'OPTIONS']);
+
+// isReadOnlyMethod reports whether a read_only check lets a request with this
+// method be sent. Methods compare case-insensitively; anything that isn't a
+// string naming one of READ_ONLY_METHODS is blocked.
+export function isReadOnlyMethod(method) {
+  return typeof method === 'string' && READ_ONLY_METHODS.includes(method.trim().toUpperCase());
+}
+
+// blockedRequestEntry is the blocked_requests entry for a request read_only
+// refused to send.
+export function blockedRequestEntry(url, method) {
+  return { url: capString(String(url ?? ''), CAPS.urlChars), method: capString(String(method ?? ''), CAPS.detailChars) };
+}
+
+// blockedByReadOnly reports whether a failed request is one read_only
+// refused: in a read_only check every request with any other method is
+// failed before it is sent, so its failure is reported in blocked_requests,
+// not failed_requests.
+export function blockedByReadOnly(method, readOnly) {
+  return readOnly === true && !isReadOnlyMethod(method);
+}
+
+// READ_ONLY_WORKER_MARKER is the query parameter a read_only check's page
+// guard appends to an http(s) worker's script URL, with the worker's type
+// ("classic" or "module") as its value, so the context route can tell the
+// request apart and serve readOnlyWorkerWrapper in its place. (A fragment
+// would not do: the route never sees one.)
+export const READ_ONLY_WORKER_MARKER = '__verifyBrowserReadOnlyWorker';
+
+// readOnlyWorkerScript returns the worker type and real script URL (the
+// marker removed) of a script URL the page guard marked, or null for any other
+// URL. The marker is the last query parameter.
+export function readOnlyWorkerScript(url) {
+  let u;
+  try {
+    u = new URL(String(url));
+  } catch {
+    return null;
+  }
+  const m = new RegExp(`[?&]${READ_ONLY_WORKER_MARKER}=(classic|module)$`).exec(u.search);
+  if (!m) {
+    return null;
+  }
+  u.search = u.search.slice(0, m.index);
+  return { type: m[1], scriptUrl: u.href };
+}
+
+// readOnlyWorkerWrapper is the script a read_only worker runs in place of its
+// own: guardCall (the read-only guard, as a statement) first, then the real
+// script — importScripts for a classic worker, a dynamic import for a module
+// one (a static import would be evaluated before the guard). The worker keeps
+// its URL, so its relative URLs resolve as before.
+export function readOnlyWorkerWrapper(guardCall, scriptUrl, type) {
+  const load =
+    type === 'module' ? `await import(${JSON.stringify(scriptUrl)});` : `importScripts(${JSON.stringify(scriptUrl)});`;
+  return `${guardCall}\n${load}\n`;
 }
 
 // capString truncates s to max characters (code points), marking the cut.
@@ -446,6 +521,7 @@ export function buildResult(c) {
     page_errors: (c.pageErrors ?? []).slice(0, CAPS.pageErrors).map((e) => capString(e, CAPS.pageErrorChars)),
     console_errors: (c.consoleErrors ?? []).slice(0, CAPS.consoleErrors).map((e) => capString(e, CAPS.consoleErrorChars)),
     failed_requests: (c.failedRequests ?? []).slice(0, CAPS.failedRequests),
+    blocked_requests: (c.blockedRequests ?? []).slice(0, CAPS.blockedRequests),
     blocked_navigations: (c.blockedNavigations ?? [])
       .slice(0, CAPS.blockedNavigations)
       .map((u) => capString(u, CAPS.urlChars)),
@@ -609,11 +685,13 @@ export function buildOutline(raw, baseUrl) {
   return out;
 }
 
-// errorResult is result.json for a check that could not run.
-export function errorResult(message) {
+// errorResult is result.json for a check that could not run, with the
+// requests read_only refused before it stopped.
+export function errorResult(message, blockedRequests = []) {
   return {
     schema_version: SCHEMA_VERSION,
     status: 'error',
     error: capString(oneLine(message), CAPS.detailChars * 3),
+    blocked_requests: blockedRequests.slice(0, CAPS.blockedRequests),
   };
 }

@@ -6,6 +6,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -48,7 +49,8 @@ const (
 	// previews in a real browser, through the runner's preview tools over
 	// MCP, and reports the outcome as a <qa> trailer. One agent run, no
 	// STEP_PROMPT: internal/qa builds the prompt from QA_SPEC and
-	// QA_REPOSITORIES.
+	// QA_REPOSITORIES (and, with QA_TARGET=production, QA_URLS: the sites
+	// already live in production, checked report-only with nothing deployed).
 	//
 	// A QA run is BLIND. It is given no diff, no implementer summary and no
 	// repository — during the stages the change is uncommitted in the working
@@ -56,6 +58,17 @@ const (
 	// holds only the read-only /work/context; it deploys previews by
 	// repository name and the runner builds them from its own hidden copy.
 	ModeQA = "qa"
+)
+
+// QA_TARGET values: what a QA run checks.
+const (
+	// QATargetPreview deploys a preview of each repository and checks it.
+	// The default when QA_TARGET is unset.
+	QATargetPreview = "preview"
+	// QATargetProduction checks the sites already live in production at
+	// QA_URLS. Report-only: nothing is deployed, and the browser blocks
+	// every request that would change data.
+	QATargetProduction = "production"
 )
 
 // Config captures the validated inputs for one agentbox run.
@@ -192,6 +205,18 @@ type Config struct {
 	// deploy_static_site_preview tool — the repositories themselves are not
 	// in a QA run's WORK_DIR.
 	QARepositories []string
+
+	// QATarget is what a QA run checks: QATargetPreview (previews it deploys
+	// itself — the default) or QATargetProduction (the sites already live in
+	// production, report-only, with the browser read-only). From QA_TARGET,
+	// qa mode only; anything else fails the load.
+	QATarget string
+
+	// QAURLs maps every QARepositories entry to the https URL its production
+	// site is live at. From the comma-separated "<repository>=<url>" entries
+	// in QA_URLS; required when QATarget is production and not read
+	// otherwise.
+	QAURLs map[string]string
 
 	// SessionID, when set, is forwarded to the agent as a stable session
 	// identifier (claude --session-id) so the transcript persists on disk
@@ -526,7 +551,72 @@ func (c *Config) loadQAInputs() error {
 	if c.MCPSocket == "" {
 		return fmt.Errorf("%s is required in %s mode: QA deploys and checks previews through the runner's tools", MCPSocketEnv, ModeQA)
 	}
+
+	c.QATarget = strings.TrimSpace(os.Getenv("QA_TARGET"))
+	switch c.QATarget {
+	case "":
+		c.QATarget = QATargetPreview
+	case QATargetPreview:
+	case QATargetProduction:
+		urls, err := parseQAURLs(os.Getenv("QA_URLS"), c.QARepositories)
+		if err != nil {
+			return err
+		}
+		c.QAURLs = urls
+	default:
+		return fmt.Errorf("invalid QA_TARGET %q: must be %q or %q", c.QATarget, QATargetPreview, QATargetProduction)
+	}
 	return nil
+}
+
+// parseQAURLs reads QA_URLS: comma-separated "<repository>=<url>" entries,
+// exactly one for every repository and none for anything else. Each URL must
+// be https, carry no user info and use port 443 (or none): a production QA
+// run only ever opens the deployment's own public site, and a URL that is
+// anything else is the runner handing over the wrong thing.
+func parseQAURLs(raw string, repos []string) (map[string]string, error) {
+	want := map[string]bool{}
+	for _, repo := range repos {
+		want[repo] = true
+	}
+	urls := map[string]string{}
+	for _, entry := range strings.Split(raw, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		repo, rawURL, ok := strings.Cut(entry, "=")
+		repo, rawURL = strings.TrimSpace(repo), strings.TrimSpace(rawURL)
+		if !ok || repo == "" || rawURL == "" {
+			return nil, fmt.Errorf("QA_URLS entry %q must be <repository>=<url>", entry)
+		}
+		if !want[repo] {
+			return nil, fmt.Errorf("QA_URLS entry %q names a repository that is not in QA_REPOSITORIES", entry)
+		}
+		if _, dup := urls[repo]; dup {
+			return nil, fmt.Errorf("QA_URLS entry %q repeats repository %q", entry, repo)
+		}
+		u, err := url.Parse(rawURL)
+		if err != nil {
+			return nil, fmt.Errorf("QA_URLS entry %q has an invalid url: %v", entry, err)
+		}
+		if u.Scheme != "https" || u.Opaque != "" || u.Hostname() == "" {
+			return nil, fmt.Errorf("QA_URLS entry %q must be an https URL", entry)
+		}
+		if u.User != nil {
+			return nil, fmt.Errorf("QA_URLS entry %q must not carry user info", entry)
+		}
+		if port := u.Port(); port != "" && port != "443" {
+			return nil, fmt.Errorf("QA_URLS entry %q must use port 443 or none", entry)
+		}
+		urls[repo] = rawURL
+	}
+	for _, repo := range repos {
+		if _, ok := urls[repo]; !ok {
+			return nil, fmt.Errorf("QA_URLS has no entry for repository %q (required when QA_TARGET is %s)", repo, QATargetProduction)
+		}
+	}
+	return urls, nil
 }
 
 // ReviewEffortLevels are the REVIEW_EFFORT values agentbox accepts, in

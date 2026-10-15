@@ -484,6 +484,10 @@ var agentboxInputEnv = map[string]bool{
 	// is.
 	"QA_SPEC":         true,
 	"QA_REPOSITORIES": true,
+	// QA_TARGET and QA_URLS reach the agent folded into the prompt (the
+	// production sites it checks), not through the environment.
+	"QA_TARGET": true,
+	"QA_URLS":   true,
 }
 
 // agentEnvDenylist are env vars removed from every agent process's

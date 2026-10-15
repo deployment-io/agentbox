@@ -186,6 +186,26 @@ func TestParseInputViewport(t *testing.T) {
 	}
 }
 
+func TestParseInputReadOnly(t *testing.T) {
+	in, err := parseInput([]byte(validInputJSON))
+	if err != nil || in.ReadOnly != nil {
+		t.Fatalf("without read_only: %v, read_only = %s — absent must mean false", err, in.ReadOnly)
+	}
+	for _, v := range []bool{true, false} {
+		if _, err := parseInput(mutate(t, func(m map[string]any) { m["read_only"] = v })); err != nil {
+			t.Errorf("read_only %v: %v", v, err)
+		}
+	}
+	for name, v := range map[string]any{"null": nil, "string": "true", "number": 1, "object": map[string]any{}} {
+		t.Run(name, func(t *testing.T) {
+			_, err := parseInput(mutate(t, func(m map[string]any) { m["read_only"] = v }))
+			if err == nil || !strings.Contains(err.Error(), "read_only") {
+				t.Fatalf("parseInput: %v, want an error naming read_only", err)
+			}
+		})
+	}
+}
+
 // harness is an /io directory and a fake browser script run by sh.
 type harness struct {
 	t   *testing.T
@@ -353,5 +373,8 @@ func TestWriteAtomicLeavesNoTempFile(t *testing.T) {
 	var r errorResultJSON
 	if err := json.Unmarshal(data, &r); err != nil || r.Status != "error" || !strings.Contains(r.Error, "boom") {
 		t.Fatalf("result = %s (%v)", data, err)
+	}
+	if !strings.Contains(string(data), `"blocked_requests":[]`) {
+		t.Errorf("result = %s, want blocked_requests []", data)
 	}
 }

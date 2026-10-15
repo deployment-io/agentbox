@@ -180,7 +180,8 @@ func (d *Driver) Binary() string {
 // A QA run is held to an allowlist too, but the opposite way round: the
 // runner's preview tools are its whole job, so --mcp-config IS wired, and the
 // allowlist is qaAllowedTools — Read, Grep and Glob for the deploy facts plus
-// the three preview tools, and no Bash, Write or Edit.
+// the target's preview tools (no deploy tool in production), and no Bash,
+// Write or Edit.
 func (d *Driver) BuildArgs(cfg *config.Config) []string {
 	reviewing := cfg.Mode == config.ModeReview
 	qaing := cfg.Mode == config.ModeQA
@@ -233,7 +234,7 @@ func (d *Driver) BuildArgs(cfg *config.Config) []string {
 	if qaing {
 		// Appended LAST for the same reason.
 		args = append(args, "--allowedTools")
-		args = append(args, qaAllowedTools()...)
+		args = append(args, qaAllowedTools(cfg)...)
 	}
 	return args
 }
@@ -244,12 +245,14 @@ const mcpServerName = "deployment-io"
 
 // qaAllowedTools is the allowlist a QA run is held to: Read, Grep and Glob
 // (the deploy facts under /work/context are all a QA run can read) and the
-// runner's three preview tools. No Bash, Write, Edit or NotebookEdit — QA
-// checks a change and makes none, and without --dangerously-skip-permissions
-// a tool not listed here is denied outright.
-func qaAllowedTools() []string {
+// runner's tools for the run's target (qa.ToolsFor: the three preview tools,
+// or in production only the two that check a site — never the deploy tool).
+// No Bash, Write, Edit or NotebookEdit — QA checks a change and makes none,
+// and without --dangerously-skip-permissions a tool not listed here is denied
+// outright.
+func qaAllowedTools(cfg *config.Config) []string {
 	out := []string{"Read", "Grep", "Glob"}
-	for _, tool := range qa.Tools {
+	for _, tool := range qa.ToolsFor(cfg) {
 		out = append(out, "mcp__"+mcpServerName+"__"+tool)
 	}
 	return out

@@ -64,3 +64,33 @@ func TestBuildArgsInQAMode(t *testing.T) {
 		}
 	}
 }
+
+// Production QA: nothing to deploy, so the deploy tool is never allowed.
+func TestBuildArgsInProductionQAMode(t *testing.T) {
+	cfg := qaConfig()
+	cfg.QATarget = config.QATargetProduction
+	cfg.QAURLs = map[string]string{"0-acme/website": "https://acme.example"}
+	args := (&Driver{}).BuildArgs(cfg)
+
+	i := indexOf(args, "--allowedTools")
+	if i < 0 {
+		t.Fatal("production qa mode has no --allowedTools")
+	}
+	got := args[i+1:]
+	want := []string{
+		"Read", "Grep", "Glob",
+		"mcp__deployment-io__verify_preview_reachable",
+		"mcp__deployment-io__verify_preview_rendered",
+	}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Errorf("allowlist (must be last) = %q, want exactly %q", got, want)
+	}
+	for _, a := range args {
+		if strings.Contains(a, "deploy_static_site_preview") {
+			t.Errorf("production args carry the deploy tool: %q", a)
+		}
+	}
+	if j := indexOf(args, "--append-system-prompt"); j < 0 || !strings.Contains(args[j+1], "production data") {
+		t.Errorf("trailer instruction is not the production QA one")
+	}
+}

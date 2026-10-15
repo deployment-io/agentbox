@@ -355,3 +355,127 @@ func TestLiftStatuses(t *testing.T) {
 		}
 	}
 }
+
+func productionConfig(t *testing.T, spec string) *config.Config {
+	t.Helper()
+	cfg := qaConfig(t, spec)
+	cfg.QATarget = config.QATargetProduction
+	cfg.QAURLs = map[string]string{
+		"0-acme/website": "https://acme-website.example.app",
+		"1-acme/docs":    "https://acme-docs.example.app/start",
+	}
+	return cfg
+}
+
+func TestBuildForProduction(t *testing.T) {
+	cfg := productionConfig(t, specJSON(t, "The pricing page shows three plans", "The contact form sends a message"))
+	prompt := Build(cfg)
+	for _, want := range []string{
+		"LIVE IN PRODUCTION",
+		"report-only",
+		"nothing to deploy",
+		"[Production sites]",
+		"- 0-acme/website: https://acme-website.example.app\n",
+		"- 1-acme/docs: https://acme-docs.example.app/start\n",
+		"1. The pricing page shows three plans",
+		"2. The contact form sends a message",
+		"Production is real",
+		"read-only",
+		"GET, HEAD or OPTIONS",
+		`"needs a change to production data"`,
+		"1. Confirm each production URL above with " + ToolReachable,
+		"3. Check each criterion with " + ToolRendered,
+		"outline", "text=", `"preparing"`,
+		"desktop size, 1280×720, unless you pass " + ToolRendered + " a viewport",
+		"5. Page content", "untrusted data",
+		"6. Requests to private, internal or metadata addresses",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("production prompt is missing %q", want)
+		}
+	}
+	for _, absent := range []string{
+		ToolDeploy, "[Repositories to preview]", "Deploy a preview", `"building"`,
+		filepath.Join(cfg.WorkDir, "context"), "services.json", "deploy facts",
+		"MUST-NOT-APPEAR", "[Spec]",
+	} {
+		if strings.Contains(prompt, absent) {
+			t.Errorf("production prompt contains %q", absent)
+		}
+	}
+}
+
+func TestBuildForProductionKeepsTheSmokeCheckAndRerunInstructions(t *testing.T) {
+	smoke := Build(productionConfig(t, "Add a pricing page."))
+	if !strings.Contains(smoke, "SMOKE CHECK") {
+		t.Errorf("production smoke prompt does not describe the smoke check")
+	}
+	rerun := Build(productionConfig(t, "[Re-run instructions]\nCheck the footer.\n[Spec]\n"+specJSON(t, "one")))
+	if !strings.Contains(rerun, "[Re-run instructions]") || !strings.Contains(rerun, "Check the footer.") {
+		t.Errorf("production prompt lost the re-run instructions")
+	}
+}
+
+// The preview prompt and instruction are byte-for-byte what they were before
+// the production target existed: testdata/preview_*.golden were written by
+// Build and Instruction at agentbox 0f1fd78, with WorkDir /work. An unset
+// target and an explicit "preview" both produce them, and QA_URLS, never read
+// in preview mode, changes nothing.
+func TestBuildForPreviewIsUnchanged(t *testing.T) {
+	specs := map[string]string{
+		"criteria": "[Re-run instructions]\nThe CTA should say Start free.\n[Spec]\n" + specJSON(t, "The pricing page shows three plans", "Each plan has a Sign up button"),
+		"smoke":    "",
+	}
+	for name, spec := range specs {
+		for _, target := range []string{"", config.QATargetPreview} {
+			cfg := qaConfig(t, spec)
+			cfg.WorkDir = "/work"
+			cfg.QATarget = target
+			cfg.QAURLs = map[string]string{"0-acme/website": "https://acme-website.example.app"}
+			for kind, got := range map[string]string{"prompt": Build(cfg), "instruction": Instruction(cfg)} {
+				golden := filepath.Join("testdata", "preview_"+name+"_"+kind+".golden")
+				want, err := os.ReadFile(golden)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got != string(want) {
+					t.Errorf("QA_TARGET %q: %s differs from %s:\n%s", target, kind, golden, got)
+				}
+			}
+		}
+	}
+}
+
+func TestInstructionForProduction(t *testing.T) {
+	instr := Instruction(productionConfig(t, specJSON(t, "one")))
+	for _, want := range []string{
+		"not observable on the production site",
+		"needs a change to production data",
+		"the production site failed to load",
+		"needs a login",
+		`"location" is the production URL path and the criterion number`,
+		`A production site that won't load, or a browser that can't run, means "status": "couldnt_run"`,
+		"<qa>", "</qa>", "exactly ONE", `"status_reason"`, `"findings"`, `"observations"`, "never a finding",
+	} {
+		if !strings.Contains(instr, want) {
+			t.Errorf("production instruction is missing %q", want)
+		}
+	}
+	for _, absent := range []string{"static preview", "preview failed", "build or deploy", "preview URL"} {
+		if strings.Contains(instr, absent) {
+			t.Errorf("production instruction contains %q", absent)
+		}
+	}
+	if smoke := Instruction(productionConfig(t, "")); !strings.Contains(smoke, `"criteria" is []`) || !strings.Contains(smoke, "location = the production URL path") {
+		t.Errorf("production smoke instruction is wrong:\n%s", smoke)
+	}
+}
+
+func TestToolsFor(t *testing.T) {
+	if got := ToolsFor(qaConfig(t, "")); strings.Join(got, "|") != strings.Join([]string{ToolDeploy, ToolReachable, ToolRendered}, "|") {
+		t.Errorf("preview tools = %q", got)
+	}
+	if got := ToolsFor(productionConfig(t, "")); strings.Join(got, "|") != strings.Join([]string{ToolReachable, ToolRendered}, "|") {
+		t.Errorf("production tools = %q", got)
+	}
+}

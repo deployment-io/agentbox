@@ -69,6 +69,7 @@ carrying data.
 | `assertions` | At most 30, checked after the steps against the current page. |
 | `timeout_ms` | 5000–90000. The whole check's budget. |
 | `viewport` | Optional: the window size, `{"preset": "desktop" \| "tablet" \| "mobile"}` or `{"width": W, "height": H}` (see [Viewport](#viewport)). Absent is `desktop`. Added in 1.2.0; earlier images ignore it. |
+| `read_only` | Optional: `true` or `false` (absent is `false`). `true` runs the browser read-only, for a check of a site that is live in production (see [Read-only](#read-only)). Anything but a JSON boolean (`null`, `"true"`, `1`) is invalid input. Added in 1.3.0; earlier images ignore it — a caller that sets it must check that the result has `blocked_requests`. |
 
 Every string is at most 2000 characters.
 
@@ -91,6 +92,43 @@ breakpoints, touch and the user agent are right; Safari-only rendering
 differences are not covered. Anything else — an unknown preset, both forms,
 a missing or out-of-range size, a non-integer, any other key — is invalid
 input.
+
+### Read-only
+
+With `"read_only": true`, every request whose method is not `GET`, `HEAD`
+or `OPTIONS` (compared case-insensitively) is failed before it is sent —
+from the page, any frame (cross-origin ones included), any resource type,
+any host, every redirect hop, beacons (`navigator.sendBeacon`) and
+`fetch(…, {keepalive: true})` included. Each is reported in
+`blocked_requests`. In addition:
+
+- **No WebSocket opens.** `WebSocket` (and `WebSocketStream`) in every frame
+  refuse to connect: the socket fires `error` and then `close` (code 1006),
+  as for a server that never answered, and is reported in `blocked_requests`
+  with method `WEBSOCKET`.
+- **Workers run, under the same rule.** `Worker` and `SharedWorker` still
+  start the page's worker, with the read-only guard installed before its
+  script runs: its WebSockets are refused and its `fetch` and
+  `XMLHttpRequest` with any other method fail as network errors, each
+  reported like the page's. A worker an http(s) URL names keeps its URL, so
+  its relative URLs resolve as before. A worker started from a `blob:` or
+  `data:` URL, or by another worker, runs from a wrapper `blob:` URL; in a
+  worker started by a worker, the relative URLs given to `fetch`, `Request`,
+  `XMLHttpRequest`, `importScripts`, `EventSource` and `Worker` still resolve
+  against its script's own URL (only `self.location` shows the `blob:`).
+  `Worker.prototype.constructor` (and `SharedWorker`'s) is the guarded
+  constructor, so the page can't reach an unguarded one.
+- **Service workers** are blocked, as in every check.
+
+Steps and assertions run as usual: clicking, typing, opening menus and
+navigating all work. A step whose action causes a blocked request — a click
+that submits a `POST` form — is not failed for it; the request is failed as
+aborted, so the page stays where it was (no error page, `final_url`
+unchanged), and the request appears in `blocked_requests`, not in
+`failed_requests`. A blocked request on its own never decides the verdict.
+
+`GET` is assumed safe: a `GET` that changes data on the server is not
+blocked.
 
 ### Steps
 
@@ -146,6 +184,7 @@ then rename) and exits.
     {"url": "https://d1234abcd.cloudfront.net/api/plans.json", "method": "GET", "status": 404, "failure": ""}
   ],
   "blocked_navigations": [],
+  "blocked_requests": [],
   "timings_ms": {"dom_content_loaded": 412, "load": 655, "lcp": 702},
   "dom_text_snippet": "Pricing Plans …",
   "outline": [
@@ -171,6 +210,7 @@ then rename) and exits.
 | `console_errors` | `console.error` messages (including Chromium's own "Failed to load resource" lines). |
 | `failed_requests` | Requests **to `allowed_hosts`** that failed or returned a status ≥ 400: `url`, `method`, `status` (0 when there was no response), `failure` (Chromium's error, empty for an HTTP status). Requests to other hosts (analytics, CDNs) are not reported, and neither are requests the browser cancelled (`net::ERR_ABORTED`) because the page navigated away or a later navigation in the same frame superseded them; an abort no navigation explains (the app cancelling its own request, an iframe load nothing replaced) is reported. |
 | `blocked_navigations` | Main-frame navigations — link clicks, redirects, gotos — to a host outside `allowed_hosts`, and new windows (`window.open` without a target or with one naming no frame, links and forms with a target). `window.open(url, '_self')` (or `_top`, `_parent`, an iframe's name) navigates in place and is only blocked when `url` is outside `allowed_hosts`. Each blocked navigation makes the step running at the time fail; one that happens after its step finished (a timer it set, while a later step or the assertions run) fails every step that ran on the page it happened on, since any of them may have scheduled it. A blocked main-frame navigation leaves Chromium's error page in the tab (`final_url` `chrome-error://chromewebdata/`), so the steps and assertions after it run against that page. |
+| `blocked_requests` | Requests a [read-only](#read-only) check refused, in the order they were refused: `url`, `method` (the request's method as the page or worker sent it, or `WEBSOCKET`). Always present, in an `error` result too: `[]` when there were none or `read_only` is not `true`. An `error` result lists what was refused before the check stopped, except when the entrypoint wrote it itself (invalid input, the script timed out or wrote no valid result), which leaves it `[]`. Added in 1.3.0 (`schema_version` stays 1). |
 | `timings_ms` | `dom_content_loaded` and `load` (Navigation Timing) and `lcp` (Largest Contentful Paint) of the first load, in ms. `lcp` is omitted when the browser reports none. |
 | `dom_text_snippet` | The start of `document.body.innerText` at the end. **Untrusted page content.** |
 | `outline` | The visible headings, links, buttons and form fields of the page at the end (after the steps and assertions), in document order — a map for a caller that can't read the page's source. Each entry is `{"kind": "heading" \| "link" \| "button" \| "field", "text": "…"}`, plus `level` (1–6, from `aria-level` or the `h1`–`h6` tag) for a heading and `href` (the resolved absolute URL, for `http:`, `https:`, `mailto:` and `tel:` links only; omitted for any other scheme, e.g. `javascript:` or `data:`) for a link. A button with no caption of its own that is an `<input type="submit">` or `type="reset"` gets the browser's default, "Submit" or "Reset". A field's `text` is its label: its `<label>`, else `aria-label`, else `placeholder`, else `name`. An explicit ARIA role wins over the tag (`<a role="button">` is a button). Hidden elements (`hidden`, `aria-hidden`, not rendered) and `<input type="hidden">` are left out, as are entries with nothing to show. Added in 1.1.0 (`schema_version` stays 1). **Untrusted page content**, like `dom_text_snippet`. |
@@ -193,6 +233,7 @@ redirect in `blocked_navigations` and every step reported as not run.
 | `page_errors` | 10 entries × 500 characters |
 | `console_errors` | 20 entries × 300 characters |
 | `failed_requests` | 20 entries |
+| `blocked_requests` | 20 entries (`url` 2000 characters) |
 | `blocked_navigations` | 10 entries |
 | each step `error` / assertion `detail` | 300 characters |
 | `dom_text_snippet` | 1000 characters |
@@ -225,6 +266,21 @@ it loads), so the container is the boundary:
   a target); any that still get created are closed by a browser-level
   auto-attach guard before their first navigation is let go. Service workers are blocked,
   downloads refused, dialogs dismissed.
+- **Read-only** (`read_only: true`). Requests are held to the method rule
+  twice: the page target's DevTools `Fetch` interception (every request of
+  the page's process, each redirect hop) and a Playwright context route
+  (which Playwright installs on every frame's and dedicated worker's own
+  target before letting it run, so out-of-process iframes are covered). An
+  init script in every frame refuses WebSockets and starts each worker
+  behind the same guard: an http(s) worker's script URL is marked and the
+  context route answers it with a wrapper that installs the guard and then
+  loads the real script; a `blob:`/`data:` worker, or one a worker starts,
+  gets the wrapper as a `blob:` (a nested worker's wrapper resolves its
+  relative request URLs against the script's real URL), and each real
+  constructor's `prototype.constructor` points at the guarded one. In a worker the guard also refuses `fetch`
+  and `XMLHttpRequest` with another method, since a shared or nested worker's
+  requests reach no route. Workers report through a `BroadcastChannel` the
+  page's frames forward.
 - **Egress.** Everything else the page loads goes through the egress proxy
   (`--proxy-bypass-list=<-loopback>` so loopback is not bypassed). The proxy
   resolves each host once, refuses private, link-local (including
@@ -284,10 +340,14 @@ docker run --rm --platform linux/amd64 \
 cat "$io/result.json"
 ```
 
-`scripts/verify-browser-smoke.sh` does this twice — a passing check of
-`https://example.com`, and the same page with a step that clicks its link
+`scripts/verify-browser-smoke.sh` does this four times — a passing check of
+`https://example.com`; the same page with a step that clicks its link
 to iana.org, a host outside `allowed_hosts` (a blocked navigation and a
-failed step) — and prints both results. (A `goto` to a host outside
+failed step); and `https://httpbin.org/forms/post` submitted with
+`read_only: true` (the `POST` in `blocked_requests`, every step ok,
+`final_url` still the form) and with `read_only: false` (`final_url`
+httpbin's `/post`) — and prints the results. The two `read_only` cases are
+asserted (with `jq`): the script exits non-zero when either does not hold. (A `goto` to a host outside
 `allowed_hosts` never reaches the browser: it is invalid input.)
 
 ## Releasing

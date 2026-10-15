@@ -121,3 +121,84 @@ func TestLoadInvalidModeNamesQA(t *testing.T) {
 		t.Fatalf("err = %v, want the invalid-mode message listing qa", err)
 	}
 }
+
+func TestLoadQAModeTargetDefaultsToPreview(t *testing.T) {
+	for _, v := range []string{"", "preview", " preview "} {
+		// QA_URLS is not read in preview mode, so even a malformed one loads.
+		qaEnv(t, map[string]string{"QA_TARGET": v, "QA_URLS": "not=a url at all,,=x"})
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("QA_TARGET=%q: Load: %s", v, err)
+		}
+		if cfg.QATarget != QATargetPreview {
+			t.Errorf("QA_TARGET=%q: QATarget = %q, want %q", v, cfg.QATarget, QATargetPreview)
+		}
+		if cfg.QAURLs != nil {
+			t.Errorf("QA_TARGET=%q: QAURLs = %v, want none — QA_URLS is not read in preview mode", v, cfg.QAURLs)
+		}
+	}
+}
+
+func TestLoadQAModeRejectsAnUnknownTarget(t *testing.T) {
+	for _, v := range []string{"prod", "staging", "Production"} {
+		qaEnv(t, map[string]string{"QA_TARGET": v})
+		_, err := Load()
+		if err == nil || !strings.Contains(err.Error(), "QA_TARGET") || !strings.Contains(err.Error(), v) {
+			t.Errorf("QA_TARGET=%q: err = %v, want one naming QA_TARGET and the value", v, err)
+		}
+	}
+}
+
+func TestLoadQAModeProductionLoadsTheURLs(t *testing.T) {
+	qaEnv(t, map[string]string{
+		"QA_TARGET": "production",
+		"QA_URLS":   " 1-acme/docs=https://docs.acme.example/ , 0-acme/website=https://acme.example:443",
+	})
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %s", err)
+	}
+	if cfg.QATarget != QATargetProduction {
+		t.Errorf("QATarget = %q", cfg.QATarget)
+	}
+	want := map[string]string{"0-acme/website": "https://acme.example:443", "1-acme/docs": "https://docs.acme.example/"}
+	if len(cfg.QAURLs) != len(want) {
+		t.Fatalf("QAURLs = %v, want %v", cfg.QAURLs, want)
+	}
+	for repo, u := range want {
+		if cfg.QAURLs[repo] != u {
+			t.Errorf("QAURLs[%q] = %q, want %q", repo, cfg.QAURLs[repo], u)
+		}
+	}
+}
+
+func TestLoadQAModeProductionRequiresQAURLs(t *testing.T) {
+	qaEnv(t, map[string]string{"QA_TARGET": "production"})
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "QA_URLS") {
+		t.Fatalf("err = %v, want one naming QA_URLS", err)
+	}
+}
+
+func TestLoadQAModeProductionRejectsBadURLEntries(t *testing.T) {
+	const site = "0-acme/website=https://acme.example"
+	const docs = "1-acme/docs=https://docs.acme.example"
+	for _, tc := range []struct{ urls, names string }{
+		{site, "1-acme/docs"}, // missing
+		{site + "," + docs + ",2-acme/blog=https://b.example", "2-acme/blog"},                                 // extra
+		{site + "," + docs + ",0-acme/website=https://other.example", "0-acme/website=https://other.example"}, // duplicated
+		{site + ",1-acme/docs/=https://docs.acme.example", "1-acme/docs/"},                                    // not matched exactly
+		{site + ",1-acme/docs=http://docs.acme.example", "1-acme/docs=http://docs.acme.example"},              // not https
+		{site + ",1-acme/docs=https://u:p@docs.acme.example", "1-acme/docs=https://u:p@docs.acme.example"},    // user info
+		{site + ",1-acme/docs=https://u@docs.acme.example", "1-acme/docs=https://u@docs.acme.example"},        // user info
+		{site + ",1-acme/docs=https://docs.acme.example:8443", "1-acme/docs=https://docs.acme.example:8443"},  // another port
+		{site + ",1-acme/docs=https://", "1-acme/docs=https://"},                                              // no host
+		{site + ",1-acme/docs", "1-acme/docs"},                                                                // no url
+	} {
+		qaEnv(t, map[string]string{"QA_TARGET": "production", "QA_URLS": tc.urls})
+		_, err := Load()
+		if err == nil || !strings.Contains(err.Error(), "QA_URLS") || !strings.Contains(err.Error(), tc.names) {
+			t.Errorf("QA_URLS=%q: err = %v, want one naming QA_URLS and %q", tc.urls, err, tc.names)
+		}
+	}
+}
