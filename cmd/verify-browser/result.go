@@ -13,10 +13,19 @@ import (
 const maxResultBytes = 4 << 20
 
 // errorResultJSON is result.json for a check that couldn't run.
+// BlockedRequests is always present; this program never saw the browser's
+// requests, so it is always empty here.
 type errorResultJSON struct {
-	SchemaVersion int    `json:"schema_version"`
-	Status        string `json:"status"`
-	Error         string `json:"error"`
+	SchemaVersion   int              `json:"schema_version"`
+	Status          string           `json:"status"`
+	Error           string           `json:"error"`
+	BlockedRequests []blockedRequest `json:"blocked_requests"`
+}
+
+// blockedRequest is a blocked_requests entry.
+type blockedRequest struct {
+	URL    string `json:"url"`
+	Method string `json:"method"`
 }
 
 // finish turns the script's outcome into /io/result.json and the exit code.
@@ -82,7 +91,12 @@ func writeErrorResult(path, msg, stderrTail string) error {
 	if tail := strings.TrimSpace(stderrTail); tail != "" {
 		msg += "\nlast output of the browser script:\n" + tail
 	}
-	data, err := json.Marshal(errorResultJSON{SchemaVersion: schemaVersion, Status: "error", Error: msg})
+	data, err := json.Marshal(errorResultJSON{
+		SchemaVersion:   schemaVersion,
+		Status:          "error",
+		Error:           msg,
+		BlockedRequests: []blockedRequest{},
+	})
 	if err != nil {
 		return err
 	}

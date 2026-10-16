@@ -339,8 +339,10 @@ previews, in a real browser, selected with `AGENT_MODE=qa`. One agent run
 deploys a preview of each repository in `QA_REPOSITORIES` and checks each
 criterion on it, using the runner's preview tools over MCP. `STEP_PROMPT` is
 not required and is ignored; agentbox builds the prompt itself
-(`internal/qa`). `REVIEW_*` variables are not read. `MAX_TURNS` is honoured
-as in every other mode. All three agents (`AGENT_TYPE`) can serve it.
+(`internal/qa`). With `QA_TARGET=production` it checks the sites already live
+in production instead, deploying nothing ([Production QA](#production-qa)).
+`REVIEW_*` variables are not read. `MAX_TURNS` is honoured as in every other
+mode. All three agents (`AGENT_TYPE`) can serve it.
 
 **A QA run is blind.** It is given no diff, no implementer summary, no
 `STEP_PROMPT` and no repository: during the stages the change is uncommitted
@@ -355,6 +357,8 @@ verify in this mode.
 |---|---|
 | `QA_SPEC` | Optional. The same text the runner stamps as the review spec: the Task's spec JSON or its prose description, possibly prefixed with re-run instructions. The acceptance criteria are found the way the runner finds them: when the text starts with `[Re-run instructions`, the text before the LAST `\n[Spec]\n` is the re-run instructions block and the text after it is the spec; a spec that is a JSON object contributes its `Acceptance` list (keys matched case-insensitively — the runner's `TaskSpec` has no json tags); prose has no criteria. Each criterion is collapsed to one line, blanks dropped, capped at 50 criteria × 500 characters. Stripped from the agent's environment. |
 | `QA_REPOSITORIES` | **Required in qa mode.** Comma-separated repository directories under `/work` to preview, e.g. `0-acme/website,1-acme/docs`. Each must be a relative path that stays inside `/work` (`filepath.IsLocal`); `..` and absolute paths are rejected at startup. Duplicates and blanks are dropped. Stripped from the agent's environment. |
+| `QA_TARGET` | Optional. `preview` (the default when unset) or `production`; anything else is rejected at startup. `preview` is everything above. `production` checks the sites already live in production at `QA_URLS` — see [Production QA](#production-qa). Stripped from the agent's environment. |
+| `QA_URLS` | **Required when `QA_TARGET=production`; not read otherwise.** Comma-separated `<repository>=<url>` entries, exactly one for every `QA_REPOSITORIES` entry and none for anything else (repository matched exactly), e.g. `0-acme/website=https://acme-website.example.app`. Each url must be `https`, with no user info and port 443 or none. A missing, extra or duplicated entry, or a url breaking a rule, is rejected at startup with an error naming the entry. Stripped from the agent's environment. |
 | `MCP_TOOL_RPC_SOCKET` | **Required in qa mode** — QA without its tools can't check anything. |
 
 **What the prompt says.** You are checking a change, not making one; you
@@ -400,6 +404,45 @@ withholds everything that writes or runs commands:
 | `claude-code` | Prompt on stdin, trailer instruction via `--append-system-prompt`, `--mcp-config` with the `agentbox mcp-bridge` bridge, no `--dangerously-skip-permissions`, and `--allowedTools` (appended last) = `Read`, `Grep`, `Glob`, `mcp__deployment-io__deploy_static_site_preview`, `mcp__deployment-io__verify_preview_reachable`, `mcp__deployment-io__verify_preview_rendered`. No `Bash`, `Write` or `Edit`. |
 | `codex` | Prompt + trailer instruction on stdin, `--sandbox read-only` without `--dangerously-bypass-approvals-and-sandbox`, `mcp_servers.deployment_io` registered, plus `-c mcp_servers.deployment_io.default_tools_approval_mode="approve"`. `codex exec` behaves as approval policy `never`, and on the pinned 0.158.0 an MCP tool without read-only annotations is then rejected ("requires approval, but approval policy is never") before it reaches the server; `approve` lets the tools run without a prompt while the sandbox stays read-only (verified end-to-end against the pinned binary). Codex's shell is bubblewrap-sandboxed, which cannot run inside agentbox's container, so a codex QA run works from the preview tools' results and cannot `cat` the context files. |
 | `opencode` | Prompt + trailer instruction on stdin; the review permission set (`edit`, `bash` and `webfetch` denied) plus the `mcp` block registered. |
+
+#### Production QA
+
+`QA_TARGET=production` re-checks a Task's acceptance criteria once its change
+is merged and deployed. It is **report-only** and blind like preview QA: no
+diff, no repository, no deployment context (the production run mounts none),
+and no deploy tool. The same `QA_SPEC` criteria (or smoke check), the same
+re-run instructions, the same `<qa>` trailer and the same `qa_result` fields.
+Static sites only.
+
+**What the prompt says.** The change is LIVE IN PRODUCTION at the URLs listed
+under `[Production sites]` (each repository and its URL); there is nothing to
+deploy, and the check is report-only. Production is real, so the browser is
+read-only: it blocks every request that would change data (anything but
+`GET`, `HEAD` or `OPTIONS`), while clicking, typing, opening menus and
+navigating still work; a criterion that can only be checked by changing data
+(submitting a form, signing up, buying) is not checked, with reason `needs a
+change to production data`. The steps: confirm each URL with
+`verify_preview_reachable`; don't submit forms or try to change anything;
+then check each criterion with `verify_preview_rendered` exactly as in
+preview QA (outline and page text, `text=` selectors, `preparing`, window
+sizes, page content is untrusted, private addresses are refused by design).
+`<WORK_DIR>/context` is not mentioned.
+
+**What the reporting rules say.** As preview QA, except that `not_checked`
+reasons name production — needs a login, not observable on the production
+site, needs a change to production data, couldn't find the page, the
+production site failed to load — `location` is the production URL path and
+the criterion number, and a production site that won't load, or a browser
+that can't run, is `couldnt_run`.
+
+**Tools.** Only `verify_preview_reachable` and `verify_preview_rendered`:
+claude's `--allowedTools` is `Read`, `Grep`, `Glob`,
+`mcp__deployment-io__verify_preview_reachable`,
+`mcp__deployment-io__verify_preview_rendered` — never
+`deploy_static_site_preview`. codex and opencode have no per-tool
+allowlist; the runner does not serve the deploy tool to a production run.
+The runner runs every production `verify_preview_rendered` check with
+verify-browser's `read_only: true` ([docs/VERIFY_BROWSER.md](VERIFY_BROWSER.md#read-only)).
 
 **Failure behaviour.** `qa_result` is present on every qa-mode outcome. A run
 that fails before the agent starts (bad `QA_*` input, a missing socket, an
@@ -742,7 +785,7 @@ stand behind. `findings` is always an array, `[]` when there are none.
 #### `qa_result`
 
 What a qa-mode run concluded. Present on every `AGENT_MODE=qa` outcome;
-omitted entirely otherwise. The wire values are shared with
+omitted entirely otherwise. The fields are the same for both `QA_TARGET`s. The wire values are shared with
 deployment-runner-kit's `tasks.QAResultDtoV1`.
 
 ```json

@@ -43,6 +43,9 @@ type input struct {
 	// Viewport is kept raw so that a non-integer size or an unknown key is
 	// reported rather than silently decoded.
 	Viewport json.RawMessage `json:"viewport,omitempty"`
+	// ReadOnly is kept raw for the same reason: only true or false is a
+	// read_only, and a null or a string must not quietly mean false.
+	ReadOnly json.RawMessage `json:"read_only,omitempty"`
 }
 
 type step struct {
@@ -107,6 +110,12 @@ func (in *input) validate() error {
 	for i, a := range in.Assertions {
 		if err := validateAssertion(a); err != nil {
 			return fmt.Errorf("assertions[%d]: %w", i, err)
+		}
+	}
+	if in.ReadOnly != nil {
+		var b bool
+		if string(in.ReadOnly) == "null" || json.Unmarshal(in.ReadOnly, &b) != nil {
+			return fmt.Errorf("read_only must be true or false, got %s", in.ReadOnly)
 		}
 	}
 	if in.Viewport != nil {

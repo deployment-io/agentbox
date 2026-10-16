@@ -5,7 +5,14 @@
 #      expect status completed, verdict pass.
 #   2. the same page, clicking its link to iana.org (outside allowed_hosts) —
 #      expect a blocked navigation, a failed step and verdict fail.
-# Needs Docker and network access. Run from anywhere in the repository.
+#   3. https://httpbin.org/forms/post with read_only, submitting the form —
+#      expect the POST in blocked_requests, every step ok, and final_url still
+#      the form (httpbin's /post response is never reached).
+#   4. the same page and steps without read_only — expect blocked_requests []
+#      and final_url httpbin's /post.
+# Cases 3 and 4 are asserted (they need jq); the script exits non-zero when
+# either does not hold. Needs Docker and network access. Run from anywhere in
+# the repository.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -67,3 +74,48 @@ run_check blocked '{
 }'
 
 echo "Expected: 'pass' → verdict pass; 'blocked' → verdict fail, blocked_navigations has the iana.org URL, steps[0].ok false."
+
+# form_input READ_ONLY — fills httpbin's order form and submits it.
+form_input() {
+  cat <<JSON
+{
+  "schema_version": 1,
+  "url": "https://httpbin.org/forms/post",
+  "allowed_hosts": ["httpbin.org"],
+  "read_only": $1,
+  "steps": [
+    {"action": "fill", "selector": "input[name=custname]", "value": "verify-browser smoke"},
+    {"action": "click", "selector": "text=Submit order"}
+  ],
+  "assertions": [],
+  "timeout_ms": 45000
+}
+JSON
+}
+
+run_check read_only "$(form_input true)"
+run_check read_write "$(form_input false)"
+
+if ! command -v jq >/dev/null 2>&1; then
+  echo "jq is not installed: cannot assert the read_only cases" >&2
+  exit 1
+fi
+failed=0
+# expect NAME JQ_FILTER DESCRIPTION — the filter must be true of NAME's result.
+expect() {
+  if ! jq -e "$2" "$workdir/$1/result.json" >/dev/null 2>&1; then
+    echo "FAIL $1: $3" >&2
+    failed=1
+  else
+    echo "ok   $1: $3"
+  fi
+}
+expect read_only '.status == "completed"' 'the check completed'
+expect read_only 'any(.blocked_requests[]; .method == "POST" and (.url | startswith("https://httpbin.org/post")))' 'the form POST is in blocked_requests'
+expect read_only 'all(.steps[]; .ok)' 'every step ran ok (a blocked submission fails no step)'
+expect read_only '.final_url == "https://httpbin.org/forms/post"' 'final_url is still the form'
+expect read_only 'all(.failed_requests[]; .method != "POST")' 'the blocked POST is not also a failed request'
+expect read_write '.status == "completed"' 'the check completed'
+expect read_write '.blocked_requests == []' 'blocked_requests is empty'
+expect read_write '.final_url == "https://httpbin.org/post"' "final_url is httpbin's /post response"
+exit "$failed"

@@ -3,8 +3,11 @@ import { describe, it } from 'node:test';
 import {
   CAPS,
   LIMITS,
+  READ_ONLY_METHODS,
   abortedByNavigation,
   blameBlockedNavigation,
+  blockedByReadOnly,
+  blockedRequestEntry,
   buildOutline,
   buildResult,
   capString,
@@ -12,6 +15,7 @@ import {
   errorResult,
   firstPartyFailure,
   isAllowedUrl,
+  isReadOnlyMethod,
   normalizeInput,
   normalizeViewport,
   pushCapped,
@@ -117,6 +121,58 @@ describe('normalizeInput', () => {
   }
 });
 
+describe('read_only', () => {
+  it('defaults to false', () => {
+    assert.equal(normalizeInput(validInput()).readOnly, false);
+  });
+  it('accepts true and false', () => {
+    assert.equal(normalizeInput(validInput({ read_only: true })).readOnly, true);
+    assert.equal(normalizeInput(validInput({ read_only: false })).readOnly, false);
+  });
+  for (const v of [null, 'true', 1, 0, {}, []]) {
+    it(`rejects ${JSON.stringify(v)}`, () => {
+      assert.throws(() => normalizeInput(validInput({ read_only: v })), /read_only/);
+    });
+  }
+  it('lets GET, HEAD and OPTIONS through, in any case', () => {
+    assert.deepEqual([...READ_ONLY_METHODS], ['GET', 'HEAD', 'OPTIONS']);
+    for (const m of ['GET', 'HEAD', 'OPTIONS', 'get', 'Head', 'options', 'gEt']) {
+      assert.equal(isReadOnlyMethod(m), true, m);
+    }
+  });
+  it('blocks every other method, in any case', () => {
+    for (const m of ['POST', 'PUT', 'PATCH', 'DELETE', 'post', 'Put', 'patch', 'delete', 'CONNECT', 'TRACE', 'PROPFIND', 'GETX', '']) {
+      assert.equal(isReadOnlyMethod(m), false, m);
+    }
+    for (const m of [undefined, null, 1, {}]) {
+      assert.equal(isReadOnlyMethod(m), false, String(m));
+    }
+  });
+  it('keeps blocked requests out of failed_requests only when read_only', () => {
+    assert.equal(blockedByReadOnly('POST', true), true);
+    assert.equal(blockedByReadOnly('delete', true), true);
+    assert.equal(blockedByReadOnly('GET', true), false);
+    assert.equal(blockedByReadOnly('POST', false), false);
+    assert.equal(blockedByReadOnly('POST', undefined), false);
+  });
+  it('builds blocked_requests in order, capped, always present', () => {
+    assert.deepEqual(buildResult({}).blocked_requests, []);
+    const entries = Array.from({ length: CAPS.blockedRequests + 5 }, (_, i) =>
+      blockedRequestEntry(`https://preview-abc.example.net/${i}`, 'POST'),
+    );
+    const r = buildResult({ httpStatus: 200, steps: [], assertions: [], blockedRequests: entries });
+    assert.equal(CAPS.blockedRequests, 20);
+    assert.equal(r.blocked_requests.length, CAPS.blockedRequests);
+    assert.deepEqual(r.blocked_requests[0], { url: 'https://preview-abc.example.net/0', method: 'POST' });
+    assert.deepEqual(r.blocked_requests[19], { url: 'https://preview-abc.example.net/19', method: 'POST' });
+    assert.equal(r.verdict, 'pass', 'a blocked request decides nothing on its own');
+  });
+  it('caps a blocked request URL', () => {
+    const e = blockedRequestEntry('https://x/' + 'p'.repeat(5000), 'POST');
+    assert.equal([...e.url].length, CAPS.urlChars);
+  });
+});
+
 describe('viewport', () => {
   // DEVICES mirrors playwright-core 1.64.0's descriptors for the presets.
   const DEVICES = {
@@ -150,6 +206,7 @@ describe('viewport', () => {
       steps: [],
       assertions: [],
       timeoutMs: 30000,
+      readOnly: false,
     });
     assert.deepEqual(options(undefined), {
       viewport: { width: 1280, height: 720 },
@@ -423,7 +480,15 @@ describe('caps', () => {
   });
   it('errorResult has no verdict', () => {
     const r = errorResult('boom\n  at x');
-    assert.deepEqual(r, { schema_version: 1, status: 'error', error: 'boom at x' });
+    assert.deepEqual(r, { schema_version: 1, status: 'error', error: 'boom at x', blocked_requests: [] });
+  });
+  it('errorResult keeps the requests read_only blocked before the check failed, capped', () => {
+    const entries = Array.from({ length: CAPS.blockedRequests + 3 }, (_, i) =>
+      blockedRequestEntry(`https://preview-abc.example.net/${i}`, 'POST'),
+    );
+    const r = errorResult('boom', entries);
+    assert.equal(r.blocked_requests.length, CAPS.blockedRequests);
+    assert.deepEqual(r.blocked_requests[0], { url: 'https://preview-abc.example.net/0', method: 'POST' });
   });
 });
 
