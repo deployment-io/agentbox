@@ -4,7 +4,6 @@ import {
   CAPS,
   LIMITS,
   READ_ONLY_METHODS,
-  READ_ONLY_WORKER_MARKER,
   abortedByNavigation,
   blameBlockedNavigation,
   blockedByReadOnly,
@@ -20,8 +19,6 @@ import {
   normalizeInput,
   normalizeViewport,
   pushCapped,
-  readOnlyWorkerScript,
-  readOnlyWorkerWrapper,
   resultViewport,
   viewportContextOptions,
 } from './lib.mjs';
@@ -169,36 +166,6 @@ describe('read_only', () => {
     assert.deepEqual(r.blocked_requests[0], { url: 'https://preview-abc.example.net/0', method: 'POST' });
     assert.deepEqual(r.blocked_requests[19], { url: 'https://preview-abc.example.net/19', method: 'POST' });
     assert.equal(r.verdict, 'pass', 'a blocked request decides nothing on its own');
-  });
-  it('recognises a worker script URL the page guard marked', () => {
-    const M = READ_ONLY_WORKER_MARKER;
-    assert.deepEqual(readOnlyWorkerScript(`https://site.example/js/w.js?${M}=classic`), {
-      type: 'classic',
-      scriptUrl: 'https://site.example/js/w.js',
-    });
-    assert.deepEqual(readOnlyWorkerScript(`https://site.example/m.js?v=2&a=%20b&${M}=module`), {
-      type: 'module',
-      scriptUrl: 'https://site.example/m.js?v=2&a=%20b',
-    });
-    for (const u of [
-      'https://site.example/w.js',
-      `https://site.example/w.js?${M}=other`,
-      `https://site.example/w.js?${M}=classic&v=1`,
-      `https://site.example/w.js#${M}=classic`,
-      'not a url',
-    ]) {
-      assert.equal(readOnlyWorkerScript(u), null, u);
-    }
-  });
-  it('wraps a worker script so the guard runs first', () => {
-    assert.equal(
-      readOnlyWorkerWrapper('guard();', 'https://site.example/w.js', 'classic'),
-      'guard();\nimportScripts("https://site.example/w.js");\n',
-    );
-    assert.equal(
-      readOnlyWorkerWrapper('guard();', 'https://site.example/m.js', 'module'),
-      'guard();\nawait import("https://site.example/m.js");\n',
-    );
   });
   it('caps a blocked request URL', () => {
     const e = blockedRequestEntry('https://x/' + 'p'.repeat(5000), 'POST');

@@ -17,17 +17,17 @@
 //     browser-level guard before their first navigation is let go; service
 //     workers are blocked, downloads refused and dialogs dismissed;
 //   - with read_only, every request whose method is not GET, HEAD or OPTIONS
-//     is failed before it is sent and no WebSocket opens (guardReadOnly) —
-//     in workers too, which still run.
+//     is failed before it is sent by the browser's own request interception
+//     (guardNavigations, guardReadOnly), and the channels it can't see —
+//     WebSocket, SharedWorker, WebTransport, RTCPeerConnection — are refused.
 
+import { randomBytes } from 'node:crypto';
 import { readFile, writeFile } from 'node:fs/promises';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { chromium, devices } from 'playwright-core';
 import {
   CAPS,
   LIMITS,
-  READ_ONLY_METHODS,
-  READ_ONLY_WORKER_MARKER,
   abortedByNavigation,
   blameBlockedNavigation,
   blockedByReadOnly,
@@ -40,8 +40,6 @@ import {
   normalizeInput,
   oneLine,
   pushCapped,
-  readOnlyWorkerScript,
-  readOnlyWorkerWrapper,
   viewportContextOptions,
 } from './lib.mjs';
 
@@ -62,11 +60,6 @@ const EVALUATE_TIMEOUT_MS = 1500;
 const OUTLINE_RAW_MAX = 200;
 const POPUP_BINDING = '__verifyBrowserBlockedPopup';
 const READ_ONLY_BINDING = '__verifyBrowserBlockedRequest';
-const READ_ONLY_CHANNEL = '__verifyBrowserBlockedRequest';
-const READ_ONLY_INSTALLED = '__verifyBrowserReadOnly';
-// READ_ONLY_REFUSED_URL is where a worker's refused XMLHttpRequest goes
-// instead (a reserved name: it never resolves).
-const READ_ONLY_REFUSED_URL = 'https://read-only.verify-browser.invalid/';
 
 async function main() {
   const [inputPath, resultPath, proxyAddr] = process.argv.slice(2);
@@ -346,284 +339,150 @@ async function guardNavigations(context, page, allowed, onBlocked, onDocument, o
   return targetInfo.targetId;
 }
 
-// guardReadOnly holds a read_only check to its rule everywhere guardNavigations
-// cannot see. A context route fails every request with another method that
-// any frame — out-of-process ones included — or dedicated worker makes
-// (Playwright attaches to each of their targets and intercepts there before
-// letting it run). readOnlyGuard, run in every frame, refuses WebSockets
-// (which no request interception sees) and hands each worker a guarded copy
-// of itself: the page marks an http(s) worker's script URL, and the route
-// serves readOnlyWorkerWrapper for it, which runs readOnlyGuard in the worker
-// before the worker's own script. Each refusal is reported to onBlocked once
-// (a worker's report reaches every same-origin frame of the page).
+// guardReadOnly holds a read_only check to its rule where guardNavigations
+// (the page target's own DevTools Fetch interception) cannot see: a context
+// route fails every request with another method that any frame —
+// out-of-process ones included — or dedicated worker sends (Playwright
+// intercepts each of their targets before letting it run). Request
+// interception is enforced by the browser, so no page script can get around
+// it.
+//
+// What no request interception sees is refused instead, in every frame,
+// before the page's own scripts run (readOnlyGuard): WebSocket and
+// WebSocketStream, SharedWorker (its requests reach no route), WebTransport
+// and RTCPeerConnection.
+//
+// THE THREAT MODEL is the site's own code doing what it normally does while
+// QA clicks, types and navigates — a sign-up form submitted, a cart updated,
+// an analytics beacon posted. It is not a sandbox against code written to get
+// around it; the QA agent can't run scripts, only steps.
+//
+// Each refusal is reported to onBlocked through a binding that only accepts
+// calls carrying this check's random secret, which only the guard holds, so
+// the page can't add entries to blocked_requests.
 async function guardReadOnly(context, onBlocked) {
-  const reported = new Set();
-  await context.exposeBinding(READ_ONLY_BINDING, (_source, url, method, id) => {
-    if (id !== undefined) {
-      if (reported.has(id)) {
-        return;
-      }
-      reported.add(id);
+  const secret = randomBytes(16).toString('hex');
+  await context.exposeBinding(READ_ONLY_BINDING, (_source, key, url, method) => {
+    if (key === secret) {
+      onBlocked(String(url), String(method));
     }
-    onBlocked(url, method);
   });
-  const options = {
-    binding: READ_ONLY_BINDING,
-    channel: READ_ONLY_CHANNEL,
-    installed: READ_ONLY_INSTALLED,
-    marker: READ_ONLY_WORKER_MARKER,
-    methods: [...READ_ONLY_METHODS],
-    refusedUrl: READ_ONLY_REFUSED_URL,
-    source: readOnlyGuard.toString(),
-    inWorker: false,
-  };
-  await context.addInitScript(readOnlyGuard, options);
-  const workerGuard = `(${options.source})(${JSON.stringify({ ...options, inWorker: true })});`;
+  await context.addInitScript(readOnlyGuard, { binding: READ_ONLY_BINDING, secret });
   await context.route('**/*', (route) => {
     const req = route.request();
-    if (req.url().startsWith(READ_ONLY_REFUSED_URL)) {
-      // A worker's refused XMLHttpRequest, already reported by its guard.
-      return route.abort('failed');
-    }
     if (!isReadOnlyMethod(req.method())) {
       onBlocked(req.url(), req.method());
       return route.abort('aborted');
-    }
-    const worker = readOnlyWorkerScript(req.url());
-    if (worker) {
-      return route.fulfill({
-        status: 200,
-        contentType: 'text/javascript',
-        body: readOnlyWorkerWrapper(workerGuard, worker.scriptUrl, worker.type),
-      });
     }
     return route.fallback();
   });
 }
 
 // readOnlyGuard runs before any of the page's own scripts in every frame of a
-// read_only check (inWorker false) and in every worker (inWorker true):
-//   - WebSocket and WebSocketStream refuse to connect, reported as
-//     "WEBSOCKET" rather than thrown, so the page carries on as it would with
-//     a server that never answered;
-//   - Worker and SharedWorker still start the worker, guarded: an http(s)
-//     worker created by a frame gets the marked script URL (worker scripts'
-//     requests reach the route, and the marked one goes no further) that the
-//     context route answers with a wrapper; a blob: or data: worker, or one a worker creates
-//     (whose script no route sees), is started from a blob that runs this
-//     guard and then loads the script. In such a blob, fetch, Request,
-//     XMLHttpRequest, importScripts, EventSource and nested workers resolve
-//     relative URLs against the script's own http(s) URL (base), as they
-//     would in the worker run natively. Each real constructor's prototype
-//     points back at the guarded one, so the page can't reach the real one;
-//   - in a worker, fetch and XMLHttpRequest refuse any method but GET, HEAD
-//     and OPTIONS, since a shared or nested worker's requests reach no route
-//     (a refused XMLHttpRequest is sent as a GET to refusedUrl, which fails as
-//     a network error would).
-// A frame reports through the binding; a worker, which has none, posts to a
-// BroadcastChannel every same-origin frame forwards to it. Reports carry an
-// id so guardReadOnly counts each once.
+// read_only check. It refuses the channels no request interception sees,
+// reporting each attempt with the method it is named by:
+//   - WebSocket ("WEBSOCKET"): the socket fails as for a server that never
+//     answered (error, then close with code 1006), so the page carries on;
+//     WebSocketStream throws;
+//   - SharedWorker ("SHAREDWORKER"), WebTransport ("WEBTRANSPORT") and
+//     RTCPeerConnection ("WEBRTC"): the constructor throws a SecurityError.
+// Each real constructor's prototype.constructor points at the refusing one, so
+// an existing prototype doesn't lead back to the real constructor.
 function readOnlyGuard(o) {
   const g = globalThis;
-  if (g[o.installed]) {
-    return;
-  }
-  try {
-    Object.defineProperty(g, o.installed, { value: true });
-  } catch {
-    // Installing twice is harmless.
-  }
-  const absolute = (u) => {
-    try {
-      return new URL(String(u), o.base ?? location.href).href;
-    } catch {
-      return String(u);
-    }
-  };
-  // The URL a worker run from a blob would have had natively.
-  const base = typeof o.base === 'string' && /^https?:/.test(o.base) ? o.base : null;
-  const here = () => base ?? location.href;
-  const resolve = (u) => {
-    if (!base || typeof u !== 'string') {
-      return u;
-    }
-    try {
-      return new URL(u, base).href;
-    } catch {
-      return u;
-    }
-  };
-  let seq = 0;
-  let channel = null;
+  // Taken now, before any page script can replace it, so the secret only
+  // ever reaches the real binding.
+  const call = g[o.binding];
+  // A script-created about:blank frame resolves against its parent's URL
+  // (document.baseURI), as the browser itself would.
+  const base = () => (document.baseURI && document.baseURI !== 'about:blank' ? document.baseURI : location.href);
   const report = (u, method) => {
-    const id = `${Date.now().toString(36)}.${Math.random().toString(36).slice(2)}.${seq++}`;
+    // A channel opened without a URL (RTCPeerConnection) is reported as the
+    // page that opened it.
+    let url = u === undefined || u === null ? base() : String(u);
     try {
-      if (o.inWorker) {
-        channel ??= new BroadcastChannel(o.channel);
-        channel.postMessage({ url: absolute(u), method: String(method), id });
-      } else {
-        g[o.binding](absolute(u), String(method), id);
-      }
+      url = new URL(url, base()).href;
     } catch {
-      // Best-effort: the request is refused either way.
+      // Reported as given.
+    }
+    try {
+      call(o.secret, url, method);
+    } catch {
+      // Best-effort: the channel is refused either way.
     }
   };
-  if (!o.inWorker && typeof BroadcastChannel === 'function') {
-    try {
-      new BroadcastChannel(o.channel).onmessage = (e) => {
-        const d = e.data;
-        if (d && typeof d === 'object') {
-          try {
-            g[o.binding](String(d.url), String(d.method), String(d.id));
-          } catch {
-            // Best-effort, like report.
-          }
-        }
-      };
-    } catch {
-      // An opaque-origin frame has no channel; its workers' reports are lost.
+  const replace = (name, refusing) => {
+    const Real = g[name];
+    if (typeof Real !== 'function') {
+      return;
     }
-  }
-  const define = (name, value) => {
+    Object.defineProperty(refusing, 'name', { value: name });
+    refusing.prototype = Real.prototype;
+    for (const k of Object.getOwnPropertyNames(Real)) {
+      if (/^[A-Z_]+$/.test(k)) {
+        try {
+          Object.defineProperty(refusing, k, { value: Real[k] });
+        } catch {
+          // A constant that can't be copied is left out.
+        }
+      }
+    }
     try {
-      Object.defineProperty(g, name, { value, writable: true, configurable: true });
+      Object.defineProperty(Real.prototype, 'constructor', { value: refusing, writable: true, configurable: true });
+    } catch {
+      // A prototype that can't be changed keeps its constructor.
+    }
+    try {
+      Object.defineProperty(g, name, { value: refusing, writable: true, configurable: true });
     } catch {
       // A property that can't be redefined keeps its value.
     }
   };
-  if (typeof g.WebSocket === 'function') {
-    const Real = g.WebSocket;
-    const Blocked = function WebSocket(u) {
-      if (!new.target) {
-        throw new TypeError("Failed to construct 'WebSocket': Please use the 'new' operator");
-      }
-      report(u, 'WEBSOCKET');
-      const ws = new EventTarget();
-      Object.defineProperties(ws, {
-        url: { value: absolute(u) },
-        readyState: { value: 3 },
-        protocol: { value: '' },
-        extensions: { value: '' },
-        bufferedAmount: { value: 0 },
-        binaryType: { value: 'blob', writable: true },
-        send: { value: () => {} },
-        close: { value: () => {} },
-      });
-      for (const h of ['onopen', 'onmessage', 'onerror', 'onclose']) {
-        ws[h] = null;
-      }
-      setTimeout(() => {
-        const err = new Event('error');
-        ws.dispatchEvent(err);
-        ws.onerror?.(err);
-        const close = new CloseEvent('close', { code: 1006, reason: '', wasClean: false });
-        ws.dispatchEvent(close);
-        ws.onclose?.(close);
-      }, 0);
-      return ws;
-    };
-    for (const k of ['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED']) {
-      Object.defineProperty(Blocked, k, { value: Real[k] });
-    }
-    define('WebSocket', Blocked);
-  }
-  if (typeof g.WebSocketStream === 'function') {
-    define('WebSocketStream', function WebSocketStream(u) {
-      report(u, 'WEBSOCKET');
-      throw new DOMException('WebSocket connections are blocked in a read-only check', 'SecurityError');
+  const refuse = (name, method) =>
+    replace(name, function (u) {
+      report(u, method);
+      throw new DOMException(`${name} is blocked in a read-only check`, 'SecurityError');
     });
-  }
-  for (const name of ['Worker', 'SharedWorker']) {
-    const Real = g[name];
-    if (typeof Real !== 'function') {
-      continue;
+  replace('WebSocket', function (u) {
+    if (!new.target) {
+      throw new TypeError("Failed to construct 'WebSocket': Please use the 'new' operator");
     }
-    const Guarded = function (u, options) {
-      if (!new.target) {
-        throw new TypeError(`Failed to construct '${name}': Please use the 'new' operator`);
-      }
-      const make = (url) => Reflect.construct(Real, [url, options], new.target === Guarded ? Real : new.target);
-      let url;
-      try {
-        url = new URL(String(u), here());
-      } catch {
-        return make(u);
-      }
-      const type = options && typeof options === 'object' && options.type === 'module' ? 'module' : 'classic';
-      if (!o.inWorker && (url.protocol === 'https:' || url.protocol === 'http:')) {
-        url.search = `${url.search || '?'}${url.search ? '&' : ''}${o.marker}=${type}`;
-        return make(url.href);
-      }
-      // base: the script's own URL, for reporting the blob's relative URLs.
-      const guard = `(${o.source})(${JSON.stringify({ ...o, inWorker: true, base: url.href })});`;
-      const load =
-        type === 'module' ? `await import(${JSON.stringify(url.href)});` : `importScripts(${JSON.stringify(url.href)});`;
-      return make(URL.createObjectURL(new Blob([`${guard}\n${load}\n`], { type: 'text/javascript' })));
-    };
-    Object.defineProperty(Guarded, 'name', { value: name });
-    Guarded.prototype = Real.prototype;
+    report(u, 'WEBSOCKET');
+    const ws = new EventTarget();
+    let url = String(u);
     try {
-      // Worker.prototype.constructor would otherwise be the unguarded Real.
-      Object.defineProperty(Real.prototype, 'constructor', { value: Guarded, writable: true, configurable: true });
+      url = new URL(url, base()).href;
     } catch {
-      // A prototype that can't be changed keeps its constructor.
+      // Kept as given.
     }
-    define(name, Guarded);
-  }
-  if (!o.inWorker) {
-    return;
-  }
-  const safe = (m) => typeof m === 'string' && o.methods.includes(m.trim().toUpperCase());
-  const RealRequest = g.Request;
-  if (base) {
-    // Constructors that take a URL first: a subclass resolves it against base.
-    for (const name of ['Request', 'EventSource']) {
-      const Real = g[name];
-      if (typeof Real !== 'function') {
-        continue;
-      }
-      const Based = class extends Real {
-        constructor(u, ...rest) {
-          super(resolve(u), ...rest);
-        }
-      };
-      Object.defineProperty(Based, 'name', { value: name });
-      try {
-        Object.defineProperty(Real.prototype, 'constructor', { value: Based, writable: true, configurable: true });
-      } catch {
-        // As for the workers above.
-      }
-      define(name, Based);
-    }
-    if (typeof g.importScripts === 'function') {
-      const realImportScripts = g.importScripts;
-      define('importScripts', function importScripts(...urls) {
-        return realImportScripts.apply(this, urls.map(resolve));
-      });
-    }
-  }
-  if (typeof g.fetch === 'function') {
-    const realFetch = g.fetch;
-    define('fetch', function fetch(input, init) {
-      const isRequest = typeof RealRequest === 'function' && input instanceof RealRequest;
-      const method = init && init.method !== undefined ? String(init.method) : isRequest ? input.method : 'GET';
-      if (!safe(method)) {
-        report(isRequest ? input.url : input, method);
-        return Promise.reject(new TypeError('Failed to fetch'));
-      }
-      return realFetch.call(this, resolve(input), init);
+    Object.defineProperties(ws, {
+      url: { value: url },
+      readyState: { value: 3 },
+      protocol: { value: '' },
+      extensions: { value: '' },
+      bufferedAmount: { value: 0 },
+      binaryType: { value: 'blob', writable: true },
+      send: { value: () => {} },
+      close: { value: () => {} },
     });
-  }
-  if (typeof g.XMLHttpRequest === 'function') {
-    const open = g.XMLHttpRequest.prototype.open;
-    g.XMLHttpRequest.prototype.open = function (method, u, ...rest) {
-      if (!safe(String(method))) {
-        report(u, String(method));
-        return open.call(this, 'GET', o.refusedUrl, ...rest);
-      }
-      return open.call(this, method, resolve(u), ...rest);
-    };
-  }
+    for (const h of ['onopen', 'onmessage', 'onerror', 'onclose']) {
+      ws[h] = null;
+    }
+    setTimeout(() => {
+      const err = new Event('error');
+      ws.dispatchEvent(err);
+      ws.onerror?.(err);
+      const close = new CloseEvent('close', { code: 1006, reason: '', wasClean: false });
+      ws.dispatchEvent(close);
+      ws.onclose?.(close);
+    }, 0);
+    return ws;
+  });
+  refuse('WebSocketStream', 'WEBSOCKET');
+  refuse('SharedWorker', 'SHAREDWORKER');
+  refuse('WebTransport', 'WEBTRANSPORT');
+  refuse('RTCPeerConnection', 'WEBRTC');
+  refuse('webkitRTCPeerConnection', 'WEBRTC');
 }
 
 // watchPage collects what the page does. A first-party request cancelled

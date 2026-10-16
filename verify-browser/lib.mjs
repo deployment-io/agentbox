@@ -339,42 +339,6 @@ export function blockedByReadOnly(method, readOnly) {
   return readOnly === true && !isReadOnlyMethod(method);
 }
 
-// READ_ONLY_WORKER_MARKER is the query parameter a read_only check's page
-// guard appends to an http(s) worker's script URL, with the worker's type
-// ("classic" or "module") as its value, so the context route can tell the
-// request apart and serve readOnlyWorkerWrapper in its place. (A fragment
-// would not do: the route never sees one.)
-export const READ_ONLY_WORKER_MARKER = '__verifyBrowserReadOnlyWorker';
-
-// readOnlyWorkerScript returns the worker type and real script URL (the
-// marker removed) of a script URL the page guard marked, or null for any other
-// URL. The marker is the last query parameter.
-export function readOnlyWorkerScript(url) {
-  let u;
-  try {
-    u = new URL(String(url));
-  } catch {
-    return null;
-  }
-  const m = new RegExp(`[?&]${READ_ONLY_WORKER_MARKER}=(classic|module)$`).exec(u.search);
-  if (!m) {
-    return null;
-  }
-  u.search = u.search.slice(0, m.index);
-  return { type: m[1], scriptUrl: u.href };
-}
-
-// readOnlyWorkerWrapper is the script a read_only worker runs in place of its
-// own: guardCall (the read-only guard, as a statement) first, then the real
-// script — importScripts for a classic worker, a dynamic import for a module
-// one (a static import would be evaluated before the guard). The worker keeps
-// its URL, so its relative URLs resolve as before.
-export function readOnlyWorkerWrapper(guardCall, scriptUrl, type) {
-  const load =
-    type === 'module' ? `await import(${JSON.stringify(scriptUrl)});` : `importScripts(${JSON.stringify(scriptUrl)});`;
-  return `${guardCall}\n${load}\n`;
-}
-
 // capString truncates s to max characters (code points), marking the cut.
 export function capString(s, max) {
   const str = String(s ?? '');
