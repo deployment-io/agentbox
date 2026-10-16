@@ -57,7 +57,8 @@ func TestDeployGate(t *testing.T) {
 		want     string
 	}{
 		{"an empty diff skips", Diff{}, []string{matching}, ReasonNoChanges},
-		{"documentation only skips", codeDiff("0-org/repo", "README.md", "docs/x.go"), []string{matching}, ReasonDocsOnly},
+		{"documentation only skips", codeDiff("0-org/repo", "README.md", "docs/guide.md"), []string{matching}, ReasonDocsOnly},
+		{"code under docs/ runs", codeDiff("0-org/repo", "docs/x.go"), []string{matching}, ""},
 		{"lockfiles only skip", codeDiff("0-org/repo", "go.sum"), []string{matching}, ReasonLockfileOnly},
 		{"a missing services.json skips", codeDiff("0-org/repo", "main.go"), nil, ReasonNoDeployContext},
 		{"no row for a changed repository skips", codeDiff("0-org/repo", "main.go"), []string{`{"service":"web","repo":"org/other"}`}, ReasonNoDeployContext},
