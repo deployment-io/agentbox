@@ -1,5 +1,5 @@
 # ---- Stage 1: Build agentbox binary ----
-FROM golang:1.25-bookworm AS builder
+FROM golang:1.27.3-bookworm AS builder
 
 WORKDIR /src
 COPY . .

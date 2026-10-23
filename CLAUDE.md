@@ -5,7 +5,7 @@ Guidance for working on the agentbox codebase.
 ## Project Overview
 
 agentbox is a Docker-based orchestrator that runs an AI coding agent
-against a bind-mounted working directory. Written in Go 1.24. See
+against a bind-mounted working directory. Written in Go 1.27.3. See
 [README.md](README.md) for the user-facing description and
 [docs/CONTRACT.md](docs/CONTRACT.md) for the input/output contract.
 
@@ -26,7 +26,7 @@ docker build --platform linux/amd64 -t agentbox:dev .
 ```
 
 The multi-stage Dockerfile compiles the Go binary inside a
-`golang:1.24-bookworm` stage, so you don't need a separate
+`golang:1.27.3-bookworm` stage, so you don't need a separate
 `go build` step before Docker build.
 
 The verify-browser image (a separate release, `verify-browser-vX.Y.Z`;
@@ -177,7 +177,7 @@ That's it. The Driver + OutputParser abstractions handle the rest.
 
 ## Code Conventions
 
-- **Go 1.24**. No generics beyond stdlib-provided.
+- **Go 1.27.3** (toolchain line; `go 1.26.0` in go.mod). No generics beyond stdlib-provided.
 - **Functions rarely exceed 50 lines.** Decompose into private helpers
   in the same file rather than writing long functions.
 - **Errors wrap with `%w`**: `fmt.Errorf("install failed: %w", err)`.
@@ -211,7 +211,7 @@ manual smoke test (SIGTERM during a run).
 
 The image is multi-stage:
 
-1. **Builder** (`golang:1.24-bookworm`): compiles
+1. **Builder** (`golang:1.27.3-bookworm`): compiles
    `cmd/agentbox/main.go` as a statically linked `linux/amd64` binary.
 2. **Runtime** (`debian:bookworm-slim`): contains Node 22, Python 3,
    pip, git, build-essential, and the compiled agentbox binary.
