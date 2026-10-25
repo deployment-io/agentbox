@@ -65,17 +65,18 @@ func TestBuildEnv_StripsReviewInputVars(t *testing.T) {
 }
 
 // QA-mode inputs reach the agent folded into the QA prompt, never through
-// its environment — QA_TARGET and QA_URLS included.
+// its environment — QA_TARGET, QA_URLS and QA_BACKENDS included.
 func TestBuildEnv_StripsQAInputVars(t *testing.T) {
 	t.Setenv("QA_SPEC", "{\"Acceptance\":[\"the \\\"home\\\" page loads\"]}")
 	t.Setenv("QA_REPOSITORIES", "0-acme/website")
 	t.Setenv("QA_TARGET", "production")
 	t.Setenv("QA_URLS", "0-acme/website=https://acme.example")
+	t.Setenv("QA_BACKENDS", `[{"repository":"1-acme/api","url":"https://d1.cloudfront.net","health_url":"https://d1.cloudfront.net/healthz"}]`)
 	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-test")
 
 	env := buildEnv()
 
-	for _, key := range []string{"QA_SPEC", "QA_REPOSITORIES", "QA_TARGET", "QA_URLS"} {
+	for _, key := range []string{"QA_SPEC", "QA_REPOSITORIES", "QA_TARGET", "QA_URLS", "QA_BACKENDS"} {
 		for _, kv := range env {
 			if strings.HasPrefix(kv, key+"=") {
 				t.Errorf("%s must be stripped from the agent subprocess env", key)

@@ -201,10 +201,15 @@ type Config struct {
 
 	// QARepositories are the repository directories (relative to /work, e.g.
 	// "0-acme/website") a QA run deploys previews of. From the comma-separated
-	// QA_REPOSITORIES, qa mode only; required. They are names for the runner's
-	// deploy_static_site_preview tool — the repositories themselves are not
-	// in a QA run's WORK_DIR.
+	// QA_REPOSITORIES, qa mode only; required unless QABackends has an entry.
+	// They are names for the runner's deploy_static_site_preview tool — the
+	// repositories themselves are not in a QA run's WORK_DIR.
 	QARepositories []string
+
+	// QABackends are the backend previews the runner deployed from the change
+	// before a preview QA run: each one's URL and health URL, or why its deploy
+	// failed. From the JSON array QA_BACKENDS, preview target only; optional.
+	QABackends []QABackend
 
 	// QATarget is what a QA run checks: QATargetPreview (previews it deploys
 	// itself — the default) or QATargetProduction (the sites already live in
@@ -520,13 +525,22 @@ func (c *Config) loadReviewInputs() error {
 	return nil
 }
 
+// QABackend is one QA_BACKENDS entry: a backend preview the runner deployed
+// (URL and HealthURL set) or one whose deploy failed (Error set).
+type QABackend struct {
+	Repository string
+	URL        string
+	HealthURL  string
+	Error      string
+}
+
 // loadQAInputs reads and validates the QA_* half of the contract. REVIEW_*
 // vars are not read in qa mode.
 //
-// QA_REPOSITORIES and the MCP socket are required: a QA run with nothing to
-// preview, or without the tools that deploy and drive the previews, cannot
-// check anything, and saying so at load is better than an agent run that
-// reports every criterion "not checked".
+// QA_REPOSITORIES (or, for a preview run, a QA_BACKENDS entry) and the MCP
+// socket are required: a QA run with nothing to preview, or without the tools
+// that deploy and drive the previews, cannot check anything, and saying so at
+// load is better than an agent run that reports every criterion "not checked".
 func (c *Config) loadQAInputs() error {
 	c.QASpec = strings.TrimSpace(os.Getenv("QA_SPEC"))
 
@@ -545,28 +559,112 @@ func (c *Config) loadQAInputs() error {
 		seen[repo] = true
 		c.QARepositories = append(c.QARepositories, repo)
 	}
-	if len(c.QARepositories) == 0 {
-		return fmt.Errorf("QA_REPOSITORIES is required in %s mode", ModeQA)
-	}
-	if c.MCPSocket == "" {
-		return fmt.Errorf("%s is required in %s mode: QA deploys and checks previews through the runner's tools", MCPSocketEnv, ModeQA)
-	}
 
 	c.QATarget = strings.TrimSpace(os.Getenv("QA_TARGET"))
 	switch c.QATarget {
 	case "":
 		c.QATarget = QATargetPreview
-	case QATargetPreview:
-	case QATargetProduction:
+	case QATargetPreview, QATargetProduction:
+	default:
+		return fmt.Errorf("invalid QA_TARGET %q: must be %q or %q", c.QATarget, QATargetPreview, QATargetProduction)
+	}
+	if c.QATarget == QATargetPreview {
+		backends, err := parseQABackends(os.Getenv("QA_BACKENDS"))
+		if err != nil {
+			return err
+		}
+		c.QABackends = backends
+	}
+	if len(c.QARepositories) == 0 && len(c.QABackends) == 0 {
+		return fmt.Errorf("QA_REPOSITORIES is required in %s mode", ModeQA)
+	}
+	if c.MCPSocket == "" {
+		return fmt.Errorf("%s is required in %s mode: QA deploys and checks previews through the runner's tools", MCPSocketEnv, ModeQA)
+	}
+	if c.QATarget == QATargetProduction {
 		urls, err := parseQAURLs(os.Getenv("QA_URLS"), c.QARepositories)
 		if err != nil {
 			return err
 		}
 		c.QAURLs = urls
-	default:
-		return fmt.Errorf("invalid QA_TARGET %q: must be %q or %q", c.QATarget, QATargetPreview, QATargetProduction)
 	}
 	return nil
+}
+
+// parseQABackends reads QA_BACKENDS: a JSON array with one entry per backend
+// the runner deployed, {"repository","url","health_url"}, or one whose deploy
+// failed, {"repository","error"}. The repository is a directory inside /work
+// (as QA_REPOSITORIES' are), each URL follows QA_URLS' rules, and no
+// repository appears twice. Blank is no backends.
+func parseQABackends(raw string) ([]QABackend, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	var entries []struct {
+		Repository string `json:"repository"`
+		URL        string `json:"url"`
+		HealthURL  string `json:"health_url"`
+		Error      string `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(raw), &entries); err != nil {
+		return nil, fmt.Errorf("QA_BACKENDS must be a JSON array of backend entries: %v", err)
+	}
+	seen := map[string]bool{}
+	var backends []QABackend
+	for i, e := range entries {
+		b := QABackend{
+			Repository: strings.TrimSpace(e.Repository),
+			URL:        strings.TrimSpace(e.URL),
+			HealthURL:  strings.TrimSpace(e.HealthURL),
+			Error:      strings.TrimSpace(e.Error),
+		}
+		name := fmt.Sprintf("QA_BACKENDS entry %d (%q)", i+1, b.Repository)
+		if b.Repository == "" || !filepath.IsLocal(b.Repository) {
+			return nil, fmt.Errorf("%s must name a repository directory inside /work", name)
+		}
+		if seen[b.Repository] {
+			return nil, fmt.Errorf("%s repeats repository %q", name, b.Repository)
+		}
+		seen[b.Repository] = true
+		deployed := b.URL != "" || b.HealthURL != ""
+		switch {
+		case deployed && b.Error != "":
+			return nil, fmt.Errorf("%s must have either url and health_url or error, not both", name)
+		case deployed:
+			if problem := qaURLProblem(b.URL); problem != "" {
+				return nil, fmt.Errorf("%s: the url %s", name, problem)
+			}
+			if problem := qaURLProblem(b.HealthURL); problem != "" {
+				return nil, fmt.Errorf("%s: the health_url %s", name, problem)
+			}
+		case b.Error == "":
+			return nil, fmt.Errorf("%s must have url and health_url, or error", name)
+		}
+		backends = append(backends, b)
+	}
+	return backends, nil
+}
+
+// qaURLProblem says what is wrong with a URL a QA run is handed to open, or
+// "": it must be https, carry no user info and use port 443 (or none).
+func qaURLProblem(rawURL string) string {
+	if rawURL == "" {
+		return "is missing"
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Sprintf("is invalid: %v", err)
+	}
+	if u.Scheme != "https" || u.Opaque != "" || u.Hostname() == "" {
+		return "must be an https URL"
+	}
+	if u.User != nil {
+		return "must not carry user info"
+	}
+	if port := u.Port(); port != "" && port != "443" {
+		return "must use port 443 or none"
+	}
+	return ""
 }
 
 // parseQAURLs reads QA_URLS: comma-separated "<repository>=<url>" entries,
@@ -596,18 +694,8 @@ func parseQAURLs(raw string, repos []string) (map[string]string, error) {
 		if _, dup := urls[repo]; dup {
 			return nil, fmt.Errorf("QA_URLS entry %q repeats repository %q", entry, repo)
 		}
-		u, err := url.Parse(rawURL)
-		if err != nil {
-			return nil, fmt.Errorf("QA_URLS entry %q has an invalid url: %v", entry, err)
-		}
-		if u.Scheme != "https" || u.Opaque != "" || u.Hostname() == "" {
-			return nil, fmt.Errorf("QA_URLS entry %q must be an https URL", entry)
-		}
-		if u.User != nil {
-			return nil, fmt.Errorf("QA_URLS entry %q must not carry user info", entry)
-		}
-		if port := u.Port(); port != "" && port != "443" {
-			return nil, fmt.Errorf("QA_URLS entry %q must use port 443 or none", entry)
+		if problem := qaURLProblem(rawURL); problem != "" {
+			return nil, fmt.Errorf("QA_URLS entry %q: the url %s", entry, problem)
 		}
 		urls[repo] = rawURL
 	}

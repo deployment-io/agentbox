@@ -344,6 +344,12 @@ in production instead, deploying nothing ([Production QA](#production-qa)).
 `REVIEW_*` variables are not read. `MAX_TURNS` is honoured as in every other
 mode. All three agents (`AGENT_TYPE`) can serve it.
 
+From agentbox 1.9.35, a preview run can also be told about **backend
+previews** (`QA_BACKENDS`): web services the runner itself deployed from the
+change before the run. The agent never deploys a backend; it confirms each one
+answers its health check with `verify_preview_reachable`. A run may then have
+backends and no `QA_REPOSITORIES` at all.
+
 **A QA run is blind.** It is given no diff, no implementer summary, no
 `STEP_PROMPT` and no repository: during the stages the change is uncommitted
 in the working tree, so any repository access would show it through git. Its
@@ -356,9 +362,10 @@ verify in this mode.
 | Variable | Description |
 |---|---|
 | `QA_SPEC` | Optional. The same text the runner stamps as the review spec: the Task's spec JSON or its prose description, possibly prefixed with re-run instructions. The acceptance criteria are found the way the runner finds them: when the text starts with `[Re-run instructions`, the text before the LAST `\n[Spec]\n` is the re-run instructions block and the text after it is the spec; a spec that is a JSON object contributes its `Acceptance` list (keys matched case-insensitively — the runner's `TaskSpec` has no json tags); prose has no criteria. Each criterion is collapsed to one line, blanks dropped, capped at 50 criteria × 500 characters. Stripped from the agent's environment. |
-| `QA_REPOSITORIES` | **Required in qa mode.** Comma-separated repository directories under `/work` to preview, e.g. `0-acme/website,1-acme/docs`. Each must be a relative path that stays inside `/work` (`filepath.IsLocal`); `..` and absolute paths are rejected at startup. Duplicates and blanks are dropped. Stripped from the agent's environment. |
+| `QA_REPOSITORIES` | **Required in qa mode, unless `QA_BACKENDS` has at least one entry** (preview target; agentbox 1.9.35 and later — earlier images always require it). Comma-separated repository directories under `/work` to preview, e.g. `0-acme/website,1-acme/docs`. Each must be a relative path that stays inside `/work` (`filepath.IsLocal`); `..` and absolute paths are rejected at startup. Duplicates and blanks are dropped. Stripped from the agent's environment. |
 | `QA_TARGET` | Optional. `preview` (the default when unset) or `production`; anything else is rejected at startup. `preview` is everything above. `production` checks the sites already live in production at `QA_URLS` — see [Production QA](#production-qa). Stripped from the agent's environment. |
 | `QA_URLS` | **Required when `QA_TARGET=production`; not read otherwise.** Comma-separated `<repository>=<url>` entries, exactly one for every `QA_REPOSITORIES` entry and none for anything else (repository matched exactly), e.g. `0-acme/website=https://acme-website.example.app`. Each url must be `https`, with no user info and port 443 or none. A missing, extra or duplicated entry, or a url breaking a rule, is rejected at startup with an error naming the entry. Stripped from the agent's environment. |
+| `QA_BACKENDS` | Optional; agentbox 1.9.35 and later. **Read for `QA_TARGET=preview` only** (ignored for `production`). A JSON array with one entry per backend preview the runner deployed from the change: `{"repository":"<dir>","url":"<preview URL>","health_url":"<health URL>"}`, or `{"repository":"<dir>","error":"<why the deploy failed>"}` for one whose deploy failed. `repository` must be a local path (`filepath.IsLocal`, as for `QA_REPOSITORIES`); `url` and `health_url` follow `QA_URLS`' rules (`https`, no user info, port 443 or none); an entry has either both URLs or a non-empty `error`, never neither or both; no repository appears twice. Invalid JSON or an entry breaking a rule is rejected at startup with an error naming the entry. Blank or `[]` is no backends. Stripped from the agent's environment — it reaches the agent only folded into the prompt. |
 | `MCP_TOOL_RPC_SOCKET` | **Required in qa mode** — QA without its tools can't check anything. |
 
 **What the prompt says.** You are checking a change, not making one; you
@@ -375,6 +382,23 @@ refused by design and are never something to allow. With no criteria the run
 does a **smoke check** instead — each preview loads with no page errors and no
 failed first-party requests — and says so.
 
+**With backend previews** (`QA_BACKENDS` has entries; 1.9.35 and later) the
+prompt says "a change to a web application" instead of "a change to a static
+site" (the wording without backends is unchanged, byte for byte). A section
+`[Backend previews — deployed by deployment.io from this change]` lists each
+backend's URL and health URL, or "failed to deploy: <error>". The
+`[Repositories to preview]` section and the deploy steps appear only when
+`QA_REPOSITORIES` is non-empty. A step tells the agent to confirm each backend
+with `verify_preview_reachable` on its health URL, calling again while a new
+backend is still starting. And a rule says the frontend previews are NOT
+connected to these backends (a frontend preview still calls the API its
+Preview configuration points at): a criterion that needs the frontend to use
+this change's backend is not checked with reason "the frontend preview isn't
+connected to the backend preview yet", and one that needs requests to the API
+beyond its health check is not checked with reason "needs HTTP requests to the
+API". The tools are the same as without backends: there is no backend deploy
+tool.
+
 **What the reporting rules say.** Each criterion ends `passed`, `failed` or
 `not_checked`; `not_checked` always says why (needs a login, not observable on
 a static preview such as an email or a webhook, couldn't find the page, the
@@ -383,8 +407,12 @@ preview failed). A failed criterion gets a finding with parameter
 path and the criterion number, what failed and why it matters. A console
 error or failed request no criterion covers is an observation, not a finding.
 A preview that won't build or deploy, or a browser that can't run, is status
-`couldnt_run` with the reason — never a finding. The run ends with exactly
-one `<qa>` trailer:
+`couldnt_run` with the reason — never a finding. With backend previews, the
+`not_checked` reasons also include "the frontend preview isn't connected to the
+backend preview yet", "needs HTTP requests to the API" and a backend preview
+that failed to deploy: a failed backend deploy is never a finding or a failed
+criterion — each criterion that needs it is not checked, its reason saying the
+deploy failed. The run ends with exactly one `<qa>` trailer:
 
 ```
 <qa>
