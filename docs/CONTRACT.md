@@ -425,12 +425,18 @@ final-message instruction is NOT appended, so no `<verify>` or `<pr_title>` is
 requested. The result is [`qa_result`](#qa_result).
 
 **Tools on, no edits, no shell.** Each driver wires the MCP channel and
-withholds everything that writes or runs commands:
+withholds everything that writes or runs commands — with one exception: a
+codex **preview** QA run has a shell (agentbox 1.9.36 and later). It reads
+`<WORK_DIR>/context` with it, and has no repository to edit — its `WORK_DIR`
+holds only agentbox's own files and the read-only context bind, and the
+runner builds previews from its own copy of the Task, which is not mounted.
+Network still goes only through the egress proxy and allowlist; the prompt
+still says not to edit, build or fix anything.
 
 | `AGENT_TYPE` | QA invocation |
 |---|---|
 | `claude-code` | Prompt on stdin, trailer instruction via `--append-system-prompt`, `--mcp-config` with the `agentbox mcp-bridge` bridge, no `--dangerously-skip-permissions`, and `--allowedTools` (appended last) = `Read`, `Grep`, `Glob`, `mcp__deployment-io__deploy_static_site_preview`, `mcp__deployment-io__verify_preview_reachable`, `mcp__deployment-io__verify_preview_rendered`. No `Bash`, `Write` or `Edit`. |
-| `codex` | Prompt + trailer instruction on stdin, `--sandbox read-only` without `--dangerously-bypass-approvals-and-sandbox`, `mcp_servers.deployment_io` registered, plus `-c mcp_servers.deployment_io.default_tools_approval_mode="approve"`. `codex exec` behaves as approval policy `never`, and on the pinned 0.158.0 an MCP tool without read-only annotations is then rejected ("requires approval, but approval policy is never") before it reaches the server; `approve` lets the tools run without a prompt while the sandbox stays read-only (verified end-to-end against the pinned binary). Codex's shell is bubblewrap-sandboxed, which cannot run inside agentbox's container, so a codex QA run works from the preview tools' results and cannot `cat` the context files. |
+| `codex` | Prompt + trailer instruction on stdin, `mcp_servers.deployment_io` registered, plus `-c mcp_servers.deployment_io.default_tools_approval_mode="approve"` in both QA targets. **Preview** (`QA_TARGET` `preview` or unset): `--sandbox danger-full-access` + `--dangerously-bypass-approvals-and-sandbox`, the same flags an implement run uses, so the run reads the context files with its shell (agentbox 1.9.36 and later; earlier versions ran preview QA under `--sandbox read-only`, whose bubblewrap sandbox cannot run inside agentbox's container, so every shell command — including `cat` of the context files — failed). **Production**: `--sandbox read-only` without `--dangerously-bypass-approvals-and-sandbox`, as before — it has no context to read and no use for a shell. There `codex exec` behaves as approval policy `never`, and on the pinned 0.158.0 an MCP tool without read-only annotations is then rejected ("requires approval, but approval policy is never") before it reaches the server; `approve` lets the tools run without a prompt while the sandbox stays read-only (verified end-to-end against the pinned binary). With the bypass flag (preview) the key is harmless. |
 | `opencode` | Prompt + trailer instruction on stdin; the review permission set (`edit`, `bash` and `webfetch` denied) plus the `mcp` block registered. |
 
 #### Production QA
@@ -469,6 +475,10 @@ claude's `--allowedTools` is `Read`, `Grep`, `Glob`,
 `mcp__deployment-io__verify_preview_rendered` — never
 `deploy_static_site_preview`. codex and opencode have no per-tool
 allowlist; the runner does not serve the deploy tool to a production run.
+codex keeps `--sandbox read-only` here (no `--dangerously-bypass-approvals-and-sandbox`):
+unlike preview QA it gets no working shell, so it cannot reach a production
+host the egress allowlist admits (an org's `ADDITIONAL_ALLOWED_HOSTS` can) or
+run anything else.
 The runner runs every production `verify_preview_rendered` check with
 verify-browser's `read_only: true` ([docs/VERIFY_BROWSER.md](VERIFY_BROWSER.md#read-only)).
 

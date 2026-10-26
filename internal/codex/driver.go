@@ -165,20 +165,37 @@ func (d *Driver) Binary() string {
 // read-only stays: a review that cannot run is safer than one that could
 // write.
 //
-// A QA run uses --sandbox read-only too: it changes nothing and has no shell
-// work to do, so bubblewrap failing in the container costs it no more than
-// shell reads of /work/context (it works from the preview tools' results).
-// Its MCP tools are registered, with approval mode "approve" — see
+// A PREVIEW QA run (QA_TARGET preview, or unset) uses the same flags an
+// implement run uses. Under --sandbox read-only bubblewrap fails in the
+// container, so every shell command fails — and the preview QA prompt tells
+// the agent to read the deploy facts in /work/context, which Codex can only do
+// with its shell. Dropping the sandbox is safe: a preview QA run's /work is the
+// runner's QA directory, which holds no repository — only agentbox's own files
+// and the deployment context the runner binds READ-ONLY at /work/context — and
+// the runner builds previews from its own copy of the Task, which is not
+// mounted. Network still goes only through the egress proxy and its allowlist,
+// and agentbox writes result.json after the agent exits, as in an implement
+// run. The prompt still says not to edit, build or fix anything.
+//
+// A PRODUCTION QA run keeps --sandbox read-only: it checks live production
+// sites and is report-only, and it has no use for a shell (no deployment
+// context is mounted; its prompt mentions none), so it gets no shell that
+// could reach a production host the egress allowlist admits (an org's
+// ADDITIONAL_ALLOWED_HOSTS can) or run anything else. Any QA_TARGET other than
+// production — including "" in a Config built by hand — is preview.
+//
+// Both QA targets register the MCP tools with approval mode "approve" — see
 // mcpServerArgs.
 func (d *Driver) BuildArgs(cfg *config.Config) []string {
 	reviewing := cfg.Mode == config.ModeReview
 	qaing := cfg.Mode == config.ModeQA
+	productionQA := qaing && cfg.QATarget == config.QATargetProduction
 
 	args := []string{
 		"exec",
 		"--json",
 	}
-	if (reviewing && !cfg.ReviewReadOnlyMounts) || qaing {
+	if (reviewing && !cfg.ReviewReadOnlyMounts) || productionQA {
 		args = append(args, "--sandbox", "read-only")
 	} else {
 		args = append(args,
@@ -240,8 +257,9 @@ func (d *Driver) BuildArgs(cfg *config.Config) []string {
 		// has no --mcp-config flag; MCP servers live under mcp_servers.<name> in
 		// its config, which we set with the same -c override mechanism used
 		// above (values parse as JSON). --dangerously-bypass-approvals-and-sandbox
-		// (set above) auto-allows the tools, so no approval prompt; a QA run,
-		// which has no bypass, sets an approval mode instead (mcpServerArgs).
+		// (set above) auto-allows the tools, so no approval prompt; a
+		// production QA run, which has no bypass, needs an approval mode
+		// instead, which every QA run sets (mcpServerArgs).
 		// The pinned 0.158.0 registers servers from these -c overrides.
 		args = append(args, mcpServerArgs(cfg)...)
 	}
@@ -280,15 +298,18 @@ func trailingInstruction(cfg *config.Config) string {
 // mcpServerArgs registers the runner's tool socket as the stdio MCP server
 // mcp_servers.deployment_io.
 //
-// A QA run also sets the server's default_tools_approval_mode to "approve".
-// It runs under --sandbox read-only without
+// A QA run, of either target, also sets the server's
+// default_tools_approval_mode to "approve". A PRODUCTION QA run needs it: it
+// runs under --sandbox read-only without
 // --dangerously-bypass-approvals-and-sandbox, where `codex exec` behaves as
 // approval policy "never" — and on the pinned 0.158.0 an MCP tool without
 // read-only annotations then "requires approval, but approval policy is
 // never" and is rejected before it reaches the server (verified end-to-end
 // against the pinned binary with a fake model endpoint and MCP server). With
 // "approve" the tools run without a prompt and the sandbox stays read-only.
-// The implement path needs no such key: the bypass flag auto-allows them.
+// A PREVIEW QA run carries the bypass flag (see BuildArgs), so the key is
+// harmless there. The implement path needs no such key: the bypass flag
+// auto-allows the tools.
 func mcpServerArgs(cfg *config.Config) []string {
 	command, bridgeArgs := agent.BridgeCommand(cfg.MCPSocket)
 	args := []string{

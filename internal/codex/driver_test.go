@@ -160,6 +160,8 @@ func TestBuildArgsQuietsTheStartupCallsInEveryMode(t *testing.T) {
 		{"implement", &config.Config{StepPrompt: "hello"}},
 		{"review", &config.Config{Mode: config.ModeReview, StepPrompt: "the diff", ReviewPasses: []string{"security"}}},
 		{"review on read-only mounts", &config.Config{Mode: config.ModeReview, StepPrompt: "the diff", ReviewReadOnlyMounts: true}},
+		{"qa preview", &config.Config{Mode: config.ModeQA, QATarget: config.QATargetPreview, StepPrompt: "the QA prompt", MCPSocket: "/s"}},
+		{"qa production", &config.Config{Mode: config.ModeQA, QATarget: config.QATargetProduction, StepPrompt: "the QA prompt", MCPSocket: "/s"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			args := d.BuildArgs(tc.cfg)
