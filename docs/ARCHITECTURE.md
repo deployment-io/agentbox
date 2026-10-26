@@ -26,7 +26,7 @@ result.json writing.
 
 Built via multi-stage Dockerfile:
 
-- **Stage 1 (`golang:1.24-bookworm`):** compiles the agentbox Go binary
+- **Stage 1 (`golang:1.27.3-bookworm`):** compiles the agentbox Go binary
   statically for `linux/amd64`.
 - **Stage 2 (`debian:bookworm-slim`):** minimal runtime. Contains the
   language runtimes agents need (Node.js 20 for npm-based agents,

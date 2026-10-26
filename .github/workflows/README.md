@@ -5,7 +5,7 @@
 Runs on every PR to `main` and every push to `main` or a `feature/**`
 branch. Four jobs:
 
-- **go** — `go build`, `go vet`, `go test -race` against Go 1.24.
+- **go** — `go build`, `go vet`, `go test -race` against Go 1.27.3.
 - **docker** — builds the `linux/amd64` image as a smoke test (no push),
   gated on the Go job passing. Compilation happens inside the
   Dockerfile's multi-stage build; no separate `go build` step.
