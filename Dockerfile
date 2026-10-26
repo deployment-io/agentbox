@@ -1,5 +1,5 @@
 # ---- Stage 1: Build agentbox binary ----
-FROM golang:1.25-bookworm AS builder
+FROM golang:1.27.3-bookworm AS builder
 
 WORKDIR /src
 COPY . .
@@ -64,7 +64,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # This used to be GOTOOLCHAIN=local, which made every Task on a repo newer
 # than the image fail at `go mod download` with "go.mod requires go >= X
 # (running go Y; GOTOOLCHAIN=local)" until a new image shipped.
-ARG GO_VERSION=1.25.14
+ARG GO_VERSION=1.27.3
 RUN ARCH="$(dpkg --print-architecture)" \
     && curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${ARCH}.tar.gz" -o /tmp/go.tgz \
     && tar -C /usr/local -xzf /tmp/go.tgz \

@@ -6,7 +6,7 @@
 #   docker build --platform linux/amd64 -f verify-browser/Dockerfile -t verify-browser:dev .
 
 # ---- Stage 1: Go entrypoint ----
-FROM golang:1.25-bookworm AS builder
+FROM golang:1.27.3-bookworm AS builder
 
 WORKDIR /src
 # Only what cmd/verify-browser needs, so agentbox changes elsewhere don't

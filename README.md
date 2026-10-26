@@ -237,7 +237,7 @@ docker build -t agentbox:dev .
 ```
 
 The multi-stage Dockerfile compiles the Go binary inside a
-`golang:1.24-bookworm` stage and copies it into a
+`golang:1.27.3-bookworm` stage and copies it into a
 `debian:bookworm-slim` runtime. No local Go install required.
 
 To pin a different Claude Code version at build time:
