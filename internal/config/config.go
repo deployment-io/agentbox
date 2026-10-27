@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -210,6 +211,14 @@ type Config struct {
 	// before a preview QA run: each one's URL and health URL, or why its deploy
 	// failed. From the JSON array QA_BACKENDS, preview target only; optional.
 	QABackends []QABackend
+
+	// QAPreviews are every preview the runner deployed (or failed to deploy)
+	// from the change before a preview QA run — static sites and backends —
+	// with which backend previews each site preview was built to call. From
+	// the JSON array QA_PREVIEWS, preview target only; optional. When set, the
+	// run deploys nothing (QARepositories and QABackends are empty) and has
+	// only the verify tools.
+	QAPreviews []QAPreview
 
 	// QATarget is what a QA run checks: QATargetPreview (previews it deploys
 	// itself — the default) or QATargetProduction (the sites already live in
@@ -534,10 +543,30 @@ type QABackend struct {
 	Error      string
 }
 
+// The QAPreview kinds: a static-site preview and a web-service preview.
+const (
+	QAPreviewSite    = "site"
+	QAPreviewBackend = "backend"
+)
+
+// QAPreview is one QA_PREVIEWS entry: a preview the runner deployed (URL set,
+// and HealthURL for a backend) or one whose deploy failed (Error set). A
+// deployed site's ConnectedBackends are the backend entries' repositories it
+// was built to call; its UnconnectedBackends are the run's other backends.
+type QAPreview struct {
+	Repository          string
+	Kind                string
+	URL                 string
+	HealthURL           string
+	Error               string
+	ConnectedBackends   []string
+	UnconnectedBackends []string
+}
+
 // loadQAInputs reads and validates the QA_* half of the contract. REVIEW_*
 // vars are not read in qa mode.
 //
-// QA_REPOSITORIES (or, for a preview run, a QA_BACKENDS entry) and the MCP
+// QA_REPOSITORIES (or, for a preview run, a QA_BACKENDS or QA_PREVIEWS entry) and the MCP
 // socket are required: a QA run with nothing to preview, or without the tools
 // that deploy and drive the previews, cannot check anything, and saying so at
 // load is better than an agent run that reports every criterion "not checked".
@@ -574,8 +603,20 @@ func (c *Config) loadQAInputs() error {
 			return err
 		}
 		c.QABackends = backends
+		if strings.TrimSpace(os.Getenv("QA_PREVIEWS")) != "" {
+			// The runner deployed everything itself: there is nothing left for
+			// the run to deploy, and nothing else to be told about.
+			if strings.TrimSpace(os.Getenv("QA_REPOSITORIES")) != "" || strings.TrimSpace(os.Getenv("QA_BACKENDS")) != "" {
+				return fmt.Errorf("QA_PREVIEWS must not be set together with QA_REPOSITORIES or QA_BACKENDS")
+			}
+			previews, err := parseQAPreviews(os.Getenv("QA_PREVIEWS"))
+			if err != nil {
+				return err
+			}
+			c.QAPreviews = previews
+		}
 	}
-	if len(c.QARepositories) == 0 && len(c.QABackends) == 0 {
+	if len(c.QARepositories) == 0 && len(c.QABackends) == 0 && len(c.QAPreviews) == 0 {
 		return fmt.Errorf("QA_REPOSITORIES is required in %s mode", ModeQA)
 	}
 	if c.MCPSocket == "" {
@@ -643,6 +684,134 @@ func parseQABackends(raw string) ([]QABackend, error) {
 		backends = append(backends, b)
 	}
 	return backends, nil
+}
+
+// parseQAPreviews reads QA_PREVIEWS: a JSON array with one entry per preview
+// the runner deployed, {"repository","kind","url"} (plus "health_url" for a
+// backend, and "connected_backends"/"unconnected_backends" for a site), or one
+// whose deploy failed, {"repository","kind","error"}. The repository is a
+// directory inside /work, kind is "site" or "backend", each URL follows
+// QA_URLS' rules, no (repository, kind) appears twice, and every backend a
+// site names is a backend entry of the array, in at most one of its lists.
+func parseQAPreviews(raw string) ([]QAPreview, error) {
+	var elements []json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &elements); err != nil {
+		return nil, fmt.Errorf("QA_PREVIEWS must be a JSON array of preview entries: %v", err)
+	}
+	type key struct{ repository, kind string }
+	seen := map[key]bool{}
+	backends := map[string]bool{}
+	var previews []QAPreview
+	var names []string
+	for i, element := range elements {
+		// The fields are read as a map first, so an entry can be named in
+		// every error and a connection list counts as given even when empty.
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(element, &fields); err != nil || fields == nil {
+			return nil, fmt.Errorf("QA_PREVIEWS must be a JSON array of preview entries: entry %d is not a JSON object", i+1)
+		}
+		var repository string
+		_ = json.Unmarshal(fields["repository"], &repository)
+		name := fmt.Sprintf("QA_PREVIEWS entry %d (%q)", i+1, strings.TrimSpace(repository))
+		var e struct {
+			Repository          string   `json:"repository"`
+			Kind                string   `json:"kind"`
+			URL                 string   `json:"url"`
+			HealthURL           string   `json:"health_url"`
+			Error               string   `json:"error"`
+			ConnectedBackends   []string `json:"connected_backends"`
+			UnconnectedBackends []string `json:"unconnected_backends"`
+		}
+		if err := json.Unmarshal(element, &e); err != nil {
+			return nil, fmt.Errorf("%s is not a valid preview entry: %v", name, err)
+		}
+		p := QAPreview{
+			Repository: strings.TrimSpace(e.Repository),
+			Kind:       strings.TrimSpace(e.Kind),
+			URL:        strings.TrimSpace(e.URL),
+			HealthURL:  strings.TrimSpace(e.HealthURL),
+			Error:      strings.TrimSpace(e.Error),
+		}
+		p.ConnectedBackends = trimmedUnique(e.ConnectedBackends)
+		p.UnconnectedBackends = trimmedUnique(e.UnconnectedBackends)
+		if p.Repository == "" || !filepath.IsLocal(p.Repository) {
+			return nil, fmt.Errorf("%s must name a repository directory inside /work", name)
+		}
+		if p.Kind != QAPreviewSite && p.Kind != QAPreviewBackend {
+			return nil, fmt.Errorf("%s has kind %q: must be %q or %q", name, p.Kind, QAPreviewSite, QAPreviewBackend)
+		}
+		if seen[key{p.Repository, p.Kind}] {
+			return nil, fmt.Errorf("%s repeats the %s preview of repository %q", name, p.Kind, p.Repository)
+		}
+		seen[key{p.Repository, p.Kind}] = true
+		_, hasConnected := fields["connected_backends"]
+		_, hasUnconnected := fields["unconnected_backends"]
+		lists := hasConnected || hasUnconnected
+		deployed := p.URL != "" || p.HealthURL != ""
+		switch {
+		case deployed && p.Error != "":
+			return nil, fmt.Errorf("%s must have either url or error, not both", name)
+		case p.Error != "":
+			if lists {
+				return nil, fmt.Errorf("%s failed to deploy, so it must not have connected_backends or unconnected_backends", name)
+			}
+		case !deployed:
+			return nil, fmt.Errorf("%s must have url or error", name)
+		default:
+			if problem := qaURLProblem(p.URL); problem != "" {
+				return nil, fmt.Errorf("%s: the url %s", name, problem)
+			}
+			if p.Kind == QAPreviewSite && p.HealthURL != "" {
+				return nil, fmt.Errorf("%s is a site, so it must not have a health_url", name)
+			}
+			if p.Kind == QAPreviewBackend {
+				if problem := qaURLProblem(p.HealthURL); problem != "" {
+					return nil, fmt.Errorf("%s: the health_url %s", name, problem)
+				}
+			}
+		}
+		if p.Kind == QAPreviewBackend {
+			if lists {
+				return nil, fmt.Errorf("%s is a backend, so it must not have connected_backends or unconnected_backends", name)
+			}
+			backends[p.Repository] = true
+		}
+		previews = append(previews, p)
+		names = append(names, name)
+	}
+	// The lists name backend entries anywhere in the array, so they are
+	// checked once every entry is known.
+	for i, p := range previews {
+		listed := map[string]string{}
+		for _, list := range []struct {
+			field string
+			repos []string
+		}{{"connected_backends", p.ConnectedBackends}, {"unconnected_backends", p.UnconnectedBackends}} {
+			for _, repo := range list.repos {
+				if !backends[repo] {
+					return nil, fmt.Errorf("%s: %s names %q, which has no backend entry in QA_PREVIEWS", names[i], list.field, repo)
+				}
+				if field, dup := listed[repo]; dup && field != list.field {
+					return nil, fmt.Errorf("%s names backend %q in both connected_backends and unconnected_backends", names[i], repo)
+				}
+				listed[repo] = list.field
+			}
+		}
+	}
+	return previews, nil
+}
+
+// trimmedUnique returns repos trimmed, each once, in their first order; nil
+// when there are none.
+func trimmedUnique(repos []string) []string {
+	var out []string
+	for _, repo := range repos {
+		repo = strings.TrimSpace(repo)
+		if !slices.Contains(out, repo) {
+			out = append(out, repo)
+		}
+	}
+	return out
 }
 
 // qaURLProblem says what is wrong with a URL a QA run is handed to open, or

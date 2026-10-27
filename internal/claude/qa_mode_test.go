@@ -94,3 +94,30 @@ func TestBuildArgsInProductionQAMode(t *testing.T) {
 		t.Errorf("trailer instruction is not the production QA one")
 	}
 }
+
+// QA_PREVIEWS: the runner deployed every preview, so only the verify tools.
+func TestBuildArgsInQAModeWithPreviews(t *testing.T) {
+	cfg := qaConfig()
+	cfg.QARepositories = nil
+	cfg.QAPreviews = []config.QAPreview{{Repository: "0-acme/website", Kind: config.QAPreviewSite, URL: "https://d1.cloudfront.net"}}
+	args := (&Driver{}).BuildArgs(cfg)
+
+	i := indexOf(args, "--allowedTools")
+	if i < 0 {
+		t.Fatal("qa mode with QA_PREVIEWS has no --allowedTools")
+	}
+	got := args[i+1:]
+	want := []string{
+		"Read", "Grep", "Glob",
+		"mcp__deployment-io__verify_preview_reachable",
+		"mcp__deployment-io__verify_preview_rendered",
+	}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Errorf("allowlist (must be last) = %q, want exactly %q", got, want)
+	}
+	for _, a := range args {
+		if strings.Contains(a, "deploy_static_site_preview") {
+			t.Errorf("args with QA_PREVIEWS carry the deploy tool: %q", a)
+		}
+	}
+}
