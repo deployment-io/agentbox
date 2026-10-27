@@ -420,7 +420,10 @@ func TestBuildForProductionKeepsTheSmokeCheckAndRerunInstructions(t *testing.T) 
 // the production target existed: testdata/preview_*.golden were written by
 // Build and Instruction at agentbox 0f1fd78, with WorkDir /work. An unset
 // target and an explicit "preview" both produce them, and QA_URLS, never read
-// in preview mode, changes nothing.
+// in preview mode, changes nothing. The *_instruction.golden files were
+// regenerated when the "passed only when your LAST check of it passed" rule
+// was added to [How to report]; the *_prompt.golden files are still the
+// originals.
 func TestBuildForPreviewIsUnchanged(t *testing.T) {
 	specs := map[string]string{
 		"criteria": "[Re-run instructions]\nThe CTA should say Start free.\n[Spec]\n" + specJSON(t, "The pricing page shows three plans", "Each plan has a Sign up button"),

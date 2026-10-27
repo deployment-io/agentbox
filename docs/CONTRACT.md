@@ -436,7 +436,12 @@ verify tools.
 **What the reporting rules say.** Each criterion ends `passed`, `failed` or
 `not_checked`; `not_checked` always says why (needs a login, not observable on
 a static preview such as an email or a webhook, couldn't find the page, the
-preview failed). A failed criterion gets a finding with parameter
+preview failed). A criterion is `passed` only when the agent's last check of
+it passed and showed it holds; a check that failed on the agent's own assertion
+(exact text differing only in quotes, dashes, spacing or a placeholder such as
+`<n>`) is not a pass — the agent loosens the assertion and checks again, and if
+no check passes the criterion is `failed` when what it saw shows it doesn't
+hold, otherwise `not_checked` with the reason. A failed criterion gets a finding with parameter
 `correctness` or `spec conformance`, a severity, `location` = the preview URL
 path and the criterion number, what failed and why it matters. A console
 error or failed request no criterion covers is an observation, not a finding.

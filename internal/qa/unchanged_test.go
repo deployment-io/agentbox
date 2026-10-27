@@ -11,7 +11,9 @@ import (
 // unchangedCases are the configs without QA_PREVIEWS whose prompt and
 // instruction testdata/unchanged_*.golden pin byte for byte: they were written
 // by Build and Instruction at agentbox 00ca40d (v1.9.36), before QA_PREVIEWS,
-// with WorkDir /work.
+// with WorkDir /work. The *_instruction.golden files were regenerated when the
+// "passed only when your LAST check of it passed" rule was added to
+// [How to report]; the *_prompt.golden files are still the originals.
 func unchangedCases(t *testing.T) map[string]*config.Config {
 	spec := "[Re-run instructions]\nThe CTA should say Start free.\n[Spec]\n" + specJSON(t, "The pricing page shows three plans", "Each plan has a Sign up button")
 	static := qaConfig(t, spec)
