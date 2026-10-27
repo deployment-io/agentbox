@@ -350,6 +350,7 @@ func Instruction(cfg *config.Config) string {
 
 [How to report]
 - Each criterion ends passed, failed or not checked. not checked ALWAYS says why: %[2]s.
+- A criterion is passed only when your LAST check of it passed and showed it holds. A check that failed on your own assertion — exact text that differs only in quotes, dashes, spacing or a placeholder shown as written, such as <n> — is not a pass: loosen the assertion (shorter text, a text= selector, or read the page text) and check again. If no check of it passes, the criterion is failed when what you saw shows it doesn't hold, otherwise not checked with the reason. A passed criterion's reason says what the passing check showed.
 - A failed criterion gets a finding: "parameter" is "correctness" or "spec conformance"; "severity" is one of info, low, medium, high, critical; "location" is the %[3]s URL path and the criterion number (e.g. "/pricing (criterion 2)"); "what" is what failed; "why" is why it matters. "key" is a short stable slug, e.g. qa-pricing-cta-missing.
 - A console error or failed request that no criterion covers is an observation, not a finding.%[5]s
 - %[4]s, or a browser that can't run, means "status": "couldnt_run" with the reason in "status_reason" — never a finding, because it says nothing about the code. Otherwise "status" is "completed".
