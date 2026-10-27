@@ -23,10 +23,17 @@ var Tools = []string{ToolDeploy, ToolReachable, ToolRendered}
 // nothing to deploy, so no deploy tool.
 var ProductionTools = []string{ToolReachable, ToolRendered}
 
+// VerifyTools is every runner tool a preview QA run given QA_PREVIEWS needs:
+// the runner deployed every preview already, so no deploy tool.
+var VerifyTools = []string{ToolReachable, ToolRendered}
+
 // ToolsFor is the runner tools a QA run with cfg's target uses.
 func ToolsFor(cfg *config.Config) []string {
 	if production(cfg) {
 		return ProductionTools
+	}
+	if hasPreviews(cfg) {
+		return VerifyTools
 	}
 	return Tools
 }
@@ -44,6 +51,39 @@ const (
 	ReasonNeedsAPIRequests     = "needs HTTP requests to the API"
 )
 
+// ReasonSiteNotConnected is the not_checked reason of a run given QA_PREVIEWS
+// for a criterion that needs a site preview to use a backend preview it was
+// not built to call.
+const ReasonSiteNotConnected = "this site's preview isn't connected to that backend preview"
+
+// hasPreviews says the runner deployed every preview of this run itself
+// (QA_PREVIEWS): the run deploys nothing.
+func hasPreviews(cfg *config.Config) bool {
+	return !production(cfg) && len(cfg.QAPreviews) > 0
+}
+
+// previewKinds says which kinds of preview a QA_PREVIEWS run has: any
+// backend entry, any site with unconnected backends, and any deployed site
+// and backend.
+type previewKinds struct {
+	backend, unconnected, deployedSite, deployedBackend bool
+}
+
+func kindsOf(previews []config.QAPreview) previewKinds {
+	var k previewKinds
+	for _, p := range previews {
+		switch p.Kind {
+		case config.QAPreviewBackend:
+			k.backend = true
+			k.deployedBackend = k.deployedBackend || p.Error == ""
+		case config.QAPreviewSite:
+			k.unconnected = k.unconnected || len(p.UnconnectedBackends) > 0
+			k.deployedSite = k.deployedSite || p.Error == ""
+		}
+	}
+	return k
+}
+
 func production(cfg *config.Config) bool {
 	return cfg.QATarget == config.QATargetProduction
 }
@@ -56,9 +96,12 @@ func Build(cfg *config.Config) string {
 	contextDir := filepath.Join(cfg.WorkDir, "context")
 
 	var b strings.Builder
-	if production(cfg) {
+	switch {
+	case production(cfg):
 		writeProductionHeader(&b, cfg)
-	} else {
+	case hasPreviews(cfg):
+		writePreviewsHeader(&b, cfg, contextDir)
+	default:
 		writePreviewHeader(&b, cfg, contextDir)
 	}
 
@@ -85,6 +128,10 @@ These came with this re-run. Where they conflict with the acceptance criteria, t
 
 	if production(cfg) {
 		writeProductionSteps(&b)
+		return b.String()
+	}
+	if hasPreviews(cfg) {
+		writePreviewsSteps(&b, cfg)
 		return b.String()
 	}
 	writePreviewSteps(&b, cfg)
@@ -130,6 +177,65 @@ You have no source code and no diff. All you have is %s, and the deploy facts in
 `, ReasonFrontendNotConnected, ReasonNeedsAPIRequests)
 }
 
+// writePreviewsHeader opens the prompt of a preview QA run given QA_PREVIEWS:
+// every preview, deployed by deployment.io, and which backend previews each
+// site preview calls.
+func writePreviewsHeader(b *strings.Builder, cfg *config.Config, contextDir string) {
+	kinds := kindsOf(cfg.QAPreviews)
+	subject := "a static site"
+	if kinds.backend {
+		subject = "a web application"
+	}
+	fmt.Fprintf(b, `You are QA for a change to %s. You are checking a change, not making one: do not try to edit, build or fix anything.
+
+You have no source code and no diff. All you have is the previews listed below, which deployment.io deployed from this change, and the deploy facts in %s (read only what you need, e.g. services.json, and nothing else). You never deploy anything yourself.
+`, subject, contextDir)
+	b.WriteString("\n[Previews — deployed by deployment.io from this change]\n")
+	for _, p := range cfg.QAPreviews {
+		switch {
+		case p.Error != "":
+			fmt.Fprintf(b, "- %s (%s): failed to deploy: %s\n", p.Repository, p.Kind, p.Error)
+		case p.Kind == config.QAPreviewBackend:
+			fmt.Fprintf(b, "- %s (backend): %s (health check: %s)\n", p.Repository, p.URL, p.HealthURL)
+		default:
+			fmt.Fprintf(b, "- %s (site): %s", p.Repository, p.URL)
+			if len(p.ConnectedBackends) > 0 {
+				fmt.Fprintf(b, " — built to call the backend preview of %s", strings.Join(p.ConnectedBackends, ", "))
+			}
+			if len(p.UnconnectedBackends) > 0 {
+				fmt.Fprintf(b, " — NOT connected to the backend preview of %s: it calls whatever API Preview configuration points it at", strings.Join(p.UnconnectedBackends, ", "))
+			}
+			b.WriteString("\n")
+		}
+	}
+	var rules []string
+	if kinds.unconnected {
+		rules = append(rules, fmt.Sprintf("A criterion that needs a frontend to use a backend preview it is NOT connected to is not checked, with reason '%s'.", ReasonSiteNotConnected))
+	}
+	if kinds.backend {
+		rules = append(rules, fmt.Sprintf("A criterion that needs requests to the API beyond its health check is not checked, with reason '%s'.", ReasonNeedsAPIRequests))
+	}
+	if len(rules) > 0 {
+		b.WriteString(strings.Join(rules, " ") + "\n")
+	}
+}
+
+// writePreviewsSteps is [How to check] for a run given QA_PREVIEWS: no deploy
+// step, the site step only when a site preview deployed, the backend step
+// only when a backend preview deployed.
+func writePreviewsSteps(b *strings.Builder, cfg *config.Config) {
+	kinds := kindsOf(cfg.QAPreviews)
+	var steps []string
+	if kinds.deployedSite {
+		steps = append(steps, fmt.Sprintf(`Confirm each site preview with %s on its URL.`, ToolReachable))
+	}
+	if kinds.deployedBackend {
+		steps = append(steps, backendHealthStep())
+	}
+	steps = append(steps, criterionStep())
+	writeSteps(b, steps)
+}
+
 // writePreviewSteps is a preview QA prompt's [How to check]: the deploy step
 // only when there are repositories to preview, the backend step only when
 // there are backend previews.
@@ -141,9 +247,23 @@ func writePreviewSteps(b *strings.Builder, cfg *config.Config) {
 			fmt.Sprintf(`Confirm each preview with %s on the URL it returned.`, ToolReachable))
 	}
 	if len(cfg.QABackends) > 0 {
-		steps = append(steps, fmt.Sprintf(`Confirm each backend with %s on its health URL. A new backend takes a few minutes to start: while it isn't reachable yet, call it again.`, ToolReachable))
+		steps = append(steps, backendHealthStep())
 	}
-	steps = append(steps, fmt.Sprintf(`Check each criterion with %s: goto the page, then steps and assertions. You cannot read the source, so find your way around from the result's outline (headings, links, buttons, form fields) and its page text; text= selectors (e.g. text=Sign up) work without source. While it answers status "preparing", call it again.`, ToolRendered))
+	steps = append(steps, criterionStep())
+	writeSteps(b, steps)
+}
+
+func backendHealthStep() string {
+	return fmt.Sprintf(`Confirm each backend with %s on its health URL. A new backend takes a few minutes to start: while it isn't reachable yet, call it again.`, ToolReachable)
+}
+
+func criterionStep() string {
+	return fmt.Sprintf(`Check each criterion with %s: goto the page, then steps and assertions. You cannot read the source, so find your way around from the result's outline (headings, links, buttons, form fields) and its page text; text= selectors (e.g. text=Sign up) work without source. While it answers status "preparing", call it again.`, ToolRendered)
+}
+
+// writeSteps writes a preview [How to check]: steps, then sharedSteps,
+// numbered on.
+func writeSteps(b *strings.Builder, steps []string) {
 	b.WriteString("\n[How to check]\n")
 	for i, step := range steps {
 		fmt.Fprintf(b, "%d. %s\n", i+1, step)
@@ -204,6 +324,19 @@ func Instruction(cfg *config.Config) string {
 		notChecked = `it needs a login, it is not observable on a static preview (an email, a webhook), "` + ReasonFrontendNotConnected + `", "` + ReasonNeedsAPIRequests + `", it needs a backend preview that failed to deploy, you couldn't find the page, or the preview failed`
 		couldntRun = "A preview you deploy that won't build or deploy"
 		backendRule = "\n- A backend preview that failed to deploy is never a finding and never a failed criterion: it says nothing about the code you can see. Each criterion that needs it is not checked, with a reason that says the backend preview failed to deploy."
+	}
+	if hasPreviews(cfg) {
+		kinds := kindsOf(cfg.QAPreviews)
+		notChecked = `it needs a login, it is not observable on a preview (an email, a webhook)`
+		if kinds.unconnected {
+			notChecked += `, "` + ReasonSiteNotConnected + `"`
+		}
+		if kinds.backend {
+			notChecked += `, "` + ReasonNeedsAPIRequests + `"`
+		}
+		notChecked += `, it needs a preview that failed to deploy, you couldn't find the page, or a preview failed to load`
+		couldntRun = "No preview that loads at all"
+		backendRule = "\n- A preview that failed to deploy is never a finding and never a failed criterion. Each criterion that needs it is not checked, with a reason that says that preview failed to deploy."
 	}
 	if production(cfg) {
 		notChecked = `it needs a login, it is not observable on the production site (an email, a webhook, a backend), it ` + ReasonNeedsDataChange + `, you couldn't find the page, or the production site failed to load`

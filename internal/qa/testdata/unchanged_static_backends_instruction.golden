@@ -1,0 +1,18 @@
+
+
+[How to report]
+- Each criterion ends passed, failed or not checked. not checked ALWAYS says why: it needs a login, it is not observable on a static preview (an email, a webhook), "the frontend preview isn't connected to the backend preview yet", "needs HTTP requests to the API", it needs a backend preview that failed to deploy, you couldn't find the page, or the preview failed.
+- A failed criterion gets a finding: "parameter" is "correctness" or "spec conformance"; "severity" is one of info, low, medium, high, critical; "location" is the preview URL path and the criterion number (e.g. "/pricing (criterion 2)"); "what" is what failed; "why" is why it matters. "key" is a short stable slug, e.g. qa-pricing-cta-missing.
+- A console error or failed request that no criterion covers is an observation, not a finding.
+- A backend preview that failed to deploy is never a finding and never a failed criterion: it says nothing about the code you can see. Each criterion that needs it is not checked, with a reason that says the backend preview failed to deploy.
+- A preview you deploy that won't build or deploy, or a browser that can't run, means "status": "couldnt_run" with the reason in "status_reason" — never a finding, because it says nothing about the code. Otherwise "status" is "completed".
+
+Your final message must end with exactly ONE <qa> block. Put the opening and closing tags on lines of their own, with compact JSON between them:
+
+<qa>
+{"status":"completed","status_reason":"","criteria":[{"index":1,"state":"passed","reason":"the pricing page shows three plans"},{"index":2,"state":"failed","reason":"the Sign up button is missing"},{"index":3,"state":"not_checked","reason":"needs a login"}],"findings":[{"key":"qa-pricing-signup-missing","parameter":"spec conformance","severity":"high","location":"/pricing (criterion 2)","what":"the pricing page has no Sign up button","why":"visitors cannot start a trial from pricing, which the spec requires"}],"observations":["/about logs a console error: favicon.ico 404"]}
+</qa>
+
+Rules for the block:
+- "criteria" has one entry per acceptance criterion: "index" is its number in the list, "state" is "passed", "failed" or "not_checked", and "reason" says briefly what you saw.
+- Emit the block once, at the very end. Everything outside it is prose for a human.
