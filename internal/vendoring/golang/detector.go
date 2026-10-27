@@ -74,11 +74,13 @@ func (*detector) AllowedHosts() []string {
 
 // VerifyHosts are the public hosts the agent phase may reach to resolve
 // verify-time Go deps — the module proxy, its checksum db, and the GCS
-// backend it serves zips from. github.com is deliberately excluded: private
+// backend it serves zips from — plus vuln.go.dev, the Go vulnerability
+// database govulncheck reads. github.com is deliberately excluded: private
 // modules are pre-vendored on the shared cache and the agent holds no token
-// to fetch them directly.
+// to fetch them directly. vuln.go.dev is not in AllowedHosts: the vendor
+// phase doesn't scan.
 func (*detector) VerifyHosts() []string {
-	return []string{"proxy.golang.org", "sum.golang.org", "storage.googleapis.com"}
+	return []string{"proxy.golang.org", "sum.golang.org", "storage.googleapis.com", "vuln.go.dev"}
 }
 
 // goWorkspaceFloor is the lowest `go` directive a generated go.work carries.

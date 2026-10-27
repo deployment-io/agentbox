@@ -943,6 +943,11 @@ CONNECT requests:
   hostnames (Claude Code: `api.anthropic.com`, `registry.npmjs.org`).
 - **`ADDITIONAL_ALLOWED_HOSTS`** — comma-separated user additions
   (org-level or per-deploy), unioned with Driver-declared.
+- **Language verify hosts** — added in the agent phase for each
+  ecosystem detected in the work dir:
+  Go: `proxy.golang.org`, `sum.golang.org`, `storage.googleapis.com`,
+  `vuln.go.dev` (govulncheck's database);
+  Node: `registry.npmjs.org`, `registry.yarnpkg.com`, `repo.yarnpkg.com`.
 
 Anything outside the union is rejected with HTTP 403 + a log line on
 stderr. Plain HTTP (non-CONNECT) and non-port-443 CONNECTs are also

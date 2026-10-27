@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -43,8 +44,16 @@ func TestMetadata(t *testing.T) {
 	if len(d.AllowedHosts()) == 0 {
 		t.Error("AllowedHosts() should be non-empty")
 	}
-	if len(d.VerifyHosts()) == 0 {
-		t.Error("VerifyHosts() should be non-empty")
+	wantVerify := []string{"proxy.golang.org", "sum.golang.org", "storage.googleapis.com", "vuln.go.dev"}
+	if got := d.VerifyHosts(); !reflect.DeepEqual(got, wantVerify) {
+		t.Errorf("VerifyHosts() = %v, want %v", got, wantVerify)
+	}
+	// govulncheck's database is an agent-phase need only; the vendor phase
+	// doesn't scan.
+	for _, h := range d.AllowedHosts() {
+		if h == "vuln.go.dev" {
+			t.Error("AllowedHosts() should not contain vuln.go.dev")
+		}
 	}
 }
 
