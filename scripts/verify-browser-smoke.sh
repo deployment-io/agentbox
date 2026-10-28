@@ -10,7 +10,11 @@
 #      the form (httpbin's /post response is never reached).
 #   4. the same page and steps without read_only — expect blocked_requests []
 #      and final_url httpbin's /post.
-# Cases 3 and 4 are asserted (they need jq); the script exits non-zero when
+#   5. https://httpbin.org/forms/post, going to /html and then back — expect
+#      verdict pass with url_path /forms/post.
+#   6. the same page with only a back step — expect steps[0].ok false with the
+#      no-earlier-page error.
+# Cases 3 to 6 are asserted (they need jq); the script exits non-zero when
 # either does not hold. Needs Docker and network access. Run from anywhere in
 # the repository.
 set -euo pipefail
@@ -96,8 +100,26 @@ JSON
 run_check read_only "$(form_input true)"
 run_check read_write "$(form_input false)"
 
+# back_input STEPS — httpbin's form page, the given steps, and a url_path
+# assertion on the form.
+back_input() {
+  cat <<JSON
+{
+  "schema_version": 1,
+  "url": "https://httpbin.org/forms/post",
+  "allowed_hosts": ["httpbin.org"],
+  "steps": $1,
+  "assertions": [{"type": "url_path", "path": "/forms/post"}],
+  "timeout_ms": 45000
+}
+JSON
+}
+
+run_check back "$(back_input '[{"action": "goto", "url": "https://httpbin.org/html"}, {"action": "back"}]')"
+run_check back_first "$(back_input '[{"action": "back"}]')"
+
 if ! command -v jq >/dev/null 2>&1; then
-  echo "jq is not installed: cannot assert the read_only cases" >&2
+  echo "jq is not installed: cannot assert the read_only and back cases" >&2
   exit 1
 fi
 failed=0
@@ -118,4 +140,6 @@ expect read_only 'all(.failed_requests[]; .method != "POST")' 'the blocked POST 
 expect read_write '.status == "completed"' 'the check completed'
 expect read_write '.blocked_requests == []' 'blocked_requests is empty'
 expect read_write '.final_url == "https://httpbin.org/post"' "final_url is httpbin's /post response"
+expect back '.verdict == "pass"' 'going back from /html returns to the form'
+expect back_first '.steps[0].ok == false and .steps[0].error == "there is no earlier page in this check to go back to"' 'back on the first page fails with the no-earlier-page error'
 exit "$failed"

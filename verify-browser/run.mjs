@@ -730,6 +730,17 @@ async function runStep(page, step, remaining) {
         await target.filter({ visible: true }).first().waitFor({ state: 'visible', timeout });
         break;
       }
+      case 'back': {
+        // goBack returns null for a client-side route change (pushState), so
+        // null alone is fine; it went nowhere if the URL didn't change, or it
+        // landed on the tab's initial blank page.
+        const from = page.url();
+        const response = await page.goBack({ waitUntil: 'domcontentloaded', timeout });
+        if ((response === null && page.url() === from) || page.url() === 'about:blank') {
+          return 'there is no earlier page in this check to go back to';
+        }
+        break;
+      }
       default:
         return `unknown action ${step.action}`;
     }

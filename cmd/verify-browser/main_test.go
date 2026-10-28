@@ -132,6 +132,24 @@ func TestParseInputRejects(t *testing.T) {
 	}
 }
 
+func TestParseInputBackStep(t *testing.T) {
+	in, err := parseInput(mutate(t, func(m map[string]any) {
+		m["steps"] = []any{map[string]any{"action": "back"}}
+	}))
+	if err != nil {
+		t.Fatalf("parseInput: %v", err)
+	}
+	if len(in.Steps) != 1 || in.Steps[0].Action != "back" {
+		t.Fatalf("got steps %+v", in.Steps)
+	}
+	_, err = parseInput(mutate(t, func(m map[string]any) {
+		m["steps"] = []any{map[string]any{"action": "hover", "selector": "a"}}
+	}))
+	if err == nil || !strings.Contains(err.Error(), "wait_for or back") {
+		t.Fatalf("unknown action error = %v, want it to list back", err)
+	}
+}
+
 func TestParseInputAcceptsLimits(t *testing.T) {
 	in := mutate(t, func(m map[string]any) {
 		steps := make([]any, maxSteps)

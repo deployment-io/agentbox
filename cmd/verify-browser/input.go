@@ -238,8 +238,10 @@ func (in *input) validateStep(s step) error {
 			return checkOptional("selector", s.Selector, false)
 		}
 		return checkOptional("text", s.Text, false)
+	case "back":
+		return nil
 	}
-	return fmt.Errorf("unknown action %q (want goto, click, fill, press or wait_for)", s.Action)
+	return fmt.Errorf("unknown action %q (want goto, click, fill, press, wait_for or back)", s.Action)
 }
 
 func validateAssertion(a assertion) error {

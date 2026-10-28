@@ -146,6 +146,7 @@ blocked.
 | `{"action": "press", "selector": "…", "key": "…"}` | Focus the element and press a key (`Enter`, `Tab`, `ArrowDown`, …). |
 | `{"action": "wait_for", "selector": "…"}` | Wait until an element matching the selector is visible. |
 | `{"action": "wait_for", "text": "…"}` | Wait until an element containing the text is visible. Exactly one of `selector` and `text`. |
+| `{"action": "back"}` | Go back one page in the browser's history, like the Back button. Client-side route changes count as pages. Fails when the check has no earlier page. |
 
 Selectors are [Playwright selectors](https://playwright.dev/docs/other-locators)
 (CSS, `text=…`, `role=button[name="Save"]`, …). Each step — the action and

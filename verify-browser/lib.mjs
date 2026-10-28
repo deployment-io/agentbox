@@ -46,7 +46,7 @@ export const VIEWPORT_PRESETS = Object.freeze({
   mobile: Object.freeze({ width: 412, height: 839, mobile: true, device: 'Pixel 7' }),
 });
 
-export const ACTIONS = Object.freeze(['goto', 'click', 'fill', 'press', 'wait_for']);
+export const ACTIONS = Object.freeze(['goto', 'click', 'fill', 'press', 'wait_for', 'back']);
 export const ASSERTION_TYPES = Object.freeze(['text_visible', 'text_absent', 'selector_visible', 'url_path']);
 
 // normalizeHost lowercases a host and strips one trailing dot, the way the
@@ -149,6 +149,8 @@ function normalizeStep(step, i, allowedHosts) {
         ? { action: 'wait_for', selector: requireString(step, 'selector', where) }
         : { action: 'wait_for', text: requireString(step, 'text', where) };
     }
+    case 'back':
+      return { action: 'back' };
     default:
       throw new Error(`${where}: unknown action ${JSON.stringify(step.action)}`);
   }
