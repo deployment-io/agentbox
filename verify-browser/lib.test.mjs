@@ -93,12 +93,17 @@ describe('normalizeInput', () => {
     assert.equal(got.steps.length, 5);
     assert.equal(got.timeoutMs, 30000);
   });
+  it('accepts a back step and drops its unused fields', () => {
+    const got = normalizeInput(validInput({ steps: [{ action: 'back', selector: 'a' }] }));
+    assert.deepEqual(got.steps, [{ action: 'back' }]);
+  });
   const bad = [
     ['schema_version', { schema_version: 2 }],
     ['non-https url', { url: 'http://preview-abc.example.net/' }],
     ['url outside allowed_hosts', { url: 'https://other.example.net/' }],
     ['goto outside allowed_hosts', { steps: [{ action: 'goto', url: 'https://www.iana.org/' }] }],
     ['unknown action', { steps: [{ action: 'hover', selector: 'a' }] }],
+    ['long unused back field', { steps: [{ action: 'back', url: 'u'.repeat(LIMITS.maxStringChars + 1) }] }],
     ['wait_for with both', { steps: [{ action: 'wait_for', selector: 'a', text: 'b' }] }],
     ['unknown assertion', { assertions: [{ type: 'title_is', text: 'x' }] }],
     ['relative url_path', { assertions: [{ type: 'url_path', path: 'about' }] }],
