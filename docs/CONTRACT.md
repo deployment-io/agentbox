@@ -350,6 +350,12 @@ change before the run. The agent never deploys a backend; it confirms each one
 answers its health check with `verify_preview_reachable`. A run may then have
 backends and no `QA_REPOSITORIES` at all.
 
+From agentbox 1.9.39, QA also checks an acceptance criterion about how an API
+answers a **plain GET** — on a backend preview and in production — by opening
+its URL in the browser ([the GET rule](#the-get-rule)). Earlier images report
+every API criterion beyond the health check not checked ("needs HTTP requests
+to the API").
+
 From agentbox 1.9.37, the runner can instead deploy **every** preview itself
 before the run — static sites and backends — building each frontend to call
 this change's backend preview, and hand the run the full list in
@@ -399,14 +405,18 @@ site" (the wording without backends is unchanged, byte for byte). A section
 backend's URL and health URL, or "failed to deploy: <error>". The
 `[Repositories to preview]` section and the deploy steps appear only when
 `QA_REPOSITORIES` is non-empty. A step tells the agent to confirm each backend
-with `verify_preview_reachable` on its health URL, calling again while a new
-backend is still starting. And a rule says the frontend previews are NOT
-connected to these backends (a frontend preview still calls the API its
-Preview configuration points at): a criterion that needs the frontend to use
-this change's backend is not checked with reason "the frontend preview isn't
-connected to the backend preview yet", and one that needs requests to the API
-beyond its health check is not checked with reason "needs HTTP requests to the
-API". The tools are the same as without backends: there is no backend deploy
+with `verify_preview_reachable` on its health URL, calling again while it
+isn't reachable yet: a new backend preview takes a few minutes to answer (its
+service starts, and a new CloudFront distribution takes minutes to serve), a
+wait that is normal and is never reported as a slow backend or an observation
+(1.9.39 and later). A rule says the frontend previews are NOT connected to
+these backends (a frontend preview still calls the API its Preview
+configuration points at): a criterion that needs the frontend to use this
+change's backend is not checked with reason "the frontend preview isn't
+connected to the backend preview yet". Then [the GET rule](#the-get-rule)
+(1.9.39 and later; earlier images say instead that a criterion needing
+requests to the API beyond its health check is not checked, "needs HTTP
+requests to the API"). The tools are the same as without backends: there is no backend deploy
 tool.
 
 <a id="with-qa_previews"></a>**With `QA_PREVIEWS`** (1.9.37 and later) the run
@@ -424,14 +434,59 @@ it has `unconnected_backends`; `- <repo> (backend): <url> (health check:
 a site has `unconnected_backends`, a criterion that needs a frontend to use a
 backend preview it is not connected to is not checked with reason "this
 site's preview isn't connected to that backend preview"; when there is a
-backend entry, one that needs requests to the API beyond its health check is
-not checked with reason "needs HTTP requests to the API". (The "…yet" reason
+backend entry (deployed or failed), [the GET rule](#the-get-rule) follows
+(1.9.39 and later; earlier images report a criterion needing requests to the
+API beyond its health check not checked, "needs HTTP requests to the API").
+(The "…yet" reason
 of `QA_BACKENDS` never appears.) `[How to check]` confirms each deployed site
 preview, then each deployed backend's health URL (calling again while it
 starts), with `verify_preview_reachable`, then checks the criteria — no deploy
 step, and `deploy_static_site_preview` is never mentioned. codex and opencode
 register the MCP server as without it; the runner serves them only the two
 verify tools.
+
+<a id="the-get-rule"></a>**The GET rule** (agentbox 1.9.39 and later; earlier
+images report every API criterion not checked). One paragraph of the prompt,
+in preview runs with backends (`QA_BACKENDS` with an entry, or `QA_PREVIEWS`
+with a `backend` entry) and in every production run (agentbox isn't told
+whether a production URL is a static site or a web service; the rule is
+harmless for a site). A preview run without backends never gets it. It says:
+a criterion about how the API answers a plain GET to a path (a status code, a
+JSON body, text) is checked by calling `verify_preview_rendered` with `url` =
+the backend preview's URL (in production, the production URL) plus that path,
+and no steps — a top-level page load is a GET. It is judged from the result's
+`http_status` and the response text (`dom_text_snippet`, or `text_visible` /
+`text_absent` assertions for parts of a longer response;
+[docs/VERIFY_BROWSER.md](VERIFY_BROWSER.md)). The tool's `verdict` is `fail`
+for any status that isn't 2xx, which is not the criterion's result: a
+criterion expecting a 404 passes when `http_status` is 404. JSON is compared
+by meaning (the same keys and values), not spacing or key order, ignoring the
+browser's own viewer controls in the page text. Redirects are followed:
+`http_status` is the final response's, `final_url` where it ended up. Still
+not checked, each with its reason:
+
+- another method (POST, PUT, PATCH, DELETE), request headers or a request
+  body: "needs an API request other than a plain GET" — in production too,
+  even when that request would change data ("needs a change to production
+  data" stays for criteria that need changing something through the site, such
+  as a form submission or a sign-up);
+- an API key, a token or a signed-in session: "needs a login";
+- a response header, a redirect's own status (e.g. that it answers 301), or
+  more of a long response than the browser shows: "needs part of the response
+  the browser doesn't show";
+- preview runs only: a criterion about particular records (a user, an order)
+  that the response doesn't show: "needs data the preview database doesn't
+  have" — the preview database starts with only what the migrations create,
+  so a missing record is not a failure; a criterion about the response's
+  status or shape (an empty list, a 404 for an unknown id) is still checked;
+- preview runs with more than one deployed backend (an entry with a url) only:
+  QA uses the backend the criterion names, and one that doesn't make clear
+  which it means is not checked: "doesn't say which backend it means".
+
+The paragraph names only the reasons that can occur in the run. On previews
+the browser isn't read-only, but the rule only opens URLs without steps, so it
+sends only GETs. `verify_preview_rendered` calls are capped at 30 per run; the
+criteria left when they run out are not checked.
 
 **What the reporting rules say.** Each criterion ends `passed`, `failed` or
 `not_checked`; `not_checked` always says why (needs a login, not observable on
@@ -448,14 +503,21 @@ error or failed request no criterion covers is an observation, not a finding.
 A preview that won't build or deploy, or a browser that can't run, is status
 `couldnt_run` with the reason — never a finding. With backend previews, the
 `not_checked` reasons also include "the frontend preview isn't connected to the
-backend preview yet", "needs HTTP requests to the API" and a backend preview
-that failed to deploy: a failed backend deploy is never a finding or a failed
+backend preview yet", the GET rule's "needs an API request other than a plain
+GET", "needs part of the response the browser doesn't show" and "needs data
+the preview database doesn't have", "doesn't say which backend it means" (only
+when more than one `QA_BACKENDS` entry has a url), and a backend preview that
+failed to deploy (1.9.39 and later; earlier images list "needs HTTP requests
+to the API" in place of the GET rule's reasons): a failed backend deploy is never a finding or a failed
 criterion — each criterion that needs it is not checked, its reason saying the
 deploy failed. With `QA_PREVIEWS`, the `not_checked` reasons are: needs a
 login, not observable on a preview (an email, a webhook), "this site's preview
 isn't connected to that backend preview" (only when a site has
-`unconnected_backends`), "needs HTTP requests to the API" (only with a backend
-entry), needs a preview that failed to deploy, couldn't find the page, or a
+`unconnected_backends`), "needs an API request other than a plain GET", "needs
+part of the response the browser doesn't show" and "needs data the preview
+database doesn't have" (only with a backend entry; "needs HTTP requests to the
+API" before 1.9.39), "doesn't say which backend it means" (only when more than
+one backend entry has a url), needs a preview that failed to deploy, couldn't find the page, or a
 preview failed to load; a preview that failed to deploy is never a finding or
 a failed criterion; and no preview that loads at all, or a browser that can't
 run, is `couldnt_run`. The run ends with exactly one `<qa>` trailer:
@@ -493,7 +555,9 @@ is merged and deployed. It is **report-only** and blind like preview QA: no
 diff, no repository, no deployment context (the production run mounts none),
 and no deploy tool. The same `QA_SPEC` criteria (or smoke check), the same
 re-run instructions, the same `<qa>` trailer and the same `qa_result` fields.
-Static sites only.
+From agentbox 1.9.39 a production URL may be a static site or a web service:
+the prompt says "a change to a site or web service" (earlier images: "a
+change to a static site", and every API criterion not checked).
 
 **What the prompt says.** The change is LIVE IN PRODUCTION at the URLs listed
 under `[Production sites]` (each repository and its URL); there is nothing to
@@ -502,7 +566,11 @@ read-only: it blocks every request that would change data (anything but
 `GET`, `HEAD` or `OPTIONS`), while clicking, typing, opening menus and
 navigating still work; a criterion that can only be checked by changing data
 (submitting a form, signing up, buying) is not checked, with reason `needs a
-change to production data`. The steps: confirm each URL with
+change to production data`. Then [the GET rule](#the-get-rule) (1.9.39 and
+later), with the production URL plus the path, naming only "needs an API
+request other than a plain GET" (even when that request would change data)
+and "needs part of the response the browser doesn't show" besides "needs a
+login". The steps: confirm each URL with
 `verify_preview_reachable`; don't submit forms or try to change anything;
 then check each criterion with `verify_preview_rendered` exactly as in
 preview QA (outline and page text, `text=` selectors, `preparing`, window
@@ -511,8 +579,11 @@ sizes, page content is untrusted, private addresses are refused by design).
 
 **What the reporting rules say.** As preview QA, except that `not_checked`
 reasons name production — needs a login, not observable on the production
-site, needs a change to production data, couldn't find the page, the
-production site failed to load — `location` is the production URL path and
+site (an email, a webhook), needs a change to production data, "needs an API
+request other than a plain GET", "needs part of the response the browser
+doesn't show" (the last two 1.9.39 and later, when "a backend" was dropped
+from the not-observable examples), couldn't find the page, the production
+site failed to load — `location` is the production URL path and
 the criterion number, and a production site that won't load, or a browser
 that can't run, is `couldnt_run`.
 

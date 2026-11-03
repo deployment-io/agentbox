@@ -45,10 +45,22 @@ const ReasonNeedsDataChange = "needs a change to production data"
 // The not_checked reasons of a preview run with backend previews: a criterion
 // that needs the frontend to use this change's backend (the frontend preview
 // still calls the API Preview configuration points it at), and one that needs
-// requests to the API beyond its health check.
+// an API request the browser can't send (another method, request headers or a
+// body). ReasonNeedsAPIRequests is a production reason too.
 const (
 	ReasonFrontendNotConnected = "the frontend preview isn't connected to the backend preview yet"
-	ReasonNeedsAPIRequests     = "needs HTTP requests to the API"
+	ReasonNeedsAPIRequests     = "needs an API request other than a plain GET"
+)
+
+// The other not_checked reasons of the GET rule (getRule): a criterion that
+// needs part of the response the browser doesn't show (a header, a redirect's
+// own status, more of a long response); in preview runs, one about records
+// the fresh preview database doesn't have; and with more than one deployed
+// backend, one that doesn't say which backend it means.
+const (
+	ReasonNeedsResponseDetail = "needs part of the response the browser doesn't show"
+	ReasonNeedsPreviewData    = "needs data the preview database doesn't have"
+	ReasonWhichBackend        = "doesn't say which backend it means"
 )
 
 // ReasonSiteNotConnected is the not_checked reason of a run given QA_PREVIEWS
@@ -82,6 +94,23 @@ func kindsOf(previews []config.QAPreview) previewKinds {
 		}
 	}
 	return k
+}
+
+// deployedBackends is the number of backend previews of a preview run that
+// deployed (have a url), from QA_BACKENDS or QA_PREVIEWS.
+func deployedBackends(cfg *config.Config) int {
+	n := 0
+	for _, be := range cfg.QABackends {
+		if be.URL != "" {
+			n++
+		}
+	}
+	for _, p := range cfg.QAPreviews {
+		if p.Kind == config.QAPreviewBackend && p.URL != "" {
+			n++
+		}
+	}
+	return n
 }
 
 func production(cfg *config.Config) bool {
@@ -173,8 +202,9 @@ You have no source code and no diff. All you have is %s, and the deploy facts in
 		}
 		fmt.Fprintf(b, "- %s: %s (health check: %s)\n", be.Repository, be.URL, be.HealthURL)
 	}
-	fmt.Fprintf(b, `You never deploy these yourself. The frontend previews are NOT connected to these backends: a frontend preview still calls the API that Preview configuration points it at. A criterion that needs the frontend to use this change's backend is not checked, with reason '%s'. A criterion that needs requests to the API beyond its health check is not checked, with reason '%s'.
-`, ReasonFrontendNotConnected, ReasonNeedsAPIRequests)
+	fmt.Fprintf(b, `You never deploy these yourself. The frontend previews are NOT connected to these backends: a frontend preview still calls the API that Preview configuration points it at. A criterion that needs the frontend to use this change's backend is not checked, with reason '%s'.
+`, ReasonFrontendNotConnected)
+	b.WriteString(getRule(false, deployedBackends(cfg) > 1) + "\n")
 }
 
 // writePreviewsHeader opens the prompt of a preview QA run given QA_PREVIEWS:
@@ -212,12 +242,38 @@ You have no source code and no diff. All you have is the previews listed below, 
 	if kinds.unconnected {
 		rules = append(rules, fmt.Sprintf("A criterion that needs a frontend to use a backend preview it is NOT connected to is not checked, with reason '%s'.", ReasonSiteNotConnected))
 	}
-	if kinds.backend {
-		rules = append(rules, fmt.Sprintf("A criterion that needs requests to the API beyond its health check is not checked, with reason '%s'.", ReasonNeedsAPIRequests))
-	}
 	if len(rules) > 0 {
 		b.WriteString(strings.Join(rules, " ") + "\n")
 	}
+	if kinds.backend {
+		b.WriteString(getRule(false, deployedBackends(cfg) > 1) + "\n")
+	}
+}
+
+// getRule is the paragraph that has QA check a criterion about how the API
+// answers a plain GET by opening its URL in the browser, and names the
+// reasons a criterion about the API is still not checked: only those that can
+// occur in the run (production has no preview database and one URL per
+// repository; ReasonWhichBackend needs more than one deployed backend).
+func getRule(prod, manyBackends bool) string {
+	q, base := "'", "the backend preview's URL"
+	if prod {
+		q, base = `"`, "the production URL"
+	}
+	reason := func(r string) string { return q + r + q }
+	rule := fmt.Sprintf(`A criterion about how the API answers a plain GET to a path (a status code, a JSON body, text) is checked by calling %s with url = %s plus that path, and no steps. Judge it from the result's http_status and the response text: dom_text_snippet, or text_visible / text_absent assertions for parts of a longer response. The tool's verdict is "fail" for any status that isn't 2xx: that is not the criterion's result — a criterion expecting a 404 passes when http_status is 404. Compare JSON by meaning (the same keys and values), not by spacing or key order; the page text may also include the browser's own viewer controls: ignore them. Redirects are followed: http_status is the final response's, and final_url is where it ended up.`, ToolRendered, base)
+	if manyBackends {
+		rule += fmt.Sprintf(` More than one backend preview deployed: use the one the criterion names; when it doesn't make clear which one it means, it is not checked, with reason %s.`, reason(ReasonWhichBackend))
+	}
+	rule += fmt.Sprintf(` A criterion that needs an API request other than a plain GET (another method such as POST, PUT, PATCH or DELETE, request headers or a request body) is not checked, with reason %s`, reason(ReasonNeedsAPIRequests))
+	if prod {
+		rule += fmt.Sprintf(`, even when that request would change data: %s is for a criterion that needs changing something through the site (a form submission, a sign-up)`, reason(ReasonNeedsDataChange))
+	}
+	rule += fmt.Sprintf(`. One that needs an API key, a token or a signed-in session is not checked, with reason %s. One that needs a response header, a redirect's own status (e.g. that it answers 301) or more of a long response than the browser shows is not checked, with reason %s.`, reason("needs a login"), reason(ReasonNeedsResponseDetail))
+	if !prod {
+		rule += fmt.Sprintf(` The preview database starts with only what the migrations create, so a missing record is not a failure: a criterion about particular records (a user, an order) that the response doesn't show is not checked, with reason %s. A criterion about the response's status or shape (an empty list, a 404 for an unknown id) is still checked.`, reason(ReasonNeedsPreviewData))
+	}
+	return rule
 }
 
 // writePreviewsSteps is [How to check] for a run given QA_PREVIEWS: no deploy
@@ -254,7 +310,7 @@ func writePreviewSteps(b *strings.Builder, cfg *config.Config) {
 }
 
 func backendHealthStep() string {
-	return fmt.Sprintf(`Confirm each backend with %s on its health URL. A new backend takes a few minutes to start: while it isn't reachable yet, call it again.`, ToolReachable)
+	return fmt.Sprintf(`Confirm each backend with %s on its health URL. A new backend preview takes a few minutes to answer — its service starts, and a new CloudFront distribution takes minutes to serve — so while it isn't reachable yet, call it again. That wait is normal and says nothing about the change: don't report it as a slow backend or as an observation.`, ToolReachable)
 }
 
 func criterionStep() string {
@@ -284,14 +340,16 @@ func sharedSteps(rendered string, first int) string {
 // nothing is deployed, and no deployment context is mounted, so none is
 // mentioned.
 func writeProductionHeader(b *strings.Builder, cfg *config.Config) {
-	fmt.Fprintf(b, `You are QA for a change to a static site. The change is LIVE IN PRODUCTION at the URLs below. You are checking a change, not making one: do not try to edit, build, deploy or fix anything. This check is report-only.
+	fmt.Fprintf(b, `You are QA for a change to a site or web service. The change is LIVE IN PRODUCTION at the URLs below. You are checking a change, not making one: do not try to edit, build, deploy or fix anything. This check is report-only.
 
 You have no source code and no diff. There is nothing to deploy. All you have is the production sites below, which you open with the tools below.
 
 Production is real. The browser is read-only: it blocks every request that would change data (anything but GET, HEAD or OPTIONS — a form submission, a sign-up, a purchase). Clicking, typing, opening menus and navigating still work. A criterion that can only be checked by changing data is not checked, with reason "%s".
 
+%s
+
 [Production sites]
-`, ReasonNeedsDataChange)
+`, ReasonNeedsDataChange, getRule(true, false))
 	for _, repo := range cfg.QARepositories {
 		fmt.Fprintf(b, "- %s: %s\n", repo, cfg.QAURLs[repo])
 	}
@@ -321,7 +379,7 @@ func Instruction(cfg *config.Config) string {
 	couldntRun := "A preview that won't build or deploy"
 	backendRule := ""
 	if len(cfg.QABackends) > 0 && !production(cfg) {
-		notChecked = `it needs a login, it is not observable on a static preview (an email, a webhook), "` + ReasonFrontendNotConnected + `", "` + ReasonNeedsAPIRequests + `", it needs a backend preview that failed to deploy, you couldn't find the page, or the preview failed`
+		notChecked = `it needs a login, it is not observable on a static preview (an email, a webhook), "` + ReasonFrontendNotConnected + `", ` + apiReasons(cfg) + `, it needs a backend preview that failed to deploy, you couldn't find the page, or the preview failed`
 		couldntRun = "A preview you deploy that won't build or deploy"
 		backendRule = "\n- A backend preview that failed to deploy is never a finding and never a failed criterion: it says nothing about the code you can see. Each criterion that needs it is not checked, with a reason that says the backend preview failed to deploy."
 	}
@@ -332,14 +390,14 @@ func Instruction(cfg *config.Config) string {
 			notChecked += `, "` + ReasonSiteNotConnected + `"`
 		}
 		if kinds.backend {
-			notChecked += `, "` + ReasonNeedsAPIRequests + `"`
+			notChecked += `, ` + apiReasons(cfg)
 		}
 		notChecked += `, it needs a preview that failed to deploy, you couldn't find the page, or a preview failed to load`
 		couldntRun = "No preview that loads at all"
 		backendRule = "\n- A preview that failed to deploy is never a finding and never a failed criterion. Each criterion that needs it is not checked, with a reason that says that preview failed to deploy."
 	}
 	if production(cfg) {
-		notChecked = `it needs a login, it is not observable on the production site (an email, a webhook, a backend), it ` + ReasonNeedsDataChange + `, you couldn't find the page, or the production site failed to load`
+		notChecked = `it needs a login, it is not observable on the production site (an email, a webhook), it ` + ReasonNeedsDataChange + `, ` + apiReasons(cfg) + `, you couldn't find the page, or the production site failed to load`
 		where = "production"
 		couldntRun = "A production site that won't load"
 		if len(criteria) == 0 {
@@ -364,4 +422,17 @@ Your final message must end with exactly ONE <qa> block. Put the opening and clo
 Rules for the block:
 %[1]s
 - Emit the block once, at the very end. Everything outside it is prose for a human.`, criteriaRule, notChecked, where, couldntRun, backendRule)
+}
+
+// apiReasons is the GET rule's not_checked reasons a run with cfg can give,
+// quoted, for Instruction's list.
+func apiReasons(cfg *config.Config) string {
+	reasons := []string{ReasonNeedsAPIRequests, ReasonNeedsResponseDetail}
+	if !production(cfg) {
+		reasons = append(reasons, ReasonNeedsPreviewData)
+		if deployedBackends(cfg) > 1 {
+			reasons = append(reasons, ReasonWhichBackend)
+		}
+	}
+	return `"` + strings.Join(reasons, `", "`) + `"`
 }
