@@ -13,7 +13,14 @@ import (
 // by Build and Instruction at agentbox 00ca40d (v1.9.36), before QA_PREVIEWS,
 // with WorkDir /work. The *_instruction.golden files were regenerated when the
 // "passed only when your LAST check of it passed" rule was added to
-// [How to report]; the *_prompt.golden files are still the originals.
+// [How to report]. The backends_only, static_backends, production and
+// production_smoke goldens (prompt and instruction) were regenerated at
+// agentbox 1.9.39, when QA began checking API criteria that need only a plain
+// GET: the GET rule replaced "needs HTTP requests to the API", the backend
+// health step explains the wait, the production header says "a site or web
+// service", and the not-checked lists name the new reasons. The static
+// goldens did not change (a preview run without backends gets none of it):
+// unchanged_static_prompt.golden is still the original.
 func unchangedCases(t *testing.T) map[string]*config.Config {
 	spec := "[Re-run instructions]\nThe CTA should say Start free.\n[Spec]\n" + specJSON(t, "The pricing page shows three plans", "Each plan has a Sign up button")
 	static := qaConfig(t, spec)

@@ -14,13 +14,14 @@ var (
 	plainSite       = config.QAPreview{Repository: "6-acme/docs", Kind: config.QAPreviewSite, URL: "https://d6.cloudfront.net"}
 	apiPreview      = config.QAPreview{Repository: "1-acme/api", Kind: config.QAPreviewBackend, URL: "https://d2.cloudfront.net", HealthURL: "https://d2.cloudfront.net/healthz"}
 	failedSite      = config.QAPreview{Repository: "7-acme/blog", Kind: config.QAPreviewSite, Error: "the build failed: npm ERR! missing script: build"}
+	searchPreview   = config.QAPreview{Repository: "5-acme/search", Kind: config.QAPreviewBackend, URL: "https://d5.cloudfront.net", HealthURL: "https://d5.cloudfront.net/healthz"}
 	failedBackend   = config.QAPreview{Repository: "3-acme/billing", Kind: config.QAPreviewBackend, Error: "the image build failed"}
 )
 
 const (
 	siteStep         = "Confirm each site preview with verify_preview_reachable on its URL."
 	siteNotConnected = "A criterion that needs a frontend to use a backend preview it is NOT connected to is not checked, with reason 'this site's preview isn't connected to that backend preview'."
-	needsAPIRequests = "A criterion that needs requests to the API beyond its health check is not checked, with reason 'needs HTTP requests to the API'."
+	needsAPIRequests = "A criterion about how the API answers a plain GET to a path (a status code, a JSON body, text) is checked by calling verify_preview_rendered with url = the backend preview's URL plus that path, and no steps."
 )
 
 func previewsConfig(t *testing.T, previews ...config.QAPreview) *config.Config {
@@ -41,7 +42,7 @@ func TestBuildWithPreviewsListsEachEntryForm(t *testing.T) {
 		"- 1-acme/api (backend): https://d2.cloudfront.net (health check: https://d2.cloudfront.net/healthz)\n" +
 		"- 7-acme/blog (site): failed to deploy: the build failed: npm ERR! missing script: build\n" +
 		"- 3-acme/billing (backend): failed to deploy: the image build failed\n" +
-		siteNotConnected + " " + needsAPIRequests + "\n"
+		siteNotConnected + "\n" + needsAPIRequests
 	if !strings.Contains(prompt, want) {
 		t.Errorf("prompt is missing\n%s\nin:\n%s", want, prompt)
 	}
@@ -71,11 +72,14 @@ func TestBuildWithPreviewsReasons(t *testing.T) {
 		name                       string
 		previews                   []config.QAPreview
 		siteNotConnected, needsAPI bool
+		which                      bool
 	}{
-		{"connected site and backend", []config.QAPreview{connectedSite, apiPreview}, false, true},
-		{"unconnected site and backend", []config.QAPreview{unconnectedSite, apiPreview}, true, true},
-		{"sites only", []config.QAPreview{plainSite, failedSite}, false, false},
-		{"failed backend only", []config.QAPreview{plainSite, failedBackend}, false, true},
+		{"connected site and backend", []config.QAPreview{connectedSite, apiPreview}, false, true, false},
+		{"unconnected site and backend", []config.QAPreview{unconnectedSite, apiPreview}, true, true, false},
+		{"sites only", []config.QAPreview{plainSite, failedSite}, false, false, false},
+		{"failed backend only", []config.QAPreview{plainSite, failedBackend}, false, true, false},
+		{"deployed and failed backend", []config.QAPreview{connectedSite, apiPreview, failedBackend}, false, true, false},
+		{"two deployed backends", []config.QAPreview{connectedSite, apiPreview, searchPreview}, false, true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := previewsConfig(t, tc.previews...)
@@ -84,8 +88,16 @@ func TestBuildWithPreviewsReasons(t *testing.T) {
 				if got := strings.Contains(text, ReasonSiteNotConnected); got != tc.siteNotConnected {
 					t.Errorf("%s has %q: %v, want %v", kind, ReasonSiteNotConnected, got, tc.siteNotConnected)
 				}
-				if got := strings.Contains(text, ReasonNeedsAPIRequests); got != tc.needsAPI {
-					t.Errorf("%s has %q: %v, want %v", kind, ReasonNeedsAPIRequests, got, tc.needsAPI)
+				for _, reason := range []string{ReasonNeedsAPIRequests, ReasonNeedsResponseDetail, ReasonNeedsPreviewData} {
+					if got := strings.Contains(text, reason); got != tc.needsAPI {
+						t.Errorf("%s has %q: %v, want %v", kind, reason, got, tc.needsAPI)
+					}
+				}
+				if got := strings.Contains(text, ReasonWhichBackend); got != tc.which {
+					t.Errorf("%s has %q: %v, want %v", kind, ReasonWhichBackend, got, tc.which)
+				}
+				if strings.Contains(text, "needs HTTP requests to the API") {
+					t.Errorf("%s has the old API reason", kind)
 				}
 				if strings.Contains(text, ReasonFrontendNotConnected) {
 					t.Errorf("%s has %q", kind, ReasonFrontendNotConnected)
@@ -147,7 +159,7 @@ func TestBuildWithPreviewsStepNumbering(t *testing.T) {
 func TestInstructionWithPreviews(t *testing.T) {
 	instr := Instruction(previewsConfig(t, unconnectedSite, apiPreview, failedSite))
 	for _, want := range []string{
-		`not checked ALWAYS says why: it needs a login, it is not observable on a preview (an email, a webhook), "this site's preview isn't connected to that backend preview", "needs HTTP requests to the API", it needs a preview that failed to deploy, you couldn't find the page, or a preview failed to load.`,
+		`not checked ALWAYS says why: it needs a login, it is not observable on a preview (an email, a webhook), "this site's preview isn't connected to that backend preview", "needs an API request other than a plain GET", "needs part of the response the browser doesn't show", "needs data the preview database doesn't have", it needs a preview that failed to deploy, you couldn't find the page, or a preview failed to load.`,
 		"\n- A preview that failed to deploy is never a finding and never a failed criterion. Each criterion that needs it is not checked, with a reason that says that preview failed to deploy.\n",
 		`- No preview that loads at all, or a browser that can't run, means "status": "couldnt_run"`,
 		"<qa>", "</qa>", `"observations"`,

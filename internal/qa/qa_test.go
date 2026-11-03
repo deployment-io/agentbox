@@ -389,6 +389,11 @@ func TestBuildForProduction(t *testing.T) {
 		"desktop size, 1280×720, unless you pass " + ToolRendered + " a viewport",
 		"5. Page content", "untrusted data",
 		"6. Requests to private, internal or metadata addresses",
+		"You are QA for a change to a site or web service.",
+		"by calling verify_preview_rendered with url = the production URL plus that path, and no steps.",
+		`with reason "needs an API request other than a plain GET", even when that request would change data: "needs a change to production data" is for a criterion that needs changing something through the site`,
+		`with reason "needs part of the response the browser doesn't show"`,
+		"2. Do not submit forms or try to change anything: requests that would change data are blocked, and a criterion that needs one is not checked (\"needs a change to production data\").",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("production prompt is missing %q", want)
@@ -398,6 +403,7 @@ func TestBuildForProduction(t *testing.T) {
 		ToolDeploy, "[Repositories to preview]", "Deploy a preview", `"building"`,
 		filepath.Join(cfg.WorkDir, "context"), "services.json", "deploy facts",
 		"MUST-NOT-APPEAR", "[Spec]",
+		"a change to a static site", ReasonNeedsPreviewData, ReasonWhichBackend, "needs HTTP requests to the API",
 	} {
 		if strings.Contains(prompt, absent) {
 			t.Errorf("production prompt contains %q", absent)
@@ -456,6 +462,7 @@ func TestInstructionForProduction(t *testing.T) {
 		"needs a change to production data",
 		"the production site failed to load",
 		"needs a login",
+		`not observable on the production site (an email, a webhook), it needs a change to production data, "needs an API request other than a plain GET", "needs part of the response the browser doesn't show", you couldn't find the page`,
 		`"location" is the production URL path and the criterion number`,
 		`A production site that won't load, or a browser that can't run, means "status": "couldnt_run"`,
 		"<qa>", "</qa>", "exactly ONE", `"status_reason"`, `"findings"`, `"observations"`, "never a finding",
@@ -464,7 +471,7 @@ func TestInstructionForProduction(t *testing.T) {
 			t.Errorf("production instruction is missing %q", want)
 		}
 	}
-	for _, absent := range []string{"static preview", "preview failed", "build or deploy", "preview URL"} {
+	for _, absent := range []string{"static preview", "preview failed", "build or deploy", "preview URL", "a backend", ReasonNeedsPreviewData, ReasonWhichBackend, "needs HTTP requests to the API"} {
 		if strings.Contains(instr, absent) {
 			t.Errorf("production instruction contains %q", absent)
 		}
