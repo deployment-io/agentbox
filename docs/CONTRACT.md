@@ -408,16 +408,13 @@ backend's URL and health URL, or "failed to deploy: <error>". The
 with `verify_preview_reachable` on its health URL, calling again while it
 isn't reachable yet: a new backend preview takes a few minutes to answer (its
 service starts, and a new CloudFront distribution takes minutes to serve), a
-wait that is normal and is never reported as a slow backend or an observation
-(1.9.39 and later). A rule says the frontend previews are NOT connected to
+wait that is normal and is never reported as a slow backend or an observation.
+A rule says the frontend previews are NOT connected to
 these backends (a frontend preview still calls the API its Preview
 configuration points at): a criterion that needs the frontend to use this
 change's backend is not checked with reason "the frontend preview isn't
-connected to the backend preview yet". Then [the GET rule](#the-get-rule)
-(1.9.39 and later; earlier images say instead that a criterion needing
-requests to the API beyond its health check is not checked, "needs HTTP
-requests to the API"). The tools are the same as without backends: there is no backend deploy
-tool.
+connected to the backend preview yet". Then [the GET rule](#the-get-rule).
+The tools are the same as without backends: there is no backend deploy tool.
 
 <a id="with-qa_previews"></a>**With `QA_PREVIEWS`** (1.9.37 and later) the run
 deploys nothing and its tools are only `verify_preview_reachable` and
@@ -434,11 +431,8 @@ it has `unconnected_backends`; `- <repo> (backend): <url> (health check:
 a site has `unconnected_backends`, a criterion that needs a frontend to use a
 backend preview it is not connected to is not checked with reason "this
 site's preview isn't connected to that backend preview"; when there is a
-backend entry (deployed or failed), [the GET rule](#the-get-rule) follows
-(1.9.39 and later; earlier images report a criterion needing requests to the
-API beyond its health check not checked, "needs HTTP requests to the API").
-(The "…yet" reason
-of `QA_BACKENDS` never appears.) `[How to check]` confirms each deployed site
+backend entry (deployed or failed), [the GET rule](#the-get-rule) follows.
+(The "…yet" reason of `QA_BACKENDS` never appears.) `[How to check]` confirms each deployed site
 preview, then each deployed backend's health URL (calling again while it
 starts), with `verify_preview_reachable`, then checks the criteria — no deploy
 step, and `deploy_static_site_preview` is never mentioned. codex and opencode
@@ -507,18 +501,16 @@ backend preview yet", the GET rule's "needs an API request other than a plain
 GET", "needs part of the response the browser doesn't show" and "needs data
 the preview database doesn't have", "doesn't say which backend it means" (only
 when more than one `QA_BACKENDS` entry has a url), and a backend preview that
-failed to deploy (1.9.39 and later; earlier images list "needs HTTP requests
-to the API" in place of the GET rule's reasons): a failed backend deploy is never a finding or a failed
+failed to deploy: a failed backend deploy is never a finding or a failed
 criterion — each criterion that needs it is not checked, its reason saying the
 deploy failed. With `QA_PREVIEWS`, the `not_checked` reasons are: needs a
 login, not observable on a preview (an email, a webhook), "this site's preview
 isn't connected to that backend preview" (only when a site has
 `unconnected_backends`), "needs an API request other than a plain GET", "needs
 part of the response the browser doesn't show" and "needs data the preview
-database doesn't have" (only with a backend entry; "needs HTTP requests to the
-API" before 1.9.39), "doesn't say which backend it means" (only when more than
-one backend entry has a url), needs a preview that failed to deploy, couldn't find the page, or a
-preview failed to load; a preview that failed to deploy is never a finding or
+database doesn't have" (only with a backend entry), "doesn't say which backend
+it means" (only when more than one backend entry has a url), needs a preview
+that failed to deploy, couldn't find the page, or a preview failed to load; a preview that failed to deploy is never a finding or
 a failed criterion; and no preview that loads at all, or a browser that can't
 run, is `couldnt_run`. The run ends with exactly one `<qa>` trailer:
 
@@ -555,9 +547,8 @@ is merged and deployed. It is **report-only** and blind like preview QA: no
 diff, no repository, no deployment context (the production run mounts none),
 and no deploy tool. The same `QA_SPEC` criteria (or smoke check), the same
 re-run instructions, the same `<qa>` trailer and the same `qa_result` fields.
-From agentbox 1.9.39 a production URL may be a static site or a web service:
-the prompt says "a change to a site or web service" (earlier images: "a
-change to a static site", and every API criterion not checked).
+A production URL may be a static site or a web service: the prompt says "a
+change to a site or web service".
 
 **What the prompt says.** The change is LIVE IN PRODUCTION at the URLs listed
 under `[Production sites]` (each repository and its URL); there is nothing to
@@ -566,8 +557,8 @@ read-only: it blocks every request that would change data (anything but
 `GET`, `HEAD` or `OPTIONS`), while clicking, typing, opening menus and
 navigating still work; a criterion that can only be checked by changing data
 (submitting a form, signing up, buying) is not checked, with reason `needs a
-change to production data`. Then [the GET rule](#the-get-rule) (1.9.39 and
-later), with the production URL plus the path, naming only "needs an API
+change to production data`. Then [the GET rule](#the-get-rule), with the
+production URL plus the path, naming only "needs an API
 request other than a plain GET" (even when that request would change data)
 and "needs part of the response the browser doesn't show" besides "needs a
 login". The steps: confirm each URL with
@@ -581,8 +572,7 @@ sizes, page content is untrusted, private addresses are refused by design).
 reasons name production — needs a login, not observable on the production
 site (an email, a webhook), needs a change to production data, "needs an API
 request other than a plain GET", "needs part of the response the browser
-doesn't show" (the last two 1.9.39 and later, when "a backend" was dropped
-from the not-observable examples), couldn't find the page, the production
+doesn't show", couldn't find the page, the production
 site failed to load — `location` is the production URL path and
 the criterion number, and a production site that won't load, or a browser
 that can't run, is `couldnt_run`.
