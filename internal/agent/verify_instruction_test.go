@@ -170,3 +170,16 @@ func driverRegistrationsInSource(t *testing.T) int {
 	}
 	return count
 }
+
+// Item 1 is the changes summary, which the runner uses as both the commit
+// message and the PR body's lead-in, and it commits and opens the pull request
+// only after the agent finishes. So a summary ending "Nothing is committed yet"
+// is false where it lands: every agent is told to describe the change only.
+func TestChangesSummaryItemIsIdenticalAcrossAgents(t *testing.T) {
+	const want = "1. A multi-line changes summary describing what you changed and why, noting the verify outcome. This becomes the PR body's lead-in and the commit message. Describe the change only — not whether it is committed, pushed or in a pull request: that happens after you finish.\n"
+	for _, name := range []string{"claude-code", "codex", "opencode"} {
+		if got := implementInstruction(t, name); !strings.Contains(got, want) {
+			t.Errorf("%s's implement instruction lacks the changes-summary item %q:\n%s", name, want, got)
+		}
+	}
+}
