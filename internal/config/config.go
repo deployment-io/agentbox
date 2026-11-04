@@ -220,6 +220,12 @@ type Config struct {
 	// only the verify tools.
 	QAPreviews []QAPreview
 
+	// QAAPIRequestTool says the runner serves verify_api_request: it sets
+	// QA_API_REQUEST_TOOL=1 for a QA_PREVIEWS run with a deployed backend
+	// preview. True only when QA_API_REQUEST_TOOL is "1" and QATarget is
+	// QATargetPreview; ignored otherwise.
+	QAAPIRequestTool bool
+
 	// QATarget is what a QA run checks: QATargetPreview (previews it deploys
 	// itself — the default) or QATargetProduction (the sites already live in
 	// production, report-only, with the browser read-only). From QA_TARGET,
@@ -615,6 +621,7 @@ func (c *Config) loadQAInputs() error {
 			}
 			c.QAPreviews = previews
 		}
+		c.QAAPIRequestTool = os.Getenv("QA_API_REQUEST_TOOL") == "1"
 	}
 	if len(c.QARepositories) == 0 && len(c.QABackends) == 0 && len(c.QAPreviews) == 0 {
 		return fmt.Errorf("QA_REPOSITORIES is required in %s mode", ModeQA)

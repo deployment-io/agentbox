@@ -365,6 +365,12 @@ and `QA_BACKENDS` are blank, and it has only the verify tools
 `deploy_static_site_preview`). See [With `QA_PREVIEWS`](#with-qa_previews).
 Without it everything is as above.
 
+When a `QA_PREVIEWS` run has a backend preview that deployed, the runner also
+serves `verify_api_request` — one HTTP request to a backend preview, any
+method, with headers and a body — and says so with `QA_API_REQUEST_TOOL=1`;
+QA then checks API criteria with it ([the API rule](#the-api-rule)) instead of
+[the GET rule](#the-get-rule).
+
 **A QA run is blind.** It is given no diff, no implementer summary, no
 `STEP_PROMPT` and no repository: during the stages the change is uncommitted
 in the working tree, so any repository access would show it through git. Its
@@ -382,6 +388,7 @@ verify in this mode.
 | `QA_URLS` | **Required when `QA_TARGET=production`; not read otherwise.** Comma-separated `<repository>=<url>` entries, exactly one for every `QA_REPOSITORIES` entry and none for anything else (repository matched exactly), e.g. `0-acme/website=https://acme-website.example.app`. Each url must be `https`, with no user info and port 443 or none. A missing, extra or duplicated entry, or a url breaking a rule, is rejected at startup with an error naming the entry. Stripped from the agent's environment. |
 | `QA_BACKENDS` | Optional; agentbox 1.9.35 and later. **Read for `QA_TARGET=preview` only** (ignored for `production`). A JSON array with one entry per backend preview the runner deployed from the change: `{"repository":"<dir>","url":"<preview URL>","health_url":"<health URL>"}`, or `{"repository":"<dir>","error":"<why the deploy failed>"}` for one whose deploy failed. `repository` must be a local path (`filepath.IsLocal`, as for `QA_REPOSITORIES`); `url` and `health_url` follow `QA_URLS`' rules (`https`, no user info, port 443 or none); an entry has either both URLs or a non-empty `error`, never neither or both; no repository appears twice. Invalid JSON or an entry breaking a rule is rejected at startup with an error naming the entry. Blank or `[]` is no backends. **Blank when `QA_PREVIEWS` is set**: both non-blank is rejected at startup. Stripped from the agent's environment — it reaches the agent only folded into the prompt. |
 | `QA_PREVIEWS` | Optional; agentbox 1.9.37 and later (the runner sends it only to those). **Read for `QA_TARGET=preview` only** (ignored for `production`, which never gets it). A JSON array, one entry per preview the runner deployed (or failed to deploy) for this QA run: `{"repository":"0-acme/web","kind":"site","url":"https://d1.cloudfront.net","connected_backends":["1-acme/api"],"unconnected_backends":[]}`, `{"repository":"1-acme/api","kind":"backend","url":"https://d2.cloudfront.net","health_url":"https://d2.cloudfront.net/healthz"}`, `{"repository":"2-acme/docs","kind":"site","error":"<first line of why it failed, at most 300 bytes>"}`. `repository` is the work-dir name, as in `QA_REPOSITORIES` (`filepath.IsLocal`). `kind` is `site` (a static-site preview) or `backend` (a web-service preview); one repository may have one entry of each kind, never two of the same kind. Exactly one of `url` (plus `health_url` for a backend; a site has none) or a non-empty `error`; each URL follows `QA_URLS`' rules. `connected_backends` (site entries with a url only): repositories of backend entries this site's preview was BUILT to call — its API-address variable points at that backend preview, and that backend preview allows the site preview's origin. `unconnected_backends` (site entries with a url only): repositories of backend entries in this run the site was NOT connected to (deployment.io couldn't tell which of its settings points at that API). Both optional (absent = empty); every name in them must be the repository of a backend entry in the same array, and no backend is in both. A backend entry or a failed (`error`) entry carries neither list, not even an empty one. A backend named twice in one list counts once. When set (non-blank), `QA_REPOSITORIES` and `QA_BACKENDS` are blank. Invalid JSON, an entry breaking a rule, or `QA_PREVIEWS` with a non-blank `QA_REPOSITORIES` or `QA_BACKENDS`, is rejected at startup with an error naming the entry. Stripped from the agent's environment — it reaches the agent only folded into the prompt. |
+| `QA_API_REQUEST_TOOL` | Optional. `1` when the runner serves `verify_api_request` on the tool socket: it sets it only for a stack-path QA round (`QA_PREVIEWS`) with at least one `backend` entry that has a url — never for production QA, implement, fix or review runs, or the `QA_BACKENDS` path. Read only when it is exactly `1` and `QA_TARGET` is `preview` (anything else, and every production run, ignores it). It takes effect only with `QA_PREVIEWS` and a deployed backend entry: then the run's tools include `verify_api_request` and the prompt has [the API rule](#the-api-rule) instead of the GET rule. Otherwise the run is exactly as without it. Older images ignore it and keep the GET rule. Stripped from the agent's environment. |
 | `MCP_TOOL_RPC_SOCKET` | **Required in qa mode** — QA without its tools can't check anything. |
 
 **What the prompt says.** You are checking a change, not making one; you
@@ -431,13 +438,15 @@ it has `unconnected_backends`; `- <repo> (backend): <url> (health check:
 a site has `unconnected_backends`, a criterion that needs a frontend to use a
 backend preview it is not connected to is not checked with reason "this
 site's preview isn't connected to that backend preview"; when there is a
-backend entry (deployed or failed), [the GET rule](#the-get-rule) follows.
+backend entry (deployed or failed), [the GET rule](#the-get-rule) follows —
+or, with `QA_API_REQUEST_TOOL=1` and a deployed backend entry,
+[the API rule](#the-api-rule) in its place.
 (The "…yet" reason of `QA_BACKENDS` never appears.) `[How to check]` confirms each deployed site
 preview, then each deployed backend's health URL (calling again while it
 starts), with `verify_preview_reachable`, then checks the criteria — no deploy
 step, and `deploy_static_site_preview` is never mentioned. codex and opencode
 register the MCP server as without it; the runner serves them only the two
-verify tools.
+verify tools (plus `verify_api_request` with `QA_API_REQUEST_TOOL=1`).
 
 <a id="the-get-rule"></a>**The GET rule** (agentbox 1.9.39 and later; earlier
 images report every API criterion not checked). One paragraph of the prompt,
@@ -482,6 +491,63 @@ the browser isn't read-only, but the rule only opens URLs without steps, so it
 sends only GETs. `verify_preview_rendered` calls are capped at 30 per run; the
 criteria left when they run out are not checked.
 
+<a id="the-api-rule"></a>**The API rule** (agentbox 1.9.40 and later; earlier
+images ignore `QA_API_REQUEST_TOOL` and keep the GET rule). In a run with
+`QA_PREVIEWS`, `QA_API_REQUEST_TOOL=1` and at least one `backend` entry with a
+url, this paragraph replaces the GET rule, and `verify_api_request` joins the
+tools. The tool (served by the runner) sends one HTTP request — `method` GET,
+HEAD, POST, PUT, PATCH, DELETE or OPTIONS (default GET), `url`, optional
+`headers` (at most 20; Host, Content-Length, Transfer-Encoding, Connection,
+Upgrade, TE, Trailer, Keep-Alive and `Proxy-*` refused), optional `body` (at
+most 64 KiB; not with GET, HEAD or OPTIONS), `timeout_seconds` 1–60 (default
+30) — to a preview this Task deployed (https, default port, no user info). It
+adds no `Content-Type`, follows no redirect, doesn't retry and decompresses
+nothing. It returns
+`status` (0 with `error` "no answer: <reason>" when nothing answered),
+`headers` (canonical names, values joined with ", ", each cut to 1000
+characters, at most 4 KiB in all; `headers_truncated` when some were left
+out; `Transfer-Encoding` and a declared `Trailer` included, `Connection`
+never; headers come through the preview's CloudFront distribution, so they
+include CloudFront's own), `body` (the first 8 KiB as text, or "" with `body_binary` when it isn't
+UTF-8), `body_bytes` (read up to 1 MiB; `body_bytes_capped` beyond),
+`body_truncated`, `body_read_error` (when the body stopped before its end)
+and `elapsed_ms`, at most 16 KiB of JSON; at most 60 calls
+per run. Requests may change the preview's data: its database is a throwaway
+one. The paragraph says: a criterion about how the API answers a request —
+any method, with request headers or a body — and about the response's status,
+headers or body is checked with `verify_api_request`, `url` = the backend
+preview's URL plus the path; a criterion about the pages of a site preview
+stays with `verify_preview_rendered`. A JSON body is sent with the header
+`Content-Type: application/json` (the tool adds none). The criterion is judged
+from the result's status, headers and body (a criterion expecting a 404 passes
+when `status` is 404); JSON is compared by meaning (the same keys and values),
+not spacing or key order. Redirects aren't followed: a criterion about a
+redirect is judged from the status and the `Location` header. QA may create,
+through the API, data the criterion itself describes (e.g. "POST /items, then
+GET /items lists it"), in the order the criterion gives. In [How to check],
+the step that sends every criterion to `verify_preview_rendered` becomes two:
+API criteria with `verify_api_request`, then every other criterion (the pages
+of a site preview) with `verify_preview_rendered`. Still not checked, each
+with its reason:
+
+- an API key, a token or a signed-in session: "needs a login";
+- a criterion about particular records the criterion doesn't create and the
+  response doesn't show: "needs data the preview database doesn't have" (a
+  criterion about the response's status or shape is still checked);
+- one that needs more of the body than the tool returns (the first 8 KiB):
+  "needs more of the response than QA reads";
+- one about a header the preview's CloudFront distribution sets (Via,
+  X-Cache, X-Amz-Cf-Pop, X-Amz-Cf-Id, Age, and the framing headers
+  Transfer-Encoding, Content-Length and Connection): "is about a header
+  CloudFront sets";
+- with more than one deployed backend only, one that doesn't make clear which
+  backend it means: "doesn't say which backend it means".
+
+"needs an API request other than a plain GET" and "needs part of the response
+the browser doesn't show" are never named in such a run (prompt or reporting
+rules). Production runs, the backend health step, the frontend-connection
+rules, the smoke check, the pass rule and the `<qa>` trailer are unchanged.
+
 **What the reporting rules say.** Each criterion ends `passed`, `failed` or
 `not_checked`; `not_checked` always says why (needs a login, not observable on
 a static preview such as an email or a webhook, couldn't find the page, the
@@ -510,7 +576,11 @@ isn't connected to that backend preview" (only when a site has
 part of the response the browser doesn't show" and "needs data the preview
 database doesn't have" (only with a backend entry), "doesn't say which backend
 it means" (only when more than one backend entry has a url), needs a preview
-that failed to deploy, couldn't find the page, or a preview failed to load; a preview that failed to deploy is never a finding or
+that failed to deploy, couldn't find the page, or a preview failed to load
+(with [the API rule](#the-api-rule), the API reasons are instead "needs more
+of the response than QA reads" and "needs data the preview database doesn't
+have", plus "doesn't say which backend it means" when more than one backend
+entry has a url); a preview that failed to deploy is never a finding or
 a failed criterion; and no preview that loads at all, or a browser that can't
 run, is `couldnt_run`. The run ends with exactly one `<qa>` trailer:
 
@@ -535,7 +605,7 @@ still says not to edit, build or fix anything.
 
 | `AGENT_TYPE` | QA invocation |
 |---|---|
-| `claude-code` | Prompt on stdin, trailer instruction via `--append-system-prompt`, `--mcp-config` with the `agentbox mcp-bridge` bridge, no `--dangerously-skip-permissions`, and `--allowedTools` (appended last) = `Read`, `Grep`, `Glob`, `mcp__deployment-io__deploy_static_site_preview`, `mcp__deployment-io__verify_preview_reachable`, `mcp__deployment-io__verify_preview_rendered` — without the deploy tool in production and when `QA_PREVIEWS` is set (1.9.37 and later). No `Bash`, `Write` or `Edit`. |
+| `claude-code` | Prompt on stdin, trailer instruction via `--append-system-prompt`, `--mcp-config` with the `agentbox mcp-bridge` bridge, no `--dangerously-skip-permissions`, and `--allowedTools` (appended last) = `Read`, `Grep`, `Glob`, `mcp__deployment-io__deploy_static_site_preview`, `mcp__deployment-io__verify_preview_reachable`, `mcp__deployment-io__verify_preview_rendered` — without the deploy tool in production and when `QA_PREVIEWS` is set (1.9.37 and later), plus `mcp__deployment-io__verify_api_request` with [the API rule](#the-api-rule). No `Bash`, `Write` or `Edit`. |
 
 | `codex` | Prompt + trailer instruction on stdin, `mcp_servers.deployment_io` registered, plus `-c mcp_servers.deployment_io.default_tools_approval_mode="approve"` in both QA targets. **Preview** (`QA_TARGET` `preview` or unset): `--sandbox danger-full-access` + `--dangerously-bypass-approvals-and-sandbox`, the same flags an implement run uses, so the run reads the context files with its shell (agentbox 1.9.36 and later; earlier versions ran preview QA under `--sandbox read-only`, whose bubblewrap sandbox cannot run inside agentbox's container, so every shell command — including `cat` of the context files — failed). **Production**: `--sandbox read-only` without `--dangerously-bypass-approvals-and-sandbox`, as before — it has no context to read and no use for a shell. There `codex exec` behaves as approval policy `never`, and on the pinned 0.158.0 an MCP tool without read-only annotations is then rejected ("requires approval, but approval policy is never") before it reaches the server; `approve` lets the tools run without a prompt while the sandbox stays read-only (verified end-to-end against the pinned binary). With the bypass flag (preview) the key is harmless. |
 | `opencode` | Prompt + trailer instruction on stdin; the review permission set (`edit`, `bash` and `webfetch` denied) plus the `mcp` block registered. |

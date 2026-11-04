@@ -494,6 +494,9 @@ var agentboxInputEnv = map[string]bool{
 	// QA_PREVIEWS is JSON (every preview the runner deployed), folded into
 	// the prompt as the [Previews] section.
 	"QA_PREVIEWS": true,
+	// QA_API_REQUEST_TOOL is folded into the prompt (the API rule) and the
+	// QA tool allowlist.
+	"QA_API_REQUEST_TOOL": true,
 }
 
 // agentEnvDenylist are env vars removed from every agent process's

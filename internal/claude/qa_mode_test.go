@@ -121,3 +121,26 @@ func TestBuildArgsInQAModeWithPreviews(t *testing.T) {
 		}
 	}
 }
+
+// QA_PREVIEWS with a deployed backend and QA_API_REQUEST_TOOL: the verify
+// tools and verify_api_request.
+func TestBuildArgsInQAModeWithTheAPIRequestTool(t *testing.T) {
+	cfg := qaConfig()
+	cfg.QARepositories = nil
+	cfg.QAPreviews = []config.QAPreview{{Repository: "1-acme/api", Kind: config.QAPreviewBackend, URL: "https://d2.cloudfront.net", HealthURL: "https://d2.cloudfront.net/healthz"}}
+	cfg.QAAPIRequestTool = true
+	args := (&Driver{}).BuildArgs(cfg)
+	i := indexOf(args, "--allowedTools")
+	if i < 0 {
+		t.Fatal("qa mode has no --allowedTools")
+	}
+	want := []string{
+		"Read", "Grep", "Glob",
+		"mcp__deployment-io__verify_preview_reachable",
+		"mcp__deployment-io__verify_preview_rendered",
+		"mcp__deployment-io__verify_api_request",
+	}
+	if got := args[i+1:]; strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Errorf("allowlist (must be last) = %q, want exactly %q", got, want)
+	}
+}
