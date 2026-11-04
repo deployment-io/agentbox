@@ -67,7 +67,7 @@ const finalMessageInstruction = `Before finishing: when the repo has a feasible 
 
 Final-message format. Your final message must contain, at the very end:
 
-1. A multi-line changes summary describing what you changed and why, noting the verify outcome. This becomes the PR body's lead-in.
+1. A multi-line changes summary describing what you changed and why, noting the verify outcome. This becomes the PR body's lead-in and the commit message. Describe the change only — not whether it is committed, pushed or in a pull request: that happens after you finish.
 
 2. The verification result as compact JSON wrapped in <verify>...</verify>. If you ran build/test: {"ran":true,"passed":true|false,"command":"<command>"}. If you did not (no buildable code, docs-only, etc.): {"ran":false,"skipped_reason":"<why>"}. When passed is false, ALSO include "stderr_tail": the last few lines of actual failure output, verbatim — the error text, not your description of it. Example:
 
