@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/url"
 	"strings"
 	"sync"
 	"unicode/utf8"
+
+	"github.com/deployment-io/agentbox/internal/qa"
 )
 
 // Per-event line-width budget. The dashboard's log viewer renders in a
@@ -43,8 +46,15 @@ type humanLogFormatter struct {
 	sink    io.Writer
 	rawSink io.WriteCloser
 
-	mu  sync.Mutex
-	buf bytes.Buffer
+	mu    sync.Mutex
+	buf   bytes.Buffer
+	state formatState
+}
+
+// formatState is what the formatter remembers across lines: the IDs of the
+// verify_api_request calls, whose results are logged without their content.
+type formatState struct {
+	apiRequestIDs map[string]bool
 }
 
 func newHumanLogFormatter(sink io.Writer, rawSink io.WriteCloser) *humanLogFormatter {
@@ -107,7 +117,7 @@ func (f *humanLogFormatter) emitLine(line []byte) {
 		f.passthrough(line)
 		return
 	}
-	summary, ok := formatStreamJSONLine(trimmed)
+	summary, ok := f.state.formatLine(trimmed)
 	if !ok {
 		f.passthrough(line)
 		return
@@ -135,6 +145,10 @@ func (f *humanLogFormatter) passthrough(line []byte) {
 // I recognize — pass through raw." Empty string with ok=true means
 // the event was recognized but had no useful content to surface.
 func formatStreamJSONLine(line []byte) (string, bool) {
+	return (&formatState{}).formatLine(line)
+}
+
+func (st *formatState) formatLine(line []byte) (string, bool) {
 	var ev humanEvent
 	if err := json.Unmarshal(line, &ev); err != nil {
 		return "", false
@@ -142,7 +156,7 @@ func formatStreamJSONLine(line []byte) (string, bool) {
 	if ev.Type == "" {
 		return "", false
 	}
-	return ev.format(), true
+	return ev.format(st), true
 }
 
 // humanEvent is the formatter's view of a stream-json event. Distinct
@@ -186,6 +200,7 @@ type humanMessage struct {
 
 type humanContentBlock struct {
 	Type      string          `json:"type"`
+	ID        string          `json:"id"`
 	Text      string          `json:"text"`
 	Thinking  string          `json:"thinking"`
 	Name      string          `json:"name"`
@@ -195,12 +210,12 @@ type humanContentBlock struct {
 	IsError   bool            `json:"is_error"`
 }
 
-func (e humanEvent) format() string {
+func (e humanEvent) format(st *formatState) string {
 	switch e.Type {
 	case "system":
 		return formatSystem(e)
 	case "assistant", "user":
-		return formatMessageEnvelope(e.Message)
+		return formatMessageEnvelope(st, e.Message)
 	case "result":
 		return formatResult(e)
 	default:
@@ -234,7 +249,7 @@ func formatSystem(e humanEvent) string {
 	return strings.Join(parts, " ")
 }
 
-func formatMessageEnvelope(raw json.RawMessage) string {
+func formatMessageEnvelope(st *formatState, raw json.RawMessage) string {
 	if len(raw) == 0 {
 		return ""
 	}
@@ -244,14 +259,14 @@ func formatMessageEnvelope(raw json.RawMessage) string {
 	}
 	var lines []string
 	for _, b := range msg.Content {
-		if line := formatContentBlock(b); line != "" {
+		if line := formatContentBlock(st, b); line != "" {
 			lines = append(lines, line)
 		}
 	}
 	return strings.Join(lines, "\n")
 }
 
-func formatContentBlock(b humanContentBlock) string {
+func formatContentBlock(st *formatState, b humanContentBlock) string {
 	switch b.Type {
 	case "thinking":
 		text := strings.TrimSpace(b.Thinking)
@@ -270,8 +285,18 @@ func formatContentBlock(b humanContentBlock) string {
 		}
 		return "[text] " + ellipsisOneLine(text, textExcerptLen)
 	case "tool_use":
+		if isAPIRequestTool(b.Name) {
+			if st.apiRequestIDs == nil {
+				st.apiRequestIDs = map[string]bool{}
+			}
+			st.apiRequestIDs[b.ID] = true
+			return formatAPIRequestToolUse(b)
+		}
 		return formatToolUse(b)
 	case "tool_result":
+		if st.apiRequestIDs[b.ToolUseID] {
+			return formatAPIRequestToolResult(b)
+		}
 		return formatToolResult(b)
 	default:
 		return ""
@@ -302,6 +327,42 @@ func formatToolResult(b humanContentBlock) string {
 		return prefix
 	}
 	return prefix + " " + ellipsisOneLine(excerpt, resultExcerptLen)
+}
+
+// isAPIRequestTool reports whether name is the runner's verify_api_request
+// tool as Claude Code names it.
+func isAPIRequestTool(name string) bool {
+	return name == "mcp__"+mcpServerName+"__"+qa.ToolAPIRequest
+}
+
+// formatAPIRequestToolUse logs a verify_api_request call as the runner's job
+// log does: the method and the URL without its query string — never the
+// request headers or body.
+func formatAPIRequestToolUse(b humanContentBlock) string {
+	var in struct {
+		Method string `json:"method"`
+		URL    string `json:"url"`
+	}
+	_ = json.Unmarshal(b.Input, &in)
+	method := in.Method
+	if method == "" {
+		method = "GET"
+	}
+	where := "?"
+	if u, err := url.Parse(strings.TrimSpace(in.URL)); err == nil && u.Host != "" {
+		where = u.Scheme + "://" + u.Host + u.EscapedPath()
+	}
+	return "[tool] " + b.Name + ": " + ellipsisOneLine(method+" "+where, toolInputExcerptLen)
+}
+
+// formatAPIRequestToolResult logs a verify_api_request result without its
+// content: the response's headers and body stay out of the log.
+func formatAPIRequestToolResult(b humanContentBlock) string {
+	status := "success"
+	if b.IsError {
+		status = "error"
+	}
+	return fmt.Sprintf("[result] (%s, %d bytes)", status, len(toolResultBody(b.Content)))
 }
 
 // toolResultBody handles the polymorphic `content` field of tool_result

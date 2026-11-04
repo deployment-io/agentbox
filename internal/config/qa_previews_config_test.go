@@ -153,3 +153,34 @@ func TestLoadQAPreviewsIgnoredForProduction(t *testing.T) {
 		t.Errorf("production with previews and no repositories: err = %v", err)
 	}
 }
+
+// QA_API_REQUEST_TOOL turns verify_api_request on only when it is "1" and the
+// target is the preview one.
+func TestLoadQAAPIRequestTool(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		want  bool
+	}{{"1", true}, {"", false}, {"0", false}, {"true", false}, {"yes", false}, {" 1 ", false}, {"1\n", false}} {
+		qaEnv(t, map[string]string{"QA_REPOSITORIES": "", "QA_PREVIEWS": qaPreviewsValid, "QA_API_REQUEST_TOOL": tc.value})
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %s", err)
+		}
+		if cfg.QAAPIRequestTool != tc.want {
+			t.Errorf("QA_API_REQUEST_TOOL=%q: QAAPIRequestTool = %v", tc.value, cfg.QAAPIRequestTool)
+		}
+	}
+	qaEnv(t, map[string]string{
+		"QA_TARGET":           QATargetProduction,
+		"QA_REPOSITORIES":     "0-acme/website",
+		"QA_URLS":             "0-acme/website=https://acme.example",
+		"QA_API_REQUEST_TOOL": "1",
+	})
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %s", err)
+	}
+	if cfg.QAAPIRequestTool {
+		t.Error("a production run has QAAPIRequestTool")
+	}
+}

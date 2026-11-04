@@ -310,3 +310,35 @@ func TestHumanLogFormatter_NoPRTitleLeavesTextUntouched(t *testing.T) {
 type nopCloser struct{ io.Writer }
 
 func (nopCloser) Close() error { return nil }
+
+// A verify_api_request call is logged as its method and URL without the query
+// string, and its result without its content — never request headers or
+// bodies, nor the response's headers or body.
+func TestHumanLogFormatter_APIRequestRedacted(t *testing.T) {
+	const stream = `{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_api","name":"mcp__deployment-io__verify_api_request","input":{"method":"POST","url":"https://d1.cloudfront.net/api/items?token=secret-query","headers":{"X-Api-Key":"secret-header"},"body":"{\"secret\":\"request-body\"}"}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_api","content":[{"type":"text","text":"{\"status\":201,\"headers\":{\"Set-Cookie\":\"secret-cookie\"},\"body\":\"secret-response\"}"}],"is_error":false}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_other","name":"Read","input":{"file_path":"/work/main.go"}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_other","content":"package main","is_error":false}]}}
+`
+	var sink bytes.Buffer
+	f := newHumanLogFormatter(&sink, nil)
+	if _, err := io.WriteString(f, stream); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	got := sink.String()
+	for _, want := range []string{
+		"[tool] mcp__deployment-io__verify_api_request: POST https://d1.cloudfront.net/api/items\n",
+		"[result] (success, ",
+		"package main",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("log lacks %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "secret") {
+		t.Errorf("log carries a query string, header or body:\n%s", got)
+	}
+}

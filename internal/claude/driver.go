@@ -247,7 +247,8 @@ const mcpServerName = "deployment-io"
 // (the deploy facts under /work/context are all a QA run can read) and the
 // runner's tools for the run's target (qa.ToolsFor: the three preview tools,
 // or, in production or when the runner deployed every preview (QA_PREVIEWS),
-// only the two that check a site — never the deploy tool).
+// only the two that check a site — never the deploy tool — plus
+// verify_api_request when the runner serves it).
 // No Bash, Write, Edit or NotebookEdit — QA checks a change and makes none,
 // and without --dangerously-skip-permissions a tool not listed here is denied
 // outright.

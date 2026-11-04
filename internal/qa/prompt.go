@@ -13,6 +13,10 @@ const (
 	ToolDeploy    = "deploy_static_site_preview"
 	ToolReachable = "verify_preview_reachable"
 	ToolRendered  = "verify_preview_rendered"
+	// ToolAPIRequest sends one HTTP request to a backend preview. The runner
+	// serves it only to a QA_PREVIEWS run with a deployed backend preview, and
+	// says so with QA_API_REQUEST_TOOL=1.
+	ToolAPIRequest = "verify_api_request"
 )
 
 // Tools is every runner tool a preview QA run needs, in the order it uses
@@ -32,10 +36,20 @@ func ToolsFor(cfg *config.Config) []string {
 	if production(cfg) {
 		return ProductionTools
 	}
+	if apiRequestTool(cfg) {
+		return append(append([]string{}, VerifyTools...), ToolAPIRequest)
+	}
 	if hasPreviews(cfg) {
 		return VerifyTools
 	}
 	return Tools
+}
+
+// apiRequestTool says the run has verify_api_request: a QA_PREVIEWS run the
+// runner serves it to (QA_API_REQUEST_TOOL) with a deployed backend preview.
+// Such a run follows the API rule (apiRule) instead of the GET rule.
+func apiRequestTool(cfg *config.Config) bool {
+	return hasPreviews(cfg) && cfg.QAAPIRequestTool && deployedBackends(cfg) > 0
 }
 
 // ReasonNeedsDataChange is the not_checked reason for a criterion that can
@@ -62,6 +76,11 @@ const (
 	ReasonNeedsPreviewData    = "needs data the preview database doesn't have"
 	ReasonWhichBackend        = "doesn't say which backend it means"
 )
+
+// ReasonNeedsMoreResponse is the not_checked reason of the API rule
+// (apiRule) for a criterion that needs more of the response body than
+// verify_api_request returns.
+const ReasonNeedsMoreResponse = "needs more of the response than QA reads"
 
 // ReasonSiteNotConnected is the not_checked reason of a run given QA_PREVIEWS
 // for a criterion that needs a site preview to use a backend preview it was
@@ -245,9 +264,25 @@ You have no source code and no diff. All you have is the previews listed below, 
 	if len(rules) > 0 {
 		b.WriteString(strings.Join(rules, " ") + "\n")
 	}
-	if kinds.backend {
+	switch {
+	case apiRequestTool(cfg):
+		b.WriteString(apiRule(deployedBackends(cfg) > 1) + "\n")
+	case kinds.backend:
 		b.WriteString(getRule(false, deployedBackends(cfg) > 1) + "\n")
 	}
+}
+
+// apiRule is getRule for a run with verify_api_request: QA checks a criterion
+// about how the API answers any request with that tool, and the reasons a
+// criterion about the API is still not checked are the ones the tool leaves
+// (ReasonWhichBackend needs more than one deployed backend).
+func apiRule(manyBackends bool) string {
+	rule := fmt.Sprintf(`A criterion about how the API answers a request — any method, with request headers or a body — and about the response's status, headers or body is checked by calling %[1]s with url = the backend preview's URL plus the path. A criterion about the pages of a site preview stays with %[2]s. %[1]s adds no Content-Type: send a JSON body with the header Content-Type: application/json. Judge the criterion from the result's status, headers and body: a criterion expecting a 404 passes when status is 404. Compare JSON by meaning (the same keys and values), not by spacing or key order. Redirects are not followed: a criterion about a redirect is judged from the result's status and its Location header. Requests may change the preview's data — its database is a throwaway one — so you may create, through the API, data the criterion itself describes (e.g. "POST /items, then GET /items lists it"), in the order the criterion gives.`, ToolAPIRequest, ToolRendered)
+	if manyBackends {
+		rule += fmt.Sprintf(` More than one backend preview deployed: use the one the criterion names; when it doesn't make clear which one it means, it is not checked, with reason '%s'.`, ReasonWhichBackend)
+	}
+	rule += fmt.Sprintf(` One that needs an API key, a token or a signed-in session is not checked, with reason 'needs a login'. The preview database starts with only what the migrations create, so a missing record is not a failure: a criterion about particular records (a user, an order) that the criterion doesn't create and the response doesn't show is not checked, with reason '%s'. A criterion about the response's status or shape (an empty list, a 404 for an unknown id) is still checked. One that needs more of the body than %s returns (the first 8 KiB) is not checked, with reason '%s'.`, ReasonNeedsPreviewData, ToolAPIRequest, ReasonNeedsMoreResponse)
+	return rule
 }
 
 // getRule is the paragraph that has QA check a criterion about how the API
@@ -288,7 +323,11 @@ func writePreviewsSteps(b *strings.Builder, cfg *config.Config) {
 	if kinds.deployedBackend {
 		steps = append(steps, backendHealthStep())
 	}
-	steps = append(steps, criterionStep())
+	if apiRequestTool(cfg) {
+		steps = append(steps, apiCriterionStep(), pageCriterionStep())
+	} else {
+		steps = append(steps, criterionStep())
+	}
 	writeSteps(b, steps)
 }
 
@@ -313,8 +352,25 @@ func backendHealthStep() string {
 	return fmt.Sprintf(`Confirm each backend with %s on its health URL. A new backend preview takes a few minutes to answer — its service starts, and a new CloudFront distribution takes minutes to serve — so while it isn't reachable yet, call it again. That wait is normal and says nothing about the change: don't report it as a slow backend or as an observation.`, ToolReachable)
 }
 
+// apiCriterionStep is the checking step for a criterion about how the API
+// answers a request, in a run with verify_api_request (the API rule).
+// pageCriterionStep, which follows it, is for the criteria it leaves.
+func apiCriterionStep() string {
+	return fmt.Sprintf(`Check each criterion about how the API answers a request with %s, as the API rule above says: one request per call, url = the backend preview's URL plus the path, with the method, headers and body the criterion needs. Do not use %s for these: the browser sends no other method, request headers or body, and does not show response headers or a redirect's own status.`, ToolAPIRequest, ToolRendered)
+}
+
 func criterionStep() string {
-	return fmt.Sprintf(`Check each criterion with %s: goto the page, then steps and assertions. You cannot read the source, so find your way around from the result's outline (headings, links, buttons, form fields) and its page text; text= selectors (e.g. text=Sign up) work without source. While it answers status "preparing", call it again.`, ToolRendered)
+	return browserCriterionStep("Check each criterion with")
+}
+
+// pageCriterionStep is criterionStep in a run with verify_api_request: the
+// browser is for the criteria apiCriterionStep leaves (a site preview's pages).
+func pageCriterionStep() string {
+	return browserCriterionStep("Check each other criterion — about the pages of a site preview — with")
+}
+
+func browserCriterionStep(lead string) string {
+	return fmt.Sprintf(`%s %s: goto the page, then steps and assertions. You cannot read the source, so find your way around from the result's outline (headings, links, buttons, form fields) and its page text; text= selectors (e.g. text=Sign up) work without source. While it answers status "preparing", call it again.`, lead, ToolRendered)
 }
 
 // writeSteps writes a preview [How to check]: steps, then sharedSteps,
@@ -424,10 +480,13 @@ Rules for the block:
 - Emit the block once, at the very end. Everything outside it is prose for a human.`, criteriaRule, notChecked, where, couldntRun, backendRule)
 }
 
-// apiReasons is the GET rule's not_checked reasons a run with cfg can give,
-// quoted, for Instruction's list.
+// apiReasons is the GET rule's (or, with verify_api_request, the API rule's)
+// not_checked reasons a run with cfg can give, quoted, for Instruction's list.
 func apiReasons(cfg *config.Config) string {
 	reasons := []string{ReasonNeedsAPIRequests, ReasonNeedsResponseDetail}
+	if apiRequestTool(cfg) {
+		reasons = []string{ReasonNeedsMoreResponse}
+	}
 	if !production(cfg) {
 		reasons = append(reasons, ReasonNeedsPreviewData)
 		if deployedBackends(cfg) > 1 {
