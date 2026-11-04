@@ -76,6 +76,8 @@ func TestAPIRuleReplacesTheGETRule(t *testing.T) {
 			"with reason 'needs a login'",
 			"with reason '" + ReasonNeedsPreviewData + "'",
 			"with reason '" + ReasonNeedsMoreResponse + "'",
+			"Via, X-Cache, X-Amz-Cf-Pop, X-Amz-Cf-Id and Age are CloudFront's",
+			"with reason '" + ReasonCloudFrontHeader + "'",
 			"Check each criterion about how the API answers a request with verify_api_request",
 			"Check each other criterion — about the pages of a site preview — with verify_preview_rendered",
 		} {
@@ -89,7 +91,7 @@ func TestAPIRuleReplacesTheGETRule(t *testing.T) {
 		if got := strings.Contains(prompt, "'"+ReasonWhichBackend+"'"); got != tc.which {
 			t.Errorf("%s: prompt names %q: %v", tc.name, ReasonWhichBackend, got)
 		}
-		reasons := `"` + ReasonNeedsMoreResponse + `", "` + ReasonNeedsPreviewData + `"`
+		reasons := `"` + ReasonNeedsMoreResponse + `", "` + ReasonCloudFrontHeader + `", "` + ReasonNeedsPreviewData + `"`
 		if tc.which {
 			reasons += `, "` + ReasonWhichBackend + `"`
 		}

@@ -506,8 +506,9 @@ nothing. It returns
 `status` (0 with `error` "no answer: <reason>" when nothing answered),
 `headers` (canonical names, values joined with ", ", each cut to 1000
 characters, at most 4 KiB in all; `headers_truncated` when some were left
-out; `Transfer-Encoding`, `Trailer` and `Connection: close` included as the
-backend sent them), `body` (the first 8 KiB as text, or "" with `body_binary` when it isn't
+out; `Transfer-Encoding` and a declared `Trailer` included, `Connection`
+never; headers come through the preview's CloudFront distribution, so they
+include CloudFront's own), `body` (the first 8 KiB as text, or "" with `body_binary` when it isn't
 UTF-8), `body_bytes` (read up to 1 MiB; `body_bytes_capped` beyond),
 `body_truncated`, `body_read_error` (when the body stopped before its end)
 and `elapsed_ms`, at most 16 KiB of JSON; at most 60 calls
@@ -535,6 +536,10 @@ with its reason:
   criterion about the response's status or shape is still checked);
 - one that needs more of the body than the tool returns (the first 8 KiB):
   "needs more of the response than QA reads";
+- one about a header the preview's CloudFront distribution sets (Via,
+  X-Cache, X-Amz-Cf-Pop, X-Amz-Cf-Id, Age, and the framing headers
+  Transfer-Encoding, Content-Length and Connection): "is about a header
+  CloudFront sets";
 - with more than one deployed backend only, one that doesn't make clear which
   backend it means: "doesn't say which backend it means".
 

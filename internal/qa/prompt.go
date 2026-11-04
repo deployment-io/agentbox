@@ -82,6 +82,11 @@ const (
 // verify_api_request returns.
 const ReasonNeedsMoreResponse = "needs more of the response than QA reads"
 
+// ReasonCloudFrontHeader is the not_checked reason of the API rule (apiRule)
+// for a criterion about a response header the preview's CloudFront
+// distribution sets, so the backend's own value can't be seen.
+const ReasonCloudFrontHeader = "is about a header CloudFront sets"
+
 // ReasonSiteNotConnected is the not_checked reason of a run given QA_PREVIEWS
 // for a criterion that needs a site preview to use a backend preview it was
 // not built to call.
@@ -281,7 +286,7 @@ func apiRule(manyBackends bool) string {
 	if manyBackends {
 		rule += fmt.Sprintf(` More than one backend preview deployed: use the one the criterion names; when it doesn't make clear which one it means, it is not checked, with reason '%s'.`, ReasonWhichBackend)
 	}
-	rule += fmt.Sprintf(` One that needs an API key, a token or a signed-in session is not checked, with reason 'needs a login'. The preview database starts with only what the migrations create, so a missing record is not a failure: a criterion about particular records (a user, an order) that the criterion doesn't create and the response doesn't show is not checked, with reason '%s'. A criterion about the response's status or shape (an empty list, a 404 for an unknown id) is still checked. One that needs more of the body than %s returns (the first 8 KiB) is not checked, with reason '%s'.`, ReasonNeedsPreviewData, ToolAPIRequest, ReasonNeedsMoreResponse)
+	rule += fmt.Sprintf(` One that needs an API key, a token or a signed-in session is not checked, with reason 'needs a login'. The preview database starts with only what the migrations create, so a missing record is not a failure: a criterion about particular records (a user, an order) that the criterion doesn't create and the response doesn't show is not checked, with reason '%s'. A criterion about the response's status or shape (an empty list, a 404 for an unknown id) is still checked. One that needs more of the body than %s returns (the first 8 KiB) is not checked, with reason '%s'. The response comes through the preview's CloudFront distribution: Via, X-Cache, X-Amz-Cf-Pop, X-Amz-Cf-Id and Age are CloudFront's, and Transfer-Encoding, Content-Length and Connection describe CloudFront's framing, not the backend's — a criterion about one of those headers is not checked, with reason '%s'.`, ReasonNeedsPreviewData, ToolAPIRequest, ReasonNeedsMoreResponse, ReasonCloudFrontHeader)
 	return rule
 }
 
@@ -485,7 +490,7 @@ Rules for the block:
 func apiReasons(cfg *config.Config) string {
 	reasons := []string{ReasonNeedsAPIRequests, ReasonNeedsResponseDetail}
 	if apiRequestTool(cfg) {
-		reasons = []string{ReasonNeedsMoreResponse}
+		reasons = []string{ReasonNeedsMoreResponse, ReasonCloudFrontHeader}
 	}
 	if !production(cfg) {
 		reasons = append(reasons, ReasonNeedsPreviewData)
