@@ -184,3 +184,102 @@ func TestLoadQAAPIRequestTool(t *testing.T) {
 		t.Error("a production run has QAAPIRequestTool")
 	}
 }
+
+// qaPreviewsWithRoles is a site and a backend entry whose url has roles.
+func qaPreviewsWithRoles(roles string) string {
+	return `[{"repository":"0-acme/web","kind":"site","url":"https://d1.cloudfront.net","connected_backends":["1-acme/api"]},` +
+		`{"repository":"1-acme/api","kind":"backend","url":"https://d2.cloudfront.net","health_url":"https://d2.cloudfront.net/healthz","roles":` + roles + `}]`
+}
+
+func TestLoadQAPreviewsRoles(t *testing.T) {
+	qaPreviewsEnv(t, qaPreviewsWithRoles(`[{"name":"admin","description":"Manages every account"},{"name":"read_only-2","description":""},{"name":"member"}]`))
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %s", err)
+	}
+	want := []QARole{{Name: "admin", Description: "Manages every account"}, {Name: "read_only-2"}, {Name: "member"}}
+	if got := cfg.QAPreviews[1].Roles; !reflect.DeepEqual(got, want) {
+		t.Errorf("Roles = %+v, want %+v", got, want)
+	}
+	if cfg.QAPreviews[0].Roles != nil {
+		t.Errorf("the site has roles %+v", cfg.QAPreviews[0].Roles)
+	}
+
+	// Ten roles, a 32-character name and a 200-character description are the limits.
+	var ten []string
+	for i := 0; i < 10; i++ {
+		ten = append(ten, `{"name":"role`+string(rune('a'+i))+`"}`)
+	}
+	ten[0] = `{"name":"a` + strings.Repeat("b", 31) + `","description":"` + strings.Repeat("é", 200) + `"}`
+	qaPreviewsEnv(t, qaPreviewsWithRoles(`[`+strings.Join(ten, ",")+`]`))
+	if cfg, err := Load(); err != nil || len(cfg.QAPreviews[1].Roles) != 10 {
+		t.Errorf("ten roles at the limits: err = %v", err)
+	}
+}
+
+func TestLoadQAPreviewsRejectsBadRoles(t *testing.T) {
+	const api = `{"repository":"1-acme/api","kind":"backend","url":"https://d2.cloudfront.net","health_url":"https://d2.cloudfront.net/healthz"}`
+	var eleven []string
+	for i := 0; i < 11; i++ {
+		eleven = append(eleven, `{"name":"role`+string(rune('a'+i))+`"}`)
+	}
+	for _, tc := range []struct {
+		name, raw, want string
+	}{
+		{"on a site entry", `[` + api + `,{"repository":"0-acme/web","kind":"site","url":"https://d1.cloudfront.net","roles":[{"name":"admin"}]}]`, `QA_PREVIEWS entry 2 ("0-acme/web") is a site, so it must not have roles`},
+		{"empty on a site entry", `[{"repository":"0-acme/web","kind":"site","url":"https://d1.cloudfront.net","roles":[]}]`, `QA_PREVIEWS entry 1 ("0-acme/web") is a site, so it must not have roles`},
+		{"on a failed backend entry", `[{"repository":"1-acme/api","kind":"backend","error":"x","roles":[{"name":"admin"}]}]`, `QA_PREVIEWS entry 1 ("1-acme/api") failed to deploy, so it must not have roles`},
+		{"on a failed site entry", `[{"repository":"0-acme/web","kind":"site","error":"x","roles":[{"name":"admin"}]}]`, `QA_PREVIEWS entry 1 ("0-acme/web") failed to deploy, so it must not have roles`},
+		{"11 roles", qaPreviewsWithRoles(`[` + strings.Join(eleven, ",") + `]`), `QA_PREVIEWS entry 2 ("1-acme/api") has 11 roles: at most 10`},
+		{"an upper-case name", qaPreviewsWithRoles(`[{"name":"Admin"}]`), `QA_PREVIEWS entry 2 ("1-acme/api"): role 1 has name "Admin": must match`},
+		{"a name starting with a digit", qaPreviewsWithRoles(`[{"name":"admin"},{"name":"2fa"}]`), `QA_PREVIEWS entry 2 ("1-acme/api"): role 2 has name "2fa": must match`},
+		{"a name with a space", qaPreviewsWithRoles(`[{"name":"super admin"}]`), `role 1 has name "super admin": must match`},
+		{"a 33-character name", qaPreviewsWithRoles(`[{"name":"a` + strings.Repeat("b", 32) + `"}]`), `role 1 has name`},
+		{"no name", qaPreviewsWithRoles(`[{"description":"x"}]`), `role 1 has name "": must match`},
+		{"a duplicate", qaPreviewsWithRoles(`[{"name":"admin"},{"name":"member"},{"name":"admin"}]`), `QA_PREVIEWS entry 2 ("1-acme/api") repeats role "admin"`},
+		{"a name with spaces around it", qaPreviewsWithRoles(`[{"name":" admin "}]`), `role 1 has name " admin ": must match`},
+		{"a description long by a trailing space", qaPreviewsWithRoles(`[{"name":"admin","description":"` + strings.Repeat("x", 200) + ` "}]`), `role "admin" has a description of 201 characters: at most 200`},
+		{"a long description", qaPreviewsWithRoles(`[{"name":"admin","description":"` + strings.Repeat("x", 201) + `"}]`), `QA_PREVIEWS entry 2 ("1-acme/api"): role "admin" has a description of 201 characters: at most 200`},
+		{"not a list", qaPreviewsWithRoles(`"admin"`), `QA_PREVIEWS entry 2 ("1-acme/api") is not a valid preview entry`},
+		{"a name not a string", qaPreviewsWithRoles(`[{"name":7}]`), `QA_PREVIEWS entry 2 ("1-acme/api") is not a valid preview entry`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			qaPreviewsEnv(t, tc.raw)
+			_, err := Load()
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("err = %v, want one containing %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// QA_API_SIGN_IN_TOOL is read like QA_API_REQUEST_TOOL: only "1", only for
+// the preview target.
+func TestLoadQAAPISignInTool(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		want  bool
+	}{{"1", true}, {"", false}, {"0", false}, {"true", false}, {" 1 ", false}} {
+		qaEnv(t, map[string]string{"QA_REPOSITORIES": "", "QA_PREVIEWS": qaPreviewsWithRoles(`[{"name":"admin"}]`), "QA_API_REQUEST_TOOL": "1", "QA_API_SIGN_IN_TOOL": tc.value})
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %s", err)
+		}
+		if cfg.QAAPISignInTool != tc.want {
+			t.Errorf("QA_API_SIGN_IN_TOOL=%q: QAAPISignInTool = %v", tc.value, cfg.QAAPISignInTool)
+		}
+	}
+	qaEnv(t, map[string]string{
+		"QA_TARGET":           QATargetProduction,
+		"QA_REPOSITORIES":     "0-acme/website",
+		"QA_URLS":             "0-acme/website=https://acme.example",
+		"QA_API_SIGN_IN_TOOL": "1",
+	})
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %s", err)
+	}
+	if cfg.QAAPISignInTool {
+		t.Error("a production run has QAAPISignInTool")
+	}
+}

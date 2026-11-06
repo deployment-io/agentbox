@@ -497,6 +497,9 @@ var agentboxInputEnv = map[string]bool{
 	// QA_API_REQUEST_TOOL is folded into the prompt (the API rule) and the
 	// QA tool allowlist.
 	"QA_API_REQUEST_TOOL": true,
+	// QA_API_SIGN_IN_TOOL is folded into the prompt (the roles and the API
+	// rule's sign-in sentence) and the QA tool allowlist.
+	"QA_API_SIGN_IN_TOOL": true,
 }
 
 // agentEnvDenylist are env vars removed from every agent process's

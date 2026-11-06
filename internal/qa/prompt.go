@@ -17,6 +17,11 @@ const (
 	// serves it only to a QA_PREVIEWS run with a deployed backend preview, and
 	// says so with QA_API_REQUEST_TOOL=1.
 	ToolAPIRequest = "verify_api_request"
+	// ToolAPISignIn signs in to a backend preview as one of its roles' test
+	// users and keeps the session for verify_api_request's "as". The runner
+	// serves it only to a QA_PREVIEWS run with a backend preview that has
+	// roles, and says so with QA_API_SIGN_IN_TOOL=1.
+	ToolAPISignIn = "verify_api_sign_in"
 )
 
 // Tools is every runner tool a preview QA run needs, in the order it uses
@@ -36,6 +41,9 @@ func ToolsFor(cfg *config.Config) []string {
 	if production(cfg) {
 		return ProductionTools
 	}
+	if apiSignInTool(cfg) {
+		return append(append([]string{}, VerifyTools...), ToolAPIRequest, ToolAPISignIn)
+	}
 	if apiRequestTool(cfg) {
 		return append(append([]string{}, VerifyTools...), ToolAPIRequest)
 	}
@@ -50,6 +58,22 @@ func ToolsFor(cfg *config.Config) []string {
 // Such a run follows the API rule (apiRule) instead of the GET rule.
 func apiRequestTool(cfg *config.Config) bool {
 	return hasPreviews(cfg) && cfg.QAAPIRequestTool && deployedBackends(cfg) > 0
+}
+
+// apiSignInTool says the run has verify_api_sign_in: a run with
+// verify_api_request the runner serves it to (QA_API_SIGN_IN_TOOL) with a
+// backend preview that has roles. Such a run's prompt lists the roles, and its
+// API rule checks a signed-in criterion as one of them.
+func apiSignInTool(cfg *config.Config) bool {
+	if !apiRequestTool(cfg) || !cfg.QAAPISignInTool {
+		return false
+	}
+	for _, p := range cfg.QAPreviews {
+		if p.Kind == config.QAPreviewBackend && p.URL != "" && len(p.Roles) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // ReasonNeedsDataChange is the not_checked reason for a criterion that can
@@ -86,6 +110,11 @@ const ReasonNeedsMoreResponse = "needs more of the response than QA reads"
 // for a criterion about a response header the preview's CloudFront
 // distribution sets, so the backend's own value can't be seen.
 const ReasonCloudFrontHeader = "is about a header CloudFront sets"
+
+// ReasonCouldntSignIn is the not_checked reason of the API rule (apiRule),
+// with verify_api_sign_in, for a criterion whose role QA couldn't sign in as;
+// the agent puts the role's name in place of <role>.
+const ReasonCouldntSignIn = "couldn't sign in as <role>"
 
 // ReasonSiteNotConnected is the not_checked reason of a run given QA_PREVIEWS
 // for a criterion that needs a site preview to use a backend preview it was
@@ -251,6 +280,9 @@ You have no source code and no diff. All you have is the previews listed below, 
 			fmt.Fprintf(b, "- %s (%s): failed to deploy: %s\n", p.Repository, p.Kind, p.Error)
 		case p.Kind == config.QAPreviewBackend:
 			fmt.Fprintf(b, "- %s (backend): %s (health check: %s)\n", p.Repository, p.URL, p.HealthURL)
+			if apiSignInTool(cfg) {
+				writeRoles(b, p.Roles)
+			}
 		default:
 			fmt.Fprintf(b, "- %s (site): %s", p.Repository, p.URL)
 			if len(p.ConnectedBackends) > 0 {
@@ -271,23 +303,53 @@ You have no source code and no diff. All you have is the previews listed below, 
 	}
 	switch {
 	case apiRequestTool(cfg):
-		b.WriteString(apiRule(deployedBackends(cfg) > 1) + "\n")
+		b.WriteString(apiRule(deployedBackends(cfg) > 1, apiSignInTool(cfg)) + "\n")
 	case kinds.backend:
 		b.WriteString(getRule(false, deployedBackends(cfg) > 1) + "\n")
+	}
+}
+
+// writeRoles lists a backend preview's roles under its entry, in a run with
+// verify_api_sign_in. A description is put on one line.
+func writeRoles(b *strings.Builder, roles []config.QARole) {
+	if len(roles) == 0 {
+		return
+	}
+	fmt.Fprintf(b, "  Roles with a test user (sign in with %s):\n", ToolAPISignIn)
+	for _, r := range roles {
+		if d := strings.Join(strings.Fields(r.Description), " "); d != "" {
+			fmt.Fprintf(b, "  - %s: %s\n", r.Name, d)
+		} else {
+			fmt.Fprintf(b, "  - %s\n", r.Name)
+		}
 	}
 }
 
 // apiRule is getRule for a run with verify_api_request: QA checks a criterion
 // about how the API answers any request with that tool, and the reasons a
 // criterion about the API is still not checked are the ones the tool leaves
-// (ReasonWhichBackend needs more than one deployed backend).
-func apiRule(manyBackends bool) string {
+// (ReasonWhichBackend needs more than one deployed backend). With
+// verify_api_sign_in (signIn), a criterion that needs a signed-in request is
+// checked as one of the backend's roles instead of not checked.
+func apiRule(manyBackends, signIn bool) string {
 	rule := fmt.Sprintf(`A criterion about how the API answers a request — any method, with request headers or a body — and about the response's status, headers or body is checked by calling %[1]s with url = the backend preview's URL plus the path. A criterion about the pages of a site preview stays with %[2]s. %[1]s adds no Content-Type: send a JSON body with the header Content-Type: application/json. Judge the criterion from the result's status, headers and body: a criterion expecting a 404 passes when status is 404. Compare JSON by meaning (the same keys and values), not by spacing or key order. Redirects are not followed: a criterion about a redirect is judged from the result's status and its Location header. Requests may change the preview's data — its database is a throwaway one — so you may create, through the API, data the criterion itself describes (e.g. "POST /items, then GET /items lists it"), in the order the criterion gives.`, ToolAPIRequest, ToolRendered)
 	if manyBackends {
 		rule += fmt.Sprintf(` More than one backend preview deployed: use the one the criterion names; when it doesn't make clear which one it means, it is not checked, with reason '%s'.`, ReasonWhichBackend)
 	}
-	rule += fmt.Sprintf(` One that needs an API key, a token or a signed-in session is not checked, with reason 'needs a login'. The preview database starts with only what the migrations create, so a missing record is not a failure: a criterion about particular records (a user, an order) that the criterion doesn't create and the response doesn't show is not checked, with reason '%s'. A criterion about the response's status or shape (an empty list, a 404 for an unknown id) is still checked. One that needs more of the body than %s returns (the first 8 KiB) is not checked, with reason '%s'. The response comes through the preview's CloudFront distribution: Via, X-Cache, X-Amz-Cf-Pop, X-Amz-Cf-Id and Age are CloudFront's, and Transfer-Encoding, Content-Length and Connection describe CloudFront's framing, not the backend's — a criterion about one of those headers is not checked, with reason '%s'.`, ReasonNeedsPreviewData, ToolAPIRequest, ReasonNeedsMoreResponse, ReasonCloudFrontHeader)
+	if signIn {
+		rule += signInRule()
+	} else {
+		rule += ` One that needs an API key, a token or a signed-in session is not checked, with reason 'needs a login'.`
+	}
+	rule += fmt.Sprintf(` The preview database starts with only what the migrations create, so a missing record is not a failure: a criterion about particular records (a user, an order) that the criterion doesn't create and the response doesn't show is not checked, with reason '%s'. A criterion about the response's status or shape (an empty list, a 404 for an unknown id) is still checked. One that needs more of the body than %s returns (the first 8 KiB) is not checked, with reason '%s'. The response comes through the preview's CloudFront distribution: Via, X-Cache, X-Amz-Cf-Pop, X-Amz-Cf-Id and Age are CloudFront's, and Transfer-Encoding, Content-Length and Connection describe CloudFront's framing, not the backend's — a criterion about one of those headers is not checked, with reason '%s'.`, ReasonNeedsPreviewData, ToolAPIRequest, ReasonNeedsMoreResponse, ReasonCloudFrontHeader)
 	return rule
+}
+
+// signInRule is the API rule's sentence on signed-in criteria in a run with
+// verify_api_sign_in: they are checked as a role, and the ones no role covers
+// are still not checked ("needs a login").
+func signInRule() string {
+	return fmt.Sprintf(` A criterion that needs a signed-in request to a backend with roles is checked as a role — the one the criterion names, else the one whose description fits: call %[1]s with that role and the backend preview's URL (deployment.io signs in with the role's own email and password; you never see them), then call %[2]s with as = that role. If the sign-in doesn't succeed (one retry at most), the criterion is not checked, with reason '%[3]s' — never failed. A criterion that needs a role the backend has no test user for, a backend without roles, or an API key or a token that doesn't come from signing in, is still not checked, with reason 'needs a login'. "<redacted>" in a result stands for a secret: never try to recover it or put it in a request.`, ToolAPISignIn, ToolAPIRequest, ReasonCouldntSignIn)
 }
 
 // getRule is the paragraph that has QA check a criterion about how the API
@@ -491,6 +553,9 @@ func apiReasons(cfg *config.Config) string {
 	reasons := []string{ReasonNeedsAPIRequests, ReasonNeedsResponseDetail}
 	if apiRequestTool(cfg) {
 		reasons = []string{ReasonNeedsMoreResponse, ReasonCloudFrontHeader}
+	}
+	if apiSignInTool(cfg) {
+		reasons = append(reasons, ReasonCouldntSignIn)
 	}
 	if !production(cfg) {
 		reasons = append(reasons, ReasonNeedsPreviewData)
