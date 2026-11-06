@@ -9,12 +9,14 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 )
 
 const defaultNoActivityTimeout = 10 * time.Minute
@@ -225,6 +227,13 @@ type Config struct {
 	// preview. True only when QA_API_REQUEST_TOOL is "1" and QATarget is
 	// QATargetPreview; ignored otherwise.
 	QAAPIRequestTool bool
+
+	// QAAPISignInTool says the runner serves verify_api_sign_in: it sets
+	// QA_API_SIGN_IN_TOOL=1 for a QA_PREVIEWS run with a backend preview that
+	// has roles. True only when QA_API_SIGN_IN_TOOL is "1" and QATarget is
+	// QATargetPreview; internal/qa uses it only with QAAPIRequestTool and a
+	// backend entry with Roles.
+	QAAPISignInTool bool
 
 	// QATarget is what a QA run checks: QATargetPreview (previews it deploys
 	// itself — the default) or QATargetProduction (the sites already live in
@@ -559,6 +568,7 @@ const (
 // and HealthURL for a backend) or one whose deploy failed (Error set). A
 // deployed site's ConnectedBackends are the backend entries' repositories it
 // was built to call; its UnconnectedBackends are the run's other backends.
+// A deployed backend's Roles are the roles deployment.io made a test user for.
 type QAPreview struct {
 	Repository          string
 	Kind                string
@@ -567,7 +577,24 @@ type QAPreview struct {
 	Error               string
 	ConnectedBackends   []string
 	UnconnectedBackends []string
+	Roles               []QARole
 }
+
+// QARole is one role of a QA_PREVIEWS backend entry: a test user QA can sign
+// in as with verify_api_sign_in, and what the role is for (may be empty).
+type QARole struct {
+	Name        string
+	Description string
+}
+
+// The limits on a QA_PREVIEWS backend entry's roles.
+const (
+	maxQARoles                 = 10
+	maxQARoleDescriptionLength = 200
+)
+
+// qaRoleName is the form a role name takes.
+var qaRoleName = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,31}$`)
 
 // loadQAInputs reads and validates the QA_* half of the contract. REVIEW_*
 // vars are not read in qa mode.
@@ -622,6 +649,7 @@ func (c *Config) loadQAInputs() error {
 			c.QAPreviews = previews
 		}
 		c.QAAPIRequestTool = os.Getenv("QA_API_REQUEST_TOOL") == "1"
+		c.QAAPISignInTool = os.Getenv("QA_API_SIGN_IN_TOOL") == "1"
 	}
 	if len(c.QARepositories) == 0 && len(c.QABackends) == 0 && len(c.QAPreviews) == 0 {
 		return fmt.Errorf("QA_REPOSITORIES is required in %s mode", ModeQA)
@@ -699,7 +727,8 @@ func parseQABackends(raw string) ([]QABackend, error) {
 // whose deploy failed, {"repository","kind","error"}. The repository is a
 // directory inside /work, kind is "site" or "backend", each URL follows
 // QA_URLS' rules, no (repository, kind) appears twice, and every backend a
-// site names is a backend entry of the array, in at most one of its lists.
+// site names is a backend entry of the array, in at most one of its lists. A
+// backend entry with a url may have "roles" (parseQARoles).
 func parseQAPreviews(raw string) ([]QAPreview, error) {
 	var elements []json.RawMessage
 	if err := json.Unmarshal([]byte(raw), &elements); err != nil {
@@ -728,6 +757,10 @@ func parseQAPreviews(raw string) ([]QAPreview, error) {
 			Error               string   `json:"error"`
 			ConnectedBackends   []string `json:"connected_backends"`
 			UnconnectedBackends []string `json:"unconnected_backends"`
+			Roles               []struct {
+				Name        string `json:"name"`
+				Description string `json:"description"`
+			} `json:"roles"`
 		}
 		if err := json.Unmarshal(element, &e); err != nil {
 			return nil, fmt.Errorf("%s is not a valid preview entry: %v", name, err)
@@ -783,6 +816,20 @@ func parseQAPreviews(raw string) ([]QAPreview, error) {
 			}
 			backends[p.Repository] = true
 		}
+		if _, hasRoles := fields["roles"]; hasRoles {
+			switch {
+			case p.Error != "":
+				return nil, fmt.Errorf("%s failed to deploy, so it must not have roles", name)
+			case p.Kind != QAPreviewBackend:
+				return nil, fmt.Errorf("%s is a site, so it must not have roles", name)
+			}
+			for _, r := range e.Roles {
+				p.Roles = append(p.Roles, QARole{Name: r.Name, Description: r.Description})
+			}
+			if err := checkQARoles(name, p.Roles); err != nil {
+				return nil, err
+			}
+		}
 		previews = append(previews, p)
 		names = append(names, name)
 	}
@@ -806,6 +853,29 @@ func parseQAPreviews(raw string) ([]QAPreview, error) {
 		}
 	}
 	return previews, nil
+}
+
+// checkQARoles checks a backend entry's roles: at most maxQARoles, each with a
+// name matching qaRoleName that no other has, and a description of at most
+// maxQARoleDescriptionLength characters. name names the entry in the error.
+func checkQARoles(name string, roles []QARole) error {
+	if len(roles) > maxQARoles {
+		return fmt.Errorf("%s has %d roles: at most %d", name, len(roles), maxQARoles)
+	}
+	seen := map[string]bool{}
+	for i, r := range roles {
+		if !qaRoleName.MatchString(r.Name) {
+			return fmt.Errorf("%s: role %d has name %q: must match %s", name, i+1, r.Name, qaRoleName)
+		}
+		if seen[r.Name] {
+			return fmt.Errorf("%s repeats role %q", name, r.Name)
+		}
+		seen[r.Name] = true
+		if n := utf8.RuneCountInString(r.Description); n > maxQARoleDescriptionLength {
+			return fmt.Errorf("%s: role %q has a description of %d characters: at most %d", name, r.Name, n, maxQARoleDescriptionLength)
+		}
+	}
+	return nil
 }
 
 // trimmedUnique returns repos trimmed, each once, in their first order; nil

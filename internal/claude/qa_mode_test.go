@@ -144,3 +144,39 @@ func TestBuildArgsInQAModeWithTheAPIRequestTool(t *testing.T) {
 		t.Errorf("allowlist (must be last) = %q, want exactly %q", got, want)
 	}
 }
+
+// With QA_API_SIGN_IN_TOOL and a backend with roles, verify_api_sign_in joins
+// the allowlist; without roles it doesn't.
+func TestBuildArgsInQAModeWithTheAPISignInTool(t *testing.T) {
+	backend := config.QAPreview{Repository: "1-acme/api", Kind: config.QAPreviewBackend, URL: "https://d2.cloudfront.net", HealthURL: "https://d2.cloudfront.net/healthz"}
+	for _, tc := range []struct {
+		name  string
+		roles []config.QARole
+		want  bool
+	}{{"roles", []config.QARole{{Name: "admin"}}, true}, {"no roles", nil, false}} {
+		cfg := qaConfig()
+		cfg.QARepositories = nil
+		withRoles := backend
+		withRoles.Roles = tc.roles
+		cfg.QAPreviews = []config.QAPreview{withRoles}
+		cfg.QAAPIRequestTool = true
+		cfg.QAAPISignInTool = true
+		args := (&Driver{}).BuildArgs(cfg)
+		i := indexOf(args, "--allowedTools")
+		if i < 0 {
+			t.Fatal("qa mode has no --allowedTools")
+		}
+		want := []string{
+			"Read", "Grep", "Glob",
+			"mcp__deployment-io__verify_preview_reachable",
+			"mcp__deployment-io__verify_preview_rendered",
+			"mcp__deployment-io__verify_api_request",
+		}
+		if tc.want {
+			want = append(want, "mcp__deployment-io__verify_api_sign_in")
+		}
+		if got := args[i+1:]; strings.Join(got, "|") != strings.Join(want, "|") {
+			t.Errorf("%s: allowlist (must be last) = %q, want exactly %q", tc.name, got, want)
+		}
+	}
+}

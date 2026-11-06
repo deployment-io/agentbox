@@ -342,3 +342,35 @@ func TestHumanLogFormatter_APIRequestRedacted(t *testing.T) {
 		t.Errorf("log carries a query string, header or body:\n%s", got)
 	}
 }
+
+// A verify_api_sign_in call is logged as its role and URL without the query
+// string, and its result without its content; a verify_api_request call sent
+// as a role names the role.
+func TestHumanLogFormatter_APISignInRedacted(t *testing.T) {
+	const stream = `{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_in","name":"mcp__deployment-io__verify_api_sign_in","input":{"role":"admin","url":"https://d1.cloudfront.net/?token=secret-query"}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_in","content":[{"type":"text","text":"{\"signed_in\":true,\"role\":\"admin\",\"status\":200,\"session\":\"cookie\",\"cookies\":[\"secret-cookie-name\"]}"}],"is_error":false}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_api","name":"mcp__deployment-io__verify_api_request","input":{"method":"GET","url":"https://d1.cloudfront.net/api/me","as":"admin"}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_api","content":"{\"status\":200,\"body\":\"secret-response\"}","is_error":false}]}}
+`
+	var sink bytes.Buffer
+	f := newHumanLogFormatter(&sink, nil)
+	if _, err := io.WriteString(f, stream); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	got := sink.String()
+	for _, want := range []string{
+		"[tool] mcp__deployment-io__verify_api_sign_in: admin at https://d1.cloudfront.net/\n",
+		"[tool] mcp__deployment-io__verify_api_request: GET https://d1.cloudfront.net/api/me as admin\n",
+		"[result] (success, ",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("log lacks %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "secret") {
+		t.Errorf("log carries a query string, cookie name or body:\n%s", got)
+	}
+}

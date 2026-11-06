@@ -52,7 +52,8 @@ type humanLogFormatter struct {
 }
 
 // formatState is what the formatter remembers across lines: the IDs of the
-// verify_api_request calls, whose results are logged without their content.
+// verify_api_request and verify_api_sign_in calls, whose results are logged
+// without their content.
 type formatState struct {
 	apiRequestIDs map[string]bool
 }
@@ -285,11 +286,14 @@ func formatContentBlock(st *formatState, b humanContentBlock) string {
 		}
 		return "[text] " + ellipsisOneLine(text, textExcerptLen)
 	case "tool_use":
-		if isAPIRequestTool(b.Name) {
+		if isAPIRequestTool(b.Name) || isAPISignInTool(b.Name) {
 			if st.apiRequestIDs == nil {
 				st.apiRequestIDs = map[string]bool{}
 			}
 			st.apiRequestIDs[b.ID] = true
+			if isAPISignInTool(b.Name) {
+				return formatAPISignInToolUse(b)
+			}
 			return formatAPIRequestToolUse(b)
 		}
 		return formatToolUse(b)
@@ -335,28 +339,59 @@ func isAPIRequestTool(name string) bool {
 	return name == "mcp__"+mcpServerName+"__"+qa.ToolAPIRequest
 }
 
+// isAPISignInTool reports whether name is the runner's verify_api_sign_in
+// tool as Claude Code names it.
+func isAPISignInTool(name string) bool {
+	return name == "mcp__"+mcpServerName+"__"+qa.ToolAPISignIn
+}
+
 // formatAPIRequestToolUse logs a verify_api_request call as the runner's job
-// log does: the method and the URL without its query string — never the
-// request headers or body.
+// log does: the method and the URL without its query string (and the role it
+// is sent as) — never the request headers or body.
 func formatAPIRequestToolUse(b humanContentBlock) string {
 	var in struct {
 		Method string `json:"method"`
 		URL    string `json:"url"`
+		As     string `json:"as"`
 	}
 	_ = json.Unmarshal(b.Input, &in)
 	method := in.Method
 	if method == "" {
 		method = "GET"
 	}
-	where := "?"
-	if u, err := url.Parse(strings.TrimSpace(in.URL)); err == nil && u.Host != "" {
-		where = u.Scheme + "://" + u.Host + u.EscapedPath()
+	summary := method + " " + urlWithoutQuery(in.URL)
+	if as := strings.TrimSpace(in.As); as != "" {
+		summary += " as " + as
 	}
-	return "[tool] " + b.Name + ": " + ellipsisOneLine(method+" "+where, toolInputExcerptLen)
+	return "[tool] " + b.Name + ": " + ellipsisOneLine(summary, toolInputExcerptLen)
 }
 
-// formatAPIRequestToolResult logs a verify_api_request result without its
-// content: the response's headers and body stay out of the log.
+// formatAPISignInToolUse logs a verify_api_sign_in call as its role and the
+// URL without its query string.
+func formatAPISignInToolUse(b humanContentBlock) string {
+	var in struct {
+		Role string `json:"role"`
+		URL  string `json:"url"`
+	}
+	_ = json.Unmarshal(b.Input, &in)
+	role := strings.TrimSpace(in.Role)
+	if role == "" {
+		role = "?"
+	}
+	return "[tool] " + b.Name + ": " + ellipsisOneLine(role+" at "+urlWithoutQuery(in.URL), toolInputExcerptLen)
+}
+
+// urlWithoutQuery is raw's scheme, host and path, or "?" when it isn't a URL.
+func urlWithoutQuery(raw string) string {
+	if u, err := url.Parse(strings.TrimSpace(raw)); err == nil && u.Host != "" {
+		return u.Scheme + "://" + u.Host + u.EscapedPath()
+	}
+	return "?"
+}
+
+// formatAPIRequestToolResult logs a verify_api_request or verify_api_sign_in
+// result without its content: the response's headers and body, and the
+// session's cookie names, stay out of the log.
 func formatAPIRequestToolResult(b humanContentBlock) string {
 	status := "success"
 	if b.IsError {

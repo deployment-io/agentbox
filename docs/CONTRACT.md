@@ -369,7 +369,10 @@ When a `QA_PREVIEWS` run has a backend preview that deployed, the runner also
 serves `verify_api_request` — one HTTP request to a backend preview, any
 method, with headers and a body — and says so with `QA_API_REQUEST_TOOL=1`;
 QA then checks API criteria with it ([the API rule](#the-api-rule)) instead of
-[the GET rule](#the-get-rule).
+[the GET rule](#the-get-rule). When a backend entry also has `roles` (the
+Previews tab's Test users), the runner serves `verify_api_sign_in` too and
+says so with `QA_API_SIGN_IN_TOOL=1`; QA then checks a criterion that needs a
+signed-in request as one of the roles ([signing in](#signing-in)).
 
 **A QA run is blind.** It is given no diff, no implementer summary, no
 `STEP_PROMPT` and no repository: during the stages the change is uncommitted
@@ -387,8 +390,9 @@ verify in this mode.
 | `QA_TARGET` | Optional. `preview` (the default when unset) or `production`; anything else is rejected at startup. `preview` is everything above. `production` checks the sites already live in production at `QA_URLS` — see [Production QA](#production-qa). Stripped from the agent's environment. |
 | `QA_URLS` | **Required when `QA_TARGET=production`; not read otherwise.** Comma-separated `<repository>=<url>` entries, exactly one for every `QA_REPOSITORIES` entry and none for anything else (repository matched exactly), e.g. `0-acme/website=https://acme-website.example.app`. Each url must be `https`, with no user info and port 443 or none. A missing, extra or duplicated entry, or a url breaking a rule, is rejected at startup with an error naming the entry. Stripped from the agent's environment. |
 | `QA_BACKENDS` | Optional; agentbox 1.9.35 and later. **Read for `QA_TARGET=preview` only** (ignored for `production`). A JSON array with one entry per backend preview the runner deployed from the change: `{"repository":"<dir>","url":"<preview URL>","health_url":"<health URL>"}`, or `{"repository":"<dir>","error":"<why the deploy failed>"}` for one whose deploy failed. `repository` must be a local path (`filepath.IsLocal`, as for `QA_REPOSITORIES`); `url` and `health_url` follow `QA_URLS`' rules (`https`, no user info, port 443 or none); an entry has either both URLs or a non-empty `error`, never neither or both; no repository appears twice. Invalid JSON or an entry breaking a rule is rejected at startup with an error naming the entry. Blank or `[]` is no backends. **Blank when `QA_PREVIEWS` is set**: both non-blank is rejected at startup. Stripped from the agent's environment — it reaches the agent only folded into the prompt. |
-| `QA_PREVIEWS` | Optional; agentbox 1.9.37 and later (the runner sends it only to those). **Read for `QA_TARGET=preview` only** (ignored for `production`, which never gets it). A JSON array, one entry per preview the runner deployed (or failed to deploy) for this QA run: `{"repository":"0-acme/web","kind":"site","url":"https://d1.cloudfront.net","connected_backends":["1-acme/api"],"unconnected_backends":[]}`, `{"repository":"1-acme/api","kind":"backend","url":"https://d2.cloudfront.net","health_url":"https://d2.cloudfront.net/healthz"}`, `{"repository":"2-acme/docs","kind":"site","error":"<first line of why it failed, at most 300 bytes>"}`. `repository` is the work-dir name, as in `QA_REPOSITORIES` (`filepath.IsLocal`). `kind` is `site` (a static-site preview) or `backend` (a web-service preview); one repository may have one entry of each kind, never two of the same kind. Exactly one of `url` (plus `health_url` for a backend; a site has none) or a non-empty `error`; each URL follows `QA_URLS`' rules. `connected_backends` (site entries with a url only): repositories of backend entries this site's preview was BUILT to call — its API-address variable points at that backend preview, and that backend preview allows the site preview's origin. `unconnected_backends` (site entries with a url only): repositories of backend entries in this run the site was NOT connected to (deployment.io couldn't tell which of its settings points at that API). Both optional (absent = empty); every name in them must be the repository of a backend entry in the same array, and no backend is in both. A backend entry or a failed (`error`) entry carries neither list, not even an empty one. A backend named twice in one list counts once. When set (non-blank), `QA_REPOSITORIES` and `QA_BACKENDS` are blank. Invalid JSON, an entry breaking a rule, or `QA_PREVIEWS` with a non-blank `QA_REPOSITORIES` or `QA_BACKENDS`, is rejected at startup with an error naming the entry. Stripped from the agent's environment — it reaches the agent only folded into the prompt. |
+| `QA_PREVIEWS` | Optional; agentbox 1.9.37 and later (the runner sends it only to those). **Read for `QA_TARGET=preview` only** (ignored for `production`, which never gets it). A JSON array, one entry per preview the runner deployed (or failed to deploy) for this QA run: `{"repository":"0-acme/web","kind":"site","url":"https://d1.cloudfront.net","connected_backends":["1-acme/api"],"unconnected_backends":[]}`, `{"repository":"1-acme/api","kind":"backend","url":"https://d2.cloudfront.net","health_url":"https://d2.cloudfront.net/healthz"}`, `{"repository":"2-acme/docs","kind":"site","error":"<first line of why it failed, at most 300 bytes>"}`. `repository` is the work-dir name, as in `QA_REPOSITORIES` (`filepath.IsLocal`). `kind` is `site` (a static-site preview) or `backend` (a web-service preview); one repository may have one entry of each kind, never two of the same kind. Exactly one of `url` (plus `health_url` for a backend; a site has none) or a non-empty `error`; each URL follows `QA_URLS`' rules. `connected_backends` (site entries with a url only): repositories of backend entries this site's preview was BUILT to call — its API-address variable points at that backend preview, and that backend preview allows the site preview's origin. `unconnected_backends` (site entries with a url only): repositories of backend entries in this run the site was NOT connected to (deployment.io couldn't tell which of its settings points at that API). Both optional (absent = empty); every name in them must be the repository of a backend entry in the same array, and no backend is in both. A backend entry or a failed (`error`) entry carries neither list, not even an empty one. A backend named twice in one list counts once. `roles` (agentbox 1.9.41 and later; `backend` entries with a url only — a site entry or a failed entry carries none, not even an empty list): the roles deployment.io made a test user for on that backend preview, `[{"name":"admin","description":"Manages every account"}]` — at most 10, each `name` matching `^[a-z][a-z0-9_-]{0,31}$` and unique within the entry, `description` at most 200 characters (may be empty or absent); absent is no roles. When set (non-blank), `QA_REPOSITORIES` and `QA_BACKENDS` are blank. Invalid JSON, an entry breaking a rule, or `QA_PREVIEWS` with a non-blank `QA_REPOSITORIES` or `QA_BACKENDS`, is rejected at startup with an error naming the entry. Stripped from the agent's environment — it reaches the agent only folded into the prompt. |
 | `QA_API_REQUEST_TOOL` | Optional. `1` when the runner serves `verify_api_request` on the tool socket: it sets it only for a stack-path QA round (`QA_PREVIEWS`) with at least one `backend` entry that has a url — never for production QA, implement, fix or review runs, or the `QA_BACKENDS` path. Read only when it is exactly `1` and `QA_TARGET` is `preview` (anything else, and every production run, ignores it). It takes effect only with `QA_PREVIEWS` and a deployed backend entry: then the run's tools include `verify_api_request` and the prompt has [the API rule](#the-api-rule) instead of the GET rule. Otherwise the run is exactly as without it. Older images ignore it and keep the GET rule. Stripped from the agent's environment. |
+| `QA_API_SIGN_IN_TOOL` | Optional; agentbox 1.9.41 and later. `1` when the runner serves `verify_api_sign_in` on the tool socket: it sets it only for a stack-path QA round (`QA_PREVIEWS`) with at least one `backend` entry that has a url and `roles`. Read only when it is exactly `1` and `QA_TARGET` is `preview`. It takes effect only with `QA_API_REQUEST_TOOL` in effect and at least one `backend` entry with `roles`: then the run's tools include `verify_api_sign_in`, the prompt lists each backend's roles, and [the API rule](#the-api-rule) checks signed-in criteria as a role ([signing in](#signing-in)). Otherwise the run is exactly as without it. Stripped from the agent's environment. |
 | `MCP_TOOL_RPC_SOCKET` | **Required in qa mode** — QA without its tools can't check anything. |
 
 **What the prompt says.** You are checking a change, not making one; you
@@ -446,7 +450,8 @@ preview, then each deployed backend's health URL (calling again while it
 starts), with `verify_preview_reachable`, then checks the criteria — no deploy
 step, and `deploy_static_site_preview` is never mentioned. codex and opencode
 register the MCP server as without it; the runner serves them only the two
-verify tools (plus `verify_api_request` with `QA_API_REQUEST_TOOL=1`).
+verify tools (plus `verify_api_request` with `QA_API_REQUEST_TOOL=1`, and
+`verify_api_sign_in` with [signing in](#signing-in)).
 
 <a id="the-get-rule"></a>**The GET rule** (agentbox 1.9.39 and later; earlier
 images report every API criterion not checked). One paragraph of the prompt,
@@ -543,6 +548,36 @@ with its reason:
 - with more than one deployed backend only, one that doesn't make clear which
   backend it means: "doesn't say which backend it means".
 
+<a id="signing-in"></a>**Signing in** (agentbox 1.9.41 and later). In a run
+with the API rule, `QA_API_SIGN_IN_TOOL=1` and at least one `backend` entry
+with `roles`, `verify_api_sign_in` joins the tools. The tool (served by the
+runner) takes `role` (a role name of that backend) and `url` (the backend
+preview's URL); the runner signs in as the role's test user with its own
+email and password (never shown to the agent) and keeps the session. It
+returns `{"signed_in":true,"role","status","session":"cookie"|"bearer","cookies":[<names>]}`,
+or `{"signed_in":false,"role","status","reason","body"}`. `verify_api_request`
+then takes an optional `as` (a role name) and sends the request with that
+role's session. Results redact secrets as `<redacted>`. In
+`[Previews — deployed by deployment.io from this change]`, each backend with
+roles is followed by `  Roles with a test user (sign in with verify_api_sign_in):`
+and one `  - <name>: <description>` line per role (`  - <name>` when it has
+no description; a description is put on one line). In the API rule, the
+"needs a login" bullet above becomes: a criterion that needs a signed-in
+request to a backend with roles is checked as a role — the one the criterion
+names, else the one whose description fits — by calling `verify_api_sign_in`
+with that role and the backend's URL, then `verify_api_request` with `as`; if
+the sign-in doesn't succeed (one retry at most) the criterion is not checked
+with reason "couldn't sign in as <role>", never failed. A criterion that needs
+a role the backend has no test user for, a backend without roles, or an API
+key or token that doesn't come from signing in, is still not checked: "needs
+a login". `<redacted>` in a result stands for a secret, which QA never tries
+to recover or put in a request. The reporting rules add "couldn't sign in as
+<role>" to the not-checked reasons. Without the tool in effect the prompt is
+exactly as without roles. The runner and agentbox can be released in either
+order: an older agentbox ignores `roles` (it reads entries into a struct, so
+unknown fields are skipped) and `QA_API_SIGN_IN_TOOL`; an older runner sends
+neither.
+
 "needs an API request other than a plain GET" and "needs part of the response
 the browser doesn't show" are never named in such a run (prompt or reporting
 rules). Production runs, the backend health step, the frontend-connection
@@ -605,7 +640,7 @@ still says not to edit, build or fix anything.
 
 | `AGENT_TYPE` | QA invocation |
 |---|---|
-| `claude-code` | Prompt on stdin, trailer instruction via `--append-system-prompt`, `--mcp-config` with the `agentbox mcp-bridge` bridge, no `--dangerously-skip-permissions`, and `--allowedTools` (appended last) = `Read`, `Grep`, `Glob`, `mcp__deployment-io__deploy_static_site_preview`, `mcp__deployment-io__verify_preview_reachable`, `mcp__deployment-io__verify_preview_rendered` — without the deploy tool in production and when `QA_PREVIEWS` is set (1.9.37 and later), plus `mcp__deployment-io__verify_api_request` with [the API rule](#the-api-rule). No `Bash`, `Write` or `Edit`. |
+| `claude-code` | Prompt on stdin, trailer instruction via `--append-system-prompt`, `--mcp-config` with the `agentbox mcp-bridge` bridge, no `--dangerously-skip-permissions`, and `--allowedTools` (appended last) = `Read`, `Grep`, `Glob`, `mcp__deployment-io__deploy_static_site_preview`, `mcp__deployment-io__verify_preview_reachable`, `mcp__deployment-io__verify_preview_rendered` — without the deploy tool in production and when `QA_PREVIEWS` is set (1.9.37 and later), plus `mcp__deployment-io__verify_api_request` with [the API rule](#the-api-rule), and `mcp__deployment-io__verify_api_sign_in` with [signing in](#signing-in). No `Bash`, `Write` or `Edit`. |
 
 | `codex` | Prompt + trailer instruction on stdin, `mcp_servers.deployment_io` registered, plus `-c mcp_servers.deployment_io.default_tools_approval_mode="approve"` in both QA targets. **Preview** (`QA_TARGET` `preview` or unset): `--sandbox danger-full-access` + `--dangerously-bypass-approvals-and-sandbox`, the same flags an implement run uses, so the run reads the context files with its shell (agentbox 1.9.36 and later; earlier versions ran preview QA under `--sandbox read-only`, whose bubblewrap sandbox cannot run inside agentbox's container, so every shell command — including `cat` of the context files — failed). **Production**: `--sandbox read-only` without `--dangerously-bypass-approvals-and-sandbox`, as before — it has no context to read and no use for a shell. There `codex exec` behaves as approval policy `never`, and on the pinned 0.158.0 an MCP tool without read-only annotations is then rejected ("requires approval, but approval policy is never") before it reaches the server; `approve` lets the tools run without a prompt while the sandbox stays read-only (verified end-to-end against the pinned binary). With the bypass flag (preview) the key is harmless. |
 | `opencode` | Prompt + trailer instruction on stdin; the review permission set (`edit`, `bash` and `webfetch` denied) plus the `mcp` block registered. |
