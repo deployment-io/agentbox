@@ -76,8 +76,8 @@ type ReviewResult struct {
 	Previous []PreviousFinding `json:"previous,omitempty"`
 
 	// DeployRequirements are the variables the deploy readiness pass found
-	// this change newly reads and the service's environment does not provide.
-	// They are NOT findings: the change is right to need them and only a
+	// this change newly reads, the service's environment does not provide and
+	// the change needs set there. They are NOT findings: the change is right to need them and only a
 	// person can set their values. Omitted when there are none, and always
 	// when the deploy pass did not run.
 	DeployRequirements []DeployRequirement `json:"deploy_requirements,omitempty"`

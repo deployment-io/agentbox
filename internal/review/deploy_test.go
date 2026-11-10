@@ -150,7 +150,7 @@ func TestTrailerRuleForDeployRequirementsOnlyWithThePass(t *testing.T) {
 	}
 	cfg.ReviewPasses = []string{PassSecurity, PassDeploy}
 	instruction := Instruction(cfg)
-	if !strings.Contains(instruction, `- When the deploy readiness pass found a variable this change newly reads that the service's environment does not provide, the block must also carry "deploy_requirements"`) {
+	if !strings.Contains(instruction, `- When the deploy readiness pass found a variable this change newly reads, that the service's environment does not provide and that the change needs set there, the block must also carry "deploy_requirements"`) {
 		t.Error("the trailer lacks the deploy_requirements rule with the deploy pass")
 	}
 	if !strings.Contains(parametersLine(t, instruction), "deploy readiness") {
@@ -240,5 +240,22 @@ func TestDeployBriefEnvFiles(t *testing.T) {
 		if !strings.Contains(brief, want) {
 			t.Errorf("deploy brief is missing %q", want)
 		}
+	}
+}
+
+func TestDeployBriefRequirementsOnlyWhenNeededSet(t *testing.T) {
+	brief := passBriefs[PassDeploy]
+	for _, want := range []string{
+		"only when the change needs it set in that environment",
+		"an opt-in switch the change leaves off there",
+		"When the code works with the variable unset but nothing in the spec or the code says whether that is intended in that environment, report the requirement.",
+		"A variable that was already read before this change is neither a finding nor a requirement.",
+	} {
+		if !strings.Contains(brief, want) {
+			t.Errorf("deploy brief is missing %q", want)
+		}
+	}
+	if strings.Contains(brief, "is NOT a finding: report it as a deploy requirement") {
+		t.Error("deploy brief still makes every unprovided variable a requirement")
 	}
 }
