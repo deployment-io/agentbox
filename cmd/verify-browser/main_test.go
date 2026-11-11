@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -380,7 +383,7 @@ func TestWriteAtomicLeavesNoTempFile(t *testing.T) {
 	if err := os.WriteFile(path, []byte("old"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeErrorResult(path, "boom", "tail"); err != nil {
+	if err := writeErrorResult(path, "boom", "tail", ""); err != nil {
 		t.Fatal(err)
 	}
 	entries, _ := os.ReadDir(dir)
@@ -394,5 +397,273 @@ func TestWriteAtomicLeavesNoTempFile(t *testing.T) {
 	}
 	if !strings.Contains(string(data), `"blocked_requests":[]`) {
 		t.Errorf("result = %s, want blocked_requests []", data)
+	}
+}
+
+// testPassword needs escaping in JSON: a quote, a backslash, "<" and a
+// non-ASCII character.
+const testPassword = `pa"ss\<wörd>`
+
+var testSignIn = map[string]any{
+	"url":      "https://preview-abc.example.net/login",
+	"email":    "qa-admin@test.example",
+	"password": testPassword,
+}
+
+func withSignIn(m map[string]any) { m["sign_in"] = maps.Clone(testSignIn) }
+
+func TestParseInputSignIn(t *testing.T) {
+	in, err := parseInput(mutate(t, withSignIn))
+	if err != nil {
+		t.Fatalf("parseInput: %v", err)
+	}
+	if in.signIn == nil || in.signIn.Password != testPassword || in.signIn.Email != "qa-admin@test.example" || in.secret() != testPassword {
+		t.Fatalf("signIn = %+v", in.signIn)
+	}
+	if in, err := parseInput([]byte(validInputJSON)); err != nil || in.signIn != nil || in.secret() != "" {
+		t.Fatalf("without sign_in: %v, %+v", err, in.signIn)
+	}
+	longest := mutate(t, func(m map[string]any) {
+		withSignIn(m)
+		m["sign_in"].(map[string]any)["email"] = strings.Repeat("e", maxEmailChars)
+		m["sign_in"].(map[string]any)["password"] = strings.Repeat("é", maxPasswordChars)
+	})
+	if _, err := parseInput(longest); err != nil {
+		t.Fatalf("longest credentials: %v", err)
+	}
+}
+
+func TestParseInputRejectsSignIn(t *testing.T) {
+	set := func(key string, v any) func(m map[string]any) {
+		return func(m map[string]any) {
+			withSignIn(m)
+			m["sign_in"].(map[string]any)[key] = v
+		}
+	}
+	del := func(key string) func(m map[string]any) {
+		return func(m map[string]any) {
+			withSignIn(m)
+			delete(m["sign_in"].(map[string]any), key)
+		}
+	}
+	cases := map[string]func(m map[string]any){
+		"url outside allowed_hosts":  set("url", "https://other.example.net/login"),
+		"http url":                   set("url", "http://preview-abc.example.net/login"),
+		"url with port":              set("url", "https://preview-abc.example.net:8443/login"),
+		"missing url":                del("url"),
+		"missing email":              del("email"),
+		"missing password":           del("password"),
+		"empty email":                set("email", ""),
+		"empty password":             set("password", ""),
+		"null password":              set("password", nil),
+		"number password":            set("password", 1234),
+		"line break in the email":    set("email", "qa@test.example\n"),
+		"line break in the password": set("password", "pass\rword"),
+		"unicode line break":         set("password", "pass\u2028word"),
+		"long email":                 set("email", strings.Repeat("e", maxEmailChars+1)),
+		"long password":              set("password", strings.Repeat("p", maxPasswordChars+1)),
+		"unknown key":                set("otp", "123456"),
+		"null":                       func(m map[string]any) { m["sign_in"] = nil },
+		"not an object":              func(m map[string]any) { m["sign_in"] = "x" },
+		"with read_only true": func(m map[string]any) {
+			withSignIn(m)
+			m["read_only"] = true
+		},
+	}
+	for name, fn := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := parseInput(mutate(t, fn))
+			if err == nil || !strings.Contains(err.Error(), "sign_in") {
+				t.Fatalf("parseInput: %v, want an error naming sign_in", err)
+			}
+			if strings.Contains(err.Error(), testPassword) {
+				t.Fatalf("error %q quotes the password", err)
+			}
+		})
+	}
+	if _, err := parseInput(mutate(t, func(m map[string]any) { withSignIn(m); m["read_only"] = false })); err != nil {
+		t.Fatalf("sign_in with read_only false: %v", err)
+	}
+}
+
+// newSignInHarness is a harness whose input has sign_in.
+func newSignInHarness(t *testing.T, script string) *harness {
+	t.Helper()
+	h := newHarness(t, script)
+	if err := os.WriteFile(filepath.Join(h.cfg.ioDir, "input.json"), mutate(t, withSignIn), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return h
+}
+
+// scriptWriting is a fake script that writes data as its result.
+func scriptWriting(t *testing.T, data string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "result.json")
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return fmt.Sprintf(`cat %q > "$2"`, path)
+}
+
+func TestRunRedactsThePasswordFromTheResult(t *testing.T) {
+	// The password as the script might write it: escaped two ways, in a
+	// nested string value and in an object key.
+	result := `{"schema_version":1,"status":"completed","verdict":"pass",` +
+		`"n":1.50,"big":12345678901234567890,"email":"qa-admin@test.example",` +
+		`"nested":{"list":["typed pa\"ss\\\u003cw\u00f6rd> here"],` +
+		`"key pa\"ss\\<wörd>":"v"}}`
+	var check map[string]any
+	if err := json.Unmarshal([]byte(result), &check); err != nil {
+		t.Fatalf("test result is not JSON: %v", err)
+	}
+	h := newSignInHarness(t, scriptWriting(t, result))
+	code, r := h.run()
+	if code != 0 {
+		t.Fatalf("exit code = %d, result %v", code, r)
+	}
+	data, err := os.ReadFile(filepath.Join(h.cfg.ioDir, "result.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	nested, _ := r["nested"].(map[string]any)
+	list, _ := nested["list"].([]any)
+	if len(list) != 1 || list[0] != "typed <redacted> here" {
+		t.Errorf("nested value = %v, want the password redacted", nested["list"])
+	}
+	if nested["key <redacted>"] != "v" {
+		t.Errorf("nested = %v, want the key redacted", nested)
+	}
+	if strings.Contains(string(data), "ss\\") || strings.Contains(string(data), "rd>") {
+		t.Errorf("result still holds the password: %s", data)
+	}
+	if !bytes.Contains(data, []byte("<redacted>")) {
+		t.Errorf("result = %s, want <redacted> unescaped", data)
+	}
+	if !bytes.Contains(data, []byte(`"n":1.50`)) || !bytes.Contains(data, []byte(`"big":12345678901234567890`)) {
+		t.Errorf("result = %s, want numbers as written", data)
+	}
+	if r["email"] != "qa-admin@test.example" {
+		t.Errorf("email = %v, want it left as it is", r["email"])
+	}
+	if got := h.ioEntries(); len(got) != 2 {
+		t.Errorf("/io holds %v, want only input.json and result.json", got)
+	}
+}
+
+func TestRunWithoutSignInWritesTheResultAsItIs(t *testing.T) {
+	result := `{"schema_version":1, "status":"completed","verdict":"pass","x":"<&> pa\"ss\\<wörd>","n":1.50}`
+	h := newHarness(t, scriptWriting(t, result))
+	if code, _ := h.run(); code != 0 {
+		t.Fatalf("exit code = %d", code)
+	}
+	data, err := os.ReadFile(filepath.Join(h.cfg.ioDir, "result.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != result {
+		t.Fatalf("result = %s, want byte-for-byte %s", data, result)
+	}
+}
+
+func TestRunRedactsThePasswordFromAnErrorResult(t *testing.T) {
+	h := newSignInHarness(t, `printf 'typed pa"ss\\<wörd> into the field\n' >&2; exit 3`)
+	code, r := h.run()
+	wantError(t, code, r, "without writing a result", "typed <redacted> into the field")
+	if msg, _ := r["error"].(string); strings.Contains(msg, testPassword) {
+		t.Errorf("error %q holds the password", msg)
+	}
+}
+
+func TestRunInvalidSignInNeverShowsThePassword(t *testing.T) {
+	h := newHarness(t, `exit 0`)
+	in := mutate(t, func(m map[string]any) {
+		withSignIn(m)
+		m["sign_in"].(map[string]any)["url"] = "https://qa:secret-pw@preview-abc.example.net/login"
+		m["sign_in"].(map[string]any)["password"] = "secret-pw"
+	})
+	if err := os.WriteFile(filepath.Join(h.cfg.ioDir, "input.json"), in, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, r := h.run()
+	wantError(t, code, r, "invalid input", "sign_in.url")
+	if msg, _ := r["error"].(string); strings.Contains(msg, "secret-pw") {
+		t.Errorf("error %q holds the password", msg)
+	}
+	// An invalid input is redacted with whatever password it carries.
+	if got := rawSecret(in); got != "secret-pw" {
+		t.Errorf("rawSecret = %q", got)
+	}
+	if got := rawSecret([]byte(`{"sign_in":{"password":1}}`)); got != "" {
+		t.Errorf("rawSecret of a number = %q", got)
+	}
+}
+
+func TestRunRedactsAScriptErrorResult(t *testing.T) {
+	h := newSignInHarness(t, scriptWriting(t, `{"schema_version":1,"status":"error","error":"bad pa\"ss\\<wörd>","blocked_requests":[]}`))
+	code, r := h.run()
+	wantError(t, code, r, "bad <redacted>")
+}
+
+func TestRunDropsACutStderrTailsFirstLine(t *testing.T) {
+	script := `head -c 1500 /dev/zero | tr '\0' 'a' >&2; printf 'ss\\<wörd> ends the cut line\nlast line\n' >&2; exit 3`
+	h := newSignInHarness(t, script)
+	code, r := h.run()
+	wantError(t, code, r, "last line")
+	if msg, _ := r["error"].(string); strings.Contains(msg, "aaa") || strings.Contains(msg, "cut line") {
+		t.Errorf("error %q keeps the cut tail's first line", msg)
+	}
+	// Without sign_in, the tail is kept as today.
+	h = newHarness(t, script)
+	code, r = h.run()
+	wantError(t, code, r, "aaa", "cut line", "last line")
+}
+
+func TestWriteErrorResultRedacts(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "result.json")
+	if err := writeErrorResult(path, "fill "+testPassword+" failed", "tail "+testPassword, testPassword); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(path)
+	var r errorResultJSON
+	if err := json.Unmarshal(data, &r); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(r.Error, testPassword) || strings.Count(r.Error, redacted) != 2 {
+		t.Fatalf("error = %q, want the password redacted twice", r.Error)
+	}
+}
+
+func TestWriteErrorResultRedactsBeforeTrimming(t *testing.T) {
+	const pw = "secret-pw "
+	path := filepath.Join(t.TempDir(), "result.json")
+	if err := writeErrorResult(path, "failed", "typing "+pw, pw); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(path)
+	var r errorResultJSON
+	if err := json.Unmarshal(data, &r); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(r.Error, "secret-pw") || !strings.HasSuffix(r.Error, "typing "+redacted) {
+		t.Fatalf("error = %q, want the password ending the tail redacted", r.Error)
+	}
+}
+
+func TestTailBufferReportsACut(t *testing.T) {
+	tb := &tailBuffer{max: 4}
+	tb.Write([]byte("abcd"))
+	if s, cut := tb.contents(); s != "abcd" || cut {
+		t.Fatalf("contents = %q, %v", s, cut)
+	}
+	tb.Write([]byte("e"))
+	if s, cut := tb.contents(); s != "bcde" || !cut {
+		t.Fatalf("contents = %q, %v", s, cut)
+	}
+	if got := dropFirstLine("ab\ncd\n"); got != "cd\n" {
+		t.Errorf("dropFirstLine = %q", got)
+	}
+	if got := dropFirstLine("no break"); got != "" {
+		t.Errorf("dropFirstLine = %q", got)
 	}
 }

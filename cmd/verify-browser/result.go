@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,23 +29,37 @@ type blockedRequest struct {
 	Method string `json:"method"`
 }
 
+// redacted replaces the secret (sign_in's password) in every result file.
+const redacted = "<redacted>"
+
 // finish turns the script's outcome into /io/result.json and the exit code.
-func finish(resultPath, tmpResult string, out scriptOutcome) int {
+// With a secret, the script's result is rewritten with it redacted rather
+// than moved into place as it is.
+func finish(resultPath, tmpResult string, out scriptOutcome, secret string) int {
+	tail := out.stderrTail
+	if secret != "" && out.stderrCut {
+		tail = dropFirstLine(tail)
+	}
 	switch {
 	case out.timedOut:
-		return fail(resultPath, errors.New("the browser did not finish within timeout_ms"), out.stderrTail)
+		return fail(resultPath, errors.New("the browser did not finish within timeout_ms"), tail, secret)
 	case out.cancelled:
-		return fail(resultPath, errors.New("verify-browser was stopped before the browser finished"), out.stderrTail)
+		return fail(resultPath, errors.New("verify-browser was stopped before the browser finished"), tail, secret)
 	}
 	status, err := checkScriptResult(tmpResult)
 	if err != nil {
 		if out.err != nil {
 			err = fmt.Errorf("%w (browser script: %v)", err, out.err)
 		}
-		return fail(resultPath, err, out.stderrTail)
+		return fail(resultPath, err, tail, secret)
 	}
-	if err := os.Rename(tmpResult, resultPath); err != nil {
-		return fail(resultPath, fmt.Errorf("moving the result into place: %w", err), out.stderrTail)
+	if secret == "" {
+		err = os.Rename(tmpResult, resultPath)
+	} else {
+		err = writeRedacted(resultPath, tmpResult, secret)
+	}
+	if err != nil {
+		return fail(resultPath, fmt.Errorf("moving the result into place: %w", err), tail, secret)
 	}
 	if status != "completed" {
 		return 1
@@ -86,8 +101,69 @@ func checkScriptResult(path string) (string, error) {
 	return r.Status, nil
 }
 
-// writeErrorResult writes a status "error" result.json atomically.
-func writeErrorResult(path, msg, stderrTail string) error {
+// dropFirstLine drops a cut stderr tail's text up to and including its first
+// line break: the start of a line the cut went through, which could hold
+// the end of the secret, too short to be found and redacted.
+func dropFirstLine(tail string) string {
+	if i := strings.IndexByte(tail, '\n'); i >= 0 {
+		return tail[i+1:]
+	}
+	return ""
+}
+
+// writeRedacted writes the script's result to path with every occurrence of
+// secret replaced, in every string value and object key at any depth. It
+// works on the decoded strings, not the file's bytes, so the secret is found
+// however the script escaped it; numbers are kept as written.
+func writeRedacted(path, scriptResult, secret string) error {
+	data, err := os.ReadFile(scriptResult)
+	if err != nil {
+		return err
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		return fmt.Errorf("the browser script's result is not valid JSON: %w", err)
+	}
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(redactValue(v, secret)); err != nil {
+		return err
+	}
+	return writeAtomic(path, buf.Bytes())
+}
+
+// redactValue replaces secret in v's strings and object keys.
+func redactValue(v any, secret string) any {
+	switch x := v.(type) {
+	case string:
+		return strings.ReplaceAll(x, secret, redacted)
+	case []any:
+		for i := range x {
+			x[i] = redactValue(x[i], secret)
+		}
+		return x
+	case map[string]any:
+		out := make(map[string]any, len(x))
+		for k, val := range x {
+			out[strings.ReplaceAll(k, secret, redacted)] = redactValue(val, secret)
+		}
+		return out
+	}
+	return v
+}
+
+// writeErrorResult writes a status "error" result.json atomically, with
+// secret (when not "") redacted from its message and the stderr tail.
+func writeErrorResult(path, msg, stderrTail, secret string) error {
+	// Redact each part before trimming or joining, so neither can change a
+	// password at their edges (one ending in a space, say) out of recognition.
+	if secret != "" {
+		msg = strings.ReplaceAll(msg, secret, redacted)
+		stderrTail = strings.ReplaceAll(stderrTail, secret, redacted)
+	}
 	if tail := strings.TrimSpace(stderrTail); tail != "" {
 		msg += "\nlast output of the browser script:\n" + tail
 	}

@@ -1,9 +1,12 @@
 import assert from 'node:assert/strict';
-import { describe, it } from 'node:test';
+import { afterEach, describe, it } from 'node:test';
 import {
   CAPS,
   LIMITS,
   READ_ONLY_METHODS,
+  RefusedCookies,
+  SIGN_IN_NOT_RUN,
+  SIGN_IN_REASONS,
   abortedByNavigation,
   blameBlockedNavigation,
   blockedByReadOnly,
@@ -14,12 +17,20 @@ import {
   computeVerdict,
   errorResult,
   firstPartyFailure,
+  hasVisiblePasswordField,
   isAllowedUrl,
   isReadOnlyMethod,
   normalizeInput,
+  oneLine,
   normalizeViewport,
+  pickSignInFields,
   pushCapped,
+  recordFailedRequest,
+  redactSecret,
+  setSecret,
   resultViewport,
+  signInPlan,
+  staysAfterSignIn,
   viewportContextOptions,
 } from './lib.mjs';
 
@@ -212,6 +223,7 @@ describe('viewport', () => {
       assertions: [],
       timeoutMs: 30000,
       readOnly: false,
+      signIn: null,
     });
     assert.deepEqual(options(undefined), {
       viewport: { width: 1280, height: 720 },
@@ -640,5 +652,411 @@ describe('outline', () => {
     const r = buildResult({ httpStatus: 200, finalUrl: BASE, outline: [{ tag: 'h1', text: 'Hi' }] });
     assert.deepEqual(r.outline, [{ kind: 'heading', text: 'Hi', level: 1 }]);
     assert.deepEqual(buildResult({ httpStatus: 200 }).outline, []);
+  });
+});
+
+const SIGN_IN = Object.freeze({
+  url: 'https://preview-abc.example.net/login',
+  email: 'qa-admin@test.example',
+  password: 'pa"ss\\<wörd>',
+});
+
+describe('sign_in input', () => {
+  it('is null when absent', () => {
+    assert.equal(normalizeInput(validInput()).signIn, null);
+  });
+  it('accepts a valid sign_in', () => {
+    assert.deepEqual(normalizeInput(validInput({ sign_in: { ...SIGN_IN } })).signIn, SIGN_IN);
+  });
+  it('accepts the longest email and password', () => {
+    const signIn = { ...SIGN_IN, email: 'e'.repeat(320), password: 'é'.repeat(200) };
+    assert.deepEqual(normalizeInput(validInput({ sign_in: signIn })).signIn, signIn);
+  });
+  const bad = [
+    ['url outside allowed_hosts', { url: 'https://other.example.net/login' }],
+    ['http url', { url: 'http://preview-abc.example.net/login' }],
+    ['url with a port', { url: 'https://preview-abc.example.net:8443/login' }],
+    ['url with user info', { url: 'https://u:p@preview-abc.example.net/login' }],
+    ['missing email', { email: undefined }],
+    ['missing password', { password: undefined }],
+    ['missing url', { url: undefined }],
+    ['empty email', { email: '' }],
+    ['empty password', { password: '' }],
+    ['a line break in the email', { email: 'qa@test.example\n' }],
+    ['a line break in the password', { password: 'pass\rword' }],
+    ['a Unicode line break in the password', { password: 'pass\u2028word' }],
+    ['a long email', { email: 'e'.repeat(321) }],
+    ['a long password', { password: 'p'.repeat(201) }],
+    ['a number password', { password: 1234 }],
+    ['an unknown key', { otp: '123456' }],
+  ];
+  for (const [name, change] of bad) {
+    it(`rejects ${name}, without quoting the password`, () => {
+      const signIn = JSON.parse(JSON.stringify({ ...SIGN_IN, ...change }));
+      assert.throws(
+        () => normalizeInput(validInput({ sign_in: signIn })),
+        (err) => /sign_in/.test(err.message) && !err.message.includes(SIGN_IN.password),
+      );
+    });
+  }
+  for (const v of [null, 'x', [], 1]) {
+    it(`rejects sign_in ${JSON.stringify(v)}`, () => {
+      assert.throws(() => normalizeInput(validInput({ sign_in: v })), /sign_in/);
+    });
+  }
+  it('rejects sign_in with read_only true, accepts it with read_only false', () => {
+    assert.throws(() => normalizeInput(validInput({ read_only: true, sign_in: { ...SIGN_IN } })), /read_only/);
+    assert.ok(normalizeInput(validInput({ read_only: false, sign_in: { ...SIGN_IN } })).signIn);
+  });
+});
+
+describe('sign-in fields', () => {
+  const input = (o) => ({ type: '', autocomplete: '', name: '', id: '', visible: true, enabled: true, ...o });
+  it('picks the first visible, enabled password and type=email fields', () => {
+    const got = pickSignInFields([
+      input({ type: 'search', name: 'q' }),
+      input({ type: 'email', name: 'login', visible: false }),
+      input({ type: 'email', name: 'address' }),
+      input({ type: 'password', enabled: false }),
+      input({ type: 'password', name: 'pw' }),
+      input({ type: 'password', name: 'pw2' }),
+    ]);
+    assert.deepEqual(got, { password: 4, email: 2 });
+  });
+  it('prefers type=email over an earlier name match', () => {
+    const got = pickSignInFields([input({ type: 'text', name: 'username' }), input({ type: 'email' }), input({ type: 'password' })]);
+    assert.deepEqual(got, { password: 2, email: 1 });
+  });
+  it('falls back to a text-like field named for a user, email or login', () => {
+    const cases = [
+      [input({ autocomplete: 'username' }), 0],
+      [input({ type: 'text', autocomplete: 'section-a email' }), 0],
+      [input({ type: 'TEXT', name: 'UserName' }), 0],
+      [input({ id: 'login-field' }), 0],
+      [input({ type: 'text', name: 'Email_Address' }), 0],
+      [input({ type: 'tel', name: 'user' }), -1],
+      [input({ type: 'text', name: 'first-name' }), -1],
+      [input({ type: 'text', name: 'user', visible: false }), -1],
+      [input({ type: 'text', name: 'user', enabled: false }), -1],
+    ];
+    for (const [field, want] of cases) {
+      assert.equal(pickSignInFields([field, input({ type: 'password' })]).email, want, JSON.stringify(field));
+    }
+  });
+  it('never picks a hidden field', () => {
+    const got = pickSignInFields([input({ type: 'email', visible: false }), input({ type: 'password', visible: false })]);
+    assert.deepEqual(got, { password: -1, email: -1 });
+  });
+  it('plans both, email first, or fails with the reason', () => {
+    assert.deepEqual(signInPlan({ password: 1, email: 0 }), { plan: 'both' });
+    assert.deepEqual(signInPlan(pickSignInFields([input({ type: 'email' })])), { plan: 'email-first' });
+    assert.deepEqual(signInPlan(pickSignInFields([input({ type: 'password' })])), {
+      plan: 'fail',
+      reason: 'the sign-in page has no email field',
+    });
+    assert.deepEqual(signInPlan(pickSignInFields([])), { plan: 'fail', reason: 'the sign-in page has no password field' });
+  });
+  it('sees the form as showing while a password field is visible, enabled or not', () => {
+    assert.equal(hasVisiblePasswordField([input({ type: 'password', enabled: false })]), true);
+    assert.equal(hasVisiblePasswordField([input({ type: 'password', visible: false }), input({ type: 'email' })]), false);
+    assert.equal(hasVisiblePasswordField(null), false);
+  });
+  it('has the documented reasons', () => {
+    assert.deepEqual({ ...SIGN_IN_REASONS }, {
+      noPasswordField: 'the sign-in page has no password field',
+      noEmailField: 'the sign-in page has no email field',
+      stillOnForm: 'still on the sign-in form 10 seconds after submitting',
+      loadFailed: 'the sign-in page could not be loaded: ',
+    });
+  });
+});
+
+describe('staysAfterSignIn', () => {
+  const here = 'https://preview-abc.example.net/dashboard?tab=1';
+  it('stays for the front page with no query on the host the browser is on', () => {
+    assert.equal(staysAfterSignIn('https://preview-abc.example.net/', here), true);
+    assert.equal(staysAfterSignIn('https://preview-abc.example.net', here), true);
+    assert.equal(staysAfterSignIn('https://PREVIEW-abc.example.net/', here), true);
+  });
+  it('opens any other path, a query, or another host', () => {
+    assert.equal(staysAfterSignIn('https://preview-abc.example.net/settings', here), false);
+    assert.equal(staysAfterSignIn('https://preview-abc.example.net/?tab=2', here), false);
+    assert.equal(staysAfterSignIn('https://preview-abc.example.net/', 'https://api-abc.example.net/'), false);
+    assert.equal(staysAfterSignIn('https://preview-abc.example.net/', 'chrome-error://chromewebdata/'), false);
+  });
+});
+
+describe('refused cookies', () => {
+  const hosts = ['app.example.net', 'api.example.net'];
+  const setCookie = (name, reason, value = 'secret-value') => ({
+    blockedReasons: [reason, 'Other'],
+    cookieLine: `${name}=${value}; Path=/; HttpOnly`,
+    cookie: { name, value },
+  });
+  it('reports name, host and first reason, never a value', () => {
+    const rc = new RefusedCookies(hosts);
+    rc.request('1', 'https://api.example.net/auth/login');
+    rc.response('1', true);
+    rc.refused('1', 'response', { requestId: '1', blockedCookies: [setCookie('session', 'SameSiteLax')] });
+    assert.deepEqual(rc.entries, [{ host: 'api.example.net', name: 'session', reason: 'SameSiteLax' }]);
+    assert.ok(!JSON.stringify(rc.entries).includes('secret-value'));
+  });
+  it('takes the name from cookieLine when there is no parsed cookie', () => {
+    const rc = new RefusedCookies(hosts);
+    rc.request('1', 'https://api.example.net/');
+    rc.response('1', true);
+    rc.refused('1', 'response', {
+      blockedCookies: [
+        { blockedReasons: ['SyntaxError'], cookieLine: ' sid =abc=def; Secure' },
+        { blockedReasons: ['SyntaxError'], cookieLine: 'novalue-is-the-value' },
+      ],
+    });
+    assert.deepEqual(rc.entries, [
+      { host: 'api.example.net', name: 'sid', reason: 'SyntaxError' },
+      { host: 'api.example.net', name: '', reason: 'SyntaxError' },
+    ]);
+  });
+  it('reports cookies refused for a request, not the ones sent', () => {
+    const rc = new RefusedCookies(hosts);
+    rc.request('2', 'https://api.example.net/me');
+    rc.response('2', true);
+    rc.refused('2', 'request', {
+      associatedCookies: [
+        { blockedReasons: [], cookie: { name: 'ok', value: 'v' } },
+        { blockedReasons: ['ThirdPartyPhaseout'], cookie: { name: 'session', value: 'v' } },
+      ],
+    });
+    assert.deepEqual(rc.entries, [{ host: 'api.example.net', name: 'session', reason: 'ThirdPartyPhaseout' }]);
+  });
+  it('matches an event that comes before its request', () => {
+    const rc = new RefusedCookies(hosts);
+    rc.refused('3', 'response', { blockedCookies: [setCookie('a', 'SameSiteStrict')] });
+    assert.deepEqual(rc.entries, []);
+    rc.request('3', 'https://app.example.net/');
+    assert.deepEqual(rc.entries, []);
+    rc.response('3', true);
+    assert.deepEqual(rc.entries, [{ host: 'app.example.net', name: 'a', reason: 'SameSiteStrict' }]);
+  });
+  it('only reports hosts in allowed_hosts', () => {
+    const rc = new RefusedCookies(hosts);
+    rc.request('4', 'https://tracker.example.com/pixel');
+    rc.response('4', true);
+    rc.refused('4', 'response', { blockedCookies: [setCookie('uid', 'ThirdPartyPhaseout')] });
+    assert.deepEqual(rc.entries, []);
+  });
+  it('attributes each ExtraInfo event to its redirect hop', () => {
+    const rc = new RefusedCookies(hosts);
+    rc.request('5', 'https://api.example.net/login');
+    rc.request('5', 'https://app.example.net/home');
+    // The first hop's events arrive after the second hop started.
+    rc.refused('5', 'request', { associatedCookies: [{ blockedReasons: ['SameSiteLax'], cookie: { name: 'pre', value: 'v' } }] });
+    rc.refused('5', 'response', { blockedCookies: [setCookie('api', 'SameSiteLax')] });
+    rc.refused('5', 'response', { blockedCookies: [setCookie('app', 'SameSiteStrict')] });
+    rc.response('5', true);
+    assert.deepEqual(rc.entries, [
+      { host: 'api.example.net', name: 'pre', reason: 'SameSiteLax' },
+      { host: 'api.example.net', name: 'api', reason: 'SameSiteLax' },
+      { host: 'app.example.net', name: 'app', reason: 'SameSiteStrict' },
+    ]);
+  });
+  it('holds a hop’s event until that hop is seen', () => {
+    const rc = new RefusedCookies(hosts);
+    rc.request('6', 'https://tracker.example.com/r');
+    rc.refused('6', 'response', { blockedCookies: [] });
+    rc.refused('6', 'response', { blockedCookies: [setCookie('late', 'SameSiteLax')] });
+    assert.deepEqual(rc.entries, []);
+    rc.request('6', 'https://api.example.net/landing');
+    rc.response('6', true);
+    assert.deepEqual(rc.entries, [{ host: 'api.example.net', name: 'late', reason: 'SameSiteLax' }]);
+  });
+  it('skips a redirect hop without extra info', () => {
+    const rc = new RefusedCookies(hosts);
+    rc.request('8', 'https://app.example.net/cached-redirect');
+    rc.request('8', 'https://api.example.net/login', false);
+    rc.refused('8', 'request', { associatedCookies: [{ blockedReasons: ['SameSiteLax'], cookie: { name: 'req', value: 'v' } }] });
+    rc.refused('8', 'response', { blockedCookies: [setCookie('session', 'SameSiteLax')] });
+    rc.response('8', true);
+    assert.deepEqual(rc.entries, [
+      { host: 'api.example.net', name: 'req', reason: 'SameSiteLax' },
+      { host: 'api.example.net', name: 'session', reason: 'SameSiteLax' },
+    ]);
+  });
+  it('waits for the hop’s response before attributing past an unknown hop', () => {
+    const rc = new RefusedCookies(hosts);
+    rc.request('9', 'https://app.example.net/start');
+    // The first hop's response is not known yet: the event could be its or a later hop's.
+    rc.refused('9', 'response', { blockedCookies: [setCookie('late', 'SameSiteLax')] });
+    assert.deepEqual(rc.entries, []);
+    rc.request('9', 'https://api.example.net/next', false);
+    assert.deepEqual(rc.entries, []);
+    rc.response('9', true);
+    assert.deepEqual(rc.entries, [{ host: 'api.example.net', name: 'late', reason: 'SameSiteLax' }]);
+  });
+  it('drops events of a hop whose response has no extra info', () => {
+    const rc = new RefusedCookies(hosts);
+    rc.request('10', 'https://api.example.net/');
+    rc.response('10', false);
+    rc.refused('10', 'response', { blockedCookies: [setCookie('x', 'SameSiteLax')] });
+    rc.flush();
+    assert.deepEqual(rc.entries, []);
+  });
+  it('flush attributes events of a hop whose response never came', () => {
+    const rc = new RefusedCookies(hosts);
+    rc.request('11', 'https://api.example.net/slow');
+    rc.refused('11', 'request', { associatedCookies: [{ blockedReasons: ['SameSiteStrict'], cookie: { name: 's', value: 'v' } }] });
+    assert.deepEqual(rc.entries, []);
+    rc.flush();
+    assert.deepEqual(rc.entries, [{ host: 'api.example.net', name: 's', reason: 'SameSiteStrict' }]);
+  });
+  it('keeps long names whole, so distinct ones stay distinct', () => {
+    const rc = new RefusedCookies(hosts);
+    rc.request('7', 'https://api.example.net/');
+    rc.response('7', true);
+    const a = 'n'.repeat(301) + 'a';
+    const b = 'n'.repeat(301) + 'b';
+    rc.refused('7', 'response', { blockedCookies: [setCookie(a, 'SameSiteLax'), setCookie(b, 'SameSiteLax')] });
+    assert.deepEqual(rc.entries.map((e) => e.name), [a, b]);
+  });
+  it('deduplicates and caps at 20', () => {
+    const rc = new RefusedCookies(hosts);
+    for (let i = 0; i < 30; i++) {
+      rc.request(String(i), 'https://api.example.net/x');
+      rc.response(String(i), true);
+      rc.refused(String(i), 'response', { blockedCookies: [setCookie('dup', 'SameSiteLax'), setCookie(`c${i}`, 'SameSiteLax')] });
+    }
+    assert.equal(CAPS.refusedCookies, 20);
+    assert.equal(rc.entries.length, 20);
+    assert.equal(rc.entries.filter((e) => e.name === 'dup').length, 1);
+  });
+});
+
+describe('sign-in boundary', () => {
+  const failure = (path) =>
+    firstPartyFailure({ url: `https://preview-abc.example.net${path}`, method: 'GET', status: 401 }, HOSTS);
+  const collector = () => ({
+    failedRequests: [],
+    signIn: { signedIn: true, signedOutOnLoad: false, failedRequests: [], refusedCookies: [] },
+  });
+  it('files a request that started during the sign-in as the sign-in’s', () => {
+    const c = collector();
+    recordFailedRequest(c, failure('/api/me'), true);
+    assert.deepEqual(c.failedRequests, []);
+    assert.equal(c.signIn.failedRequests.length, 1);
+    const r = buildResult({ ...c, httpStatus: 200, steps: [], assertions: [] });
+    assert.equal(r.failed_requests.length, 0);
+    assert.equal(r.sign_in.failed_requests[0].status, 401);
+    assert.equal(r.verdict, 'pass');
+  });
+  it('files a request that started after it as the check’s', () => {
+    const c = collector();
+    recordFailedRequest(c, failure('/api/orders'), false);
+    recordFailedRequest(c, null, false);
+    assert.equal(c.failedRequests.length, 1);
+    assert.equal(buildResult({ ...c, httpStatus: 200 }).verdict, 'fail');
+  });
+  it('caps the sign-in’s failed requests', () => {
+    const c = collector();
+    for (let i = 0; i < 30; i++) {
+      recordFailedRequest(c, failure(`/${i}`), true);
+    }
+    assert.equal(c.signIn.failedRequests.length, CAPS.failedRequests);
+  });
+});
+
+describe('sign_in result', () => {
+  const signIn = (o) => ({ signedIn: true, reason: '', signedOutOnLoad: false, failedRequests: [], refusedCookies: [], ...o });
+  it('has no sign_in without one', () => {
+    const r = buildResult({ httpStatus: 200, steps: [{ action: 'click', ok: true }], assertions: [] });
+    assert.equal('sign_in' in r, false);
+    assert.equal(r.verdict, 'pass');
+  });
+  it('reports signed in with signed_out_on_load and no reason', () => {
+    const cookie = { host: 'preview-abc.example.net', name: 'sid', reason: 'SameSiteLax' };
+    const r = buildResult({ httpStatus: 200, signIn: signIn({ signedOutOnLoad: true, refusedCookies: [cookie] }) });
+    assert.deepEqual(r.sign_in, { signed_in: true, signed_out_on_load: true, failed_requests: [], refused_cookies: [cookie] });
+    assert.equal(r.verdict, 'pass', 'refused cookies and signed_out_on_load decide nothing on their own');
+  });
+  it('reports a failed sign-in with its reason, every step and assertion not run, and fails', () => {
+    const r = buildResult({
+      httpStatus: 0,
+      steps: [{ action: 'click', ok: false }, { action: 'wait_for', ok: false }],
+      assertions: [{ type: 'text_visible', passed: false }],
+      signIn: signIn({ signedIn: false, reason: SIGN_IN_REASONS.stillOnForm }),
+    });
+    assert.deepEqual(r.sign_in, {
+      signed_in: false,
+      reason: 'still on the sign-in form 10 seconds after submitting',
+      failed_requests: [],
+      refused_cookies: [],
+    });
+    assert.deepEqual(
+      r.steps.map((s) => [s.index, s.action, s.ok, s.error]),
+      [
+        [0, 'click', false, SIGN_IN_NOT_RUN],
+        [1, 'wait_for', false, SIGN_IN_NOT_RUN],
+      ],
+    );
+    assert.equal(SIGN_IN_NOT_RUN, 'not run: the sign-in failed');
+    assert.deepEqual(r.assertions, [{ index: 0, type: 'text_visible', passed: false, detail: SIGN_IN_NOT_RUN }]);
+    assert.equal(r.verdict, 'fail');
+  });
+  it('fails a failed sign-in with no steps or assertions', () => {
+    const r = buildResult({ httpStatus: 200, signIn: signIn({ signedIn: false, reason: SIGN_IN_REASONS.noEmailField }) });
+    assert.equal(r.verdict, 'fail');
+  });
+  it('caps the sign-in’s lists', () => {
+    const many = (n, f) => Array.from({ length: n }, (_, i) => f(i));
+    const r = buildResult({
+      signIn: signIn({
+        failedRequests: many(25, (i) => ({ url: `u${i}`, method: 'GET', status: 401, failure: '' })),
+        refusedCookies: many(25, (i) => ({ host: 'h', name: `c${i}`, reason: 'SameSiteLax' })),
+      }),
+    });
+    assert.equal(r.sign_in.failed_requests.length, CAPS.failedRequests);
+    assert.equal(r.sign_in.refused_cookies.length, CAPS.refusedCookies);
+  });
+  it('errorResult has no sign_in', () => {
+    assert.equal('sign_in' in errorResult('boom'), false);
+  });
+});
+
+describe('redactSecret', () => {
+  afterEach(() => setSecret(''));
+  it('redacts the secret as is and URL-encoded, in values and keys, at any depth', () => {
+    const pw = 'p&ss wörd"<';
+    setSecret(pw);
+    const r = redactSecret({
+      final_url: `https://x/login?email=a%40b&password=${new URLSearchParams({ p: pw }).toString().slice(2)}`,
+      nested: [{ [`k${pw}`]: `v${pw}`, n: 3, b: true, z: null }],
+      other: `https://x/?p=${encodeURIComponent(pw)}`,
+      email: 'a@b',
+    });
+    assert.deepEqual(r, {
+      final_url: 'https://x/login?email=a%40b&password=<redacted>',
+      nested: [{ 'k<redacted>': 'v<redacted>', n: 3, b: true, z: null }],
+      other: 'https://x/?p=<redacted>',
+      email: 'a@b',
+    });
+  });
+  it('leaves the result alone without a secret', () => {
+    const v = { a: 'x' };
+    assert.equal(redactSecret(v), v);
+  });
+  it('redacts before a cap or whitespace collapse could cut or reshape the password', () => {
+    const pw = 'hunter2  pass';
+    setSecret(pw);
+    const c = { httpStatus: 200 };
+    c.domText = 'x'.repeat(CAPS.domTextChars - 5) + pw;
+    c.pageErrors = ['e'.repeat(CAPS.pageErrorChars - 5) + pw];
+    c.consoleErrors = ['c'.repeat(CAPS.consoleErrorChars - 5) + pw];
+    c.finalUrl = 'https://x/?q=' + 'u'.repeat(CAPS.urlChars - 20) + encodeURIComponent(pw);
+    const r = buildResult(c);
+    for (const v of [r.dom_text_snippet, r.page_errors[0], r.console_errors[0]]) {
+      assert.ok(!v.includes('hunt'), v.slice(-40));
+    }
+    assert.ok(!r.final_url.includes('hunt'));
+    assert.equal(oneLine(`failed: ${pw}`), 'failed: <redacted>');
+    const failed = firstPartyFailure({ url: `https://preview-abc.example.net/${'p'.repeat(CAPS.urlChars - 40)}?pw=${encodeURIComponent(pw)}`, status: 500 }, HOSTS);
+    assert.ok(!failed.url.includes('hunt'));
   });
 });

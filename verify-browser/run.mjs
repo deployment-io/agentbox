@@ -20,6 +20,11 @@
 //     is failed before it is sent by the browser's own request interception
 //     (guardNavigations, guardReadOnly), and the channels it can't see —
 //     WebSocket, SharedWorker, WebTransport, RTCPeerConnection — are refused.
+//
+// With sign_in, the browser signs in with a test user through the app's own
+// password form before the check's first load (signIn). The password is typed
+// into the field and goes nowhere else: no error, step or console line quotes
+// it, and the result is written with it redacted.
 
 import { randomBytes } from 'node:crypto';
 import { readFile, writeFile } from 'node:fs/promises';
@@ -28,6 +33,8 @@ import { chromium, devices } from 'playwright-core';
 import {
   CAPS,
   LIMITS,
+  RefusedCookies,
+  SIGN_IN_REASONS,
   abortedByNavigation,
   blameBlockedNavigation,
   blockedByReadOnly,
@@ -35,11 +42,18 @@ import {
   buildResult,
   errorResult,
   firstPartyFailure,
+  hasVisiblePasswordField,
   isAllowedUrl,
   isReadOnlyMethod,
   normalizeInput,
   oneLine,
+  pickSignInFields,
   pushCapped,
+  recordFailedRequest,
+  redactSecret,
+  setSecret,
+  signInPlan,
+  staysAfterSignIn,
   viewportContextOptions,
 } from './lib.mjs';
 
@@ -54,6 +68,17 @@ const STEP_SETTLE_MS = 300;
 const ASSERTION_WAIT_MS = 3000;
 const CLOSE_TIMEOUT_MS = 2000;
 const EVALUATE_TIMEOUT_MS = 1500;
+// The sign-in (signIn): how long to wait for its form to appear, for an email
+// field alone to be joined by a password field before acting on it, for the
+// password field of an email-first form, before clicking the form's submit
+// control, and for the form to go away.
+const SIGN_IN_FORM_WAIT_MS = 10000;
+const SIGN_IN_EMAIL_ONLY_SETTLE_MS = 1000;
+const SIGN_IN_PASSWORD_WAIT_MS = 5000;
+const SIGN_IN_CLICK_AFTER_MS = 2000;
+const SIGN_IN_SUBMITTED_WAIT_MS = 10000;
+const SIGN_IN_POLL_MS = 200;
+const SIGN_IN_FIELD_TIMEOUT_MS = 5000;
 
 // OUTLINE_RAW_MAX bounds how many visible elements readOutline hands back;
 // lib.mjs's buildOutline keeps CAPS.outlineEntries of them.
@@ -70,13 +95,24 @@ async function main() {
   const c = newCollector();
   let result;
   try {
-    const input = normalizeInput(JSON.parse(await readFile(inputPath, 'utf8')));
+    const input = normalizeInput(parseJSON(await readFile(inputPath, 'utf8')));
+    setSecret(input.signIn?.password ?? '');
     const wrapUp = Math.min(MAX_WRAP_UP_MS, Math.floor(input.timeoutMs / 4));
     result = await check(input, proxyAddr, started + input.timeoutMs - wrapUp, c);
   } catch (err) {
     result = errorResult(errorText(err), c.blockedRequests);
   }
-  await writeFile(resultPath, JSON.stringify(result));
+  await writeFile(resultPath, JSON.stringify(redactSecret(result)));
+}
+
+// parseJSON is JSON.parse with an error that quotes none of the text, which
+// may hold sign_in's password.
+function parseJSON(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error('input.json is not valid JSON');
+  }
 }
 
 function errorText(err) {
@@ -134,6 +170,12 @@ function newCollector() {
     // for any navigation blocked meanwhile.
     doc: 0,
     stepRunning: false,
+    // signIn is the sign-in's outcome (null without sign_in); signingIn is
+    // true until it ended, and what the page does meanwhile is not the
+    // check's. docStatus is the last main-frame document response's status.
+    signIn: null,
+    signingIn: false,
+    docStatus: 0,
   };
   c.blocked = (url) => {
     c.blockedCount++;
@@ -183,13 +225,13 @@ async function checkInBrowser(browser, input, remaining, c) {
   await guardNewWindows(browser, mainTargetId, c.blocked);
   watchPage(page, input.allowedHosts, allowed, c, input.readOnly);
 
-  const loaded = await firstLoad(page, input.url, remaining, c);
-  if (!loaded && c.blockedCount === 0) {
-    throw new Error(`the page could not be loaded: ${c.firstLoadError}`);
-  }
-  await runSteps(page, input.steps, remaining, c, loaded);
-  for (const a of input.assertions) {
-    c.assertions.push({ type: a.type, ...(await checkAssertion(page, a, remaining)) });
+  if (input.signIn && !(await signIn(context, page, input, remaining, c))) {
+    // The check's url is not opened; buildResult reports every step and
+    // assertion as not run.
+    c.steps = input.steps.map((s) => ({ action: s.action, ok: false }));
+    c.assertions = input.assertions.map((a) => ({ type: a.type, passed: false }));
+  } else {
+    await loadAndCheck(page, input, remaining, c);
   }
   c.finalUrl = page.url();
   c.domText = await withTimeout(
@@ -198,7 +240,323 @@ async function checkInBrowser(browser, input, remaining, c) {
     '',
   );
   c.outline = await withTimeout(page.evaluate(readOutline, OUTLINE_RAW_MAX), EVALUATE_TIMEOUT_MS, []);
+  c.flushRefusedCookies?.();
   return buildResult(c);
+}
+
+// signIn signs in with sign_in before the check's first load and records the
+// outcome in c.signIn: it opens the sign-in page, fills the app's own
+// password form in the main frame and submits it. Its actions are not steps.
+// From its start to the end of the check, the cookies the browser refuses for
+// the Task's previews are collected (watchRefusedCookies). The password goes
+// nowhere but the field it is typed into: a failure is one of
+// SIGN_IN_REASONS, never a Playwright error, which could quote it.
+async function signIn(context, page, input, remaining, c) {
+  const cookies = new RefusedCookies(input.allowedHosts);
+  c.signIn = { signedIn: false, reason: '', signedOutOnLoad: false, failedRequests: [], refusedCookies: cookies.entries };
+  c.flushRefusedCookies = () => cookies.flush();
+  await watchRefusedCookies(context, page, cookies);
+  c.signingIn = true;
+  try {
+    const reason = await attemptSignIn(page, input.signIn, remaining);
+    c.signIn.signedIn = reason === '';
+    c.signIn.reason = reason;
+  } finally {
+    c.signingIn = false;
+  }
+  return c.signIn.signedIn;
+}
+
+// attemptSignIn returns '' when it signed in, else the reason it didn't.
+async function attemptSignIn(page, creds, remaining) {
+  try {
+    await page.goto(creds.url, {
+      waitUntil: 'domcontentloaded',
+      timeout: Math.max(1, Math.min(FIRST_LOAD_TIMEOUT_MS, remaining())),
+    });
+  } catch (err) {
+    return SIGN_IN_REASONS.loadFailed + errorText(err);
+  }
+  await waitQuietly(page, 'load', LOAD_EVENT_WAIT_MS, remaining);
+  await waitQuietly(page, 'networkidle', NETWORK_IDLE_WAIT_MS, remaining);
+  let fields = await waitForSignInForm(page, remaining);
+  const { plan, reason } = signInPlan(fields);
+  if (plan === 'fail') {
+    return reason;
+  }
+  if (!(await fillInput(page, fields.email, creds.email, remaining))) {
+    return SIGN_IN_REASONS.noEmailField;
+  }
+  if (plan === 'email-first') {
+    await pressEnter(page, fields.email, remaining);
+    fields = await waitForPasswordField(page, remaining);
+    if (fields.password < 0) {
+      return SIGN_IN_REASONS.noPasswordField;
+    }
+  }
+  // Picked again: filling the email may have added or removed inputs.
+  const password = await passwordField(page);
+  if (!password) {
+    return SIGN_IN_REASONS.noPasswordField;
+  }
+  try {
+    if (!(await fillHandle(password, creds.password, remaining))) {
+      return SIGN_IN_REASONS.noPasswordField;
+    }
+    return await submitSignIn(page, password, remaining);
+  } finally {
+    await password.dispose().catch(() => {});
+  }
+}
+
+// passwordField is a handle on the password field pickSignInFields picks in
+// the page as it is now, once the element is confirmed to be a password
+// input, or null.
+async function passwordField(page) {
+  const inputs = await readInputs(page);
+  const index = inputs === null ? -1 : pickSignInFields(inputs).password;
+  if (index < 0) {
+    return null;
+  }
+  const handle = await withTimeout(signInInputs(page).nth(index).elementHandle({ timeout: EVALUATE_TIMEOUT_MS }), EVALUATE_TIMEOUT_MS, null);
+  if (!handle) {
+    return null;
+  }
+  const isPassword = await withTimeout(
+    handle.evaluate((el) => (el.getAttribute('type') ?? '').trim().toLowerCase() === 'password'),
+    EVALUATE_TIMEOUT_MS,
+    false,
+  );
+  if (!isPassword) {
+    await handle.dispose().catch(() => {});
+    return null;
+  }
+  return handle;
+}
+
+// fillHandle types value into the element and reports whether it could. The
+// error is dropped: it may quote the value.
+async function fillHandle(handle, value, remaining) {
+  const timeout = Math.min(SIGN_IN_FIELD_TIMEOUT_MS, remaining());
+  if (timeout <= 0) {
+    return false;
+  }
+  return handle.fill(value, { timeout }).then(
+    () => true,
+    () => false,
+  );
+}
+
+// waitForSignInForm waits for the sign-in form a client-side app renders
+// after load: until there is a password field, or an email field alone has
+// stayed alone for a moment (a form that asks for the email first), or
+// SIGN_IN_FORM_WAIT_MS passed. It returns pickSignInFields' choice.
+async function waitForSignInForm(page, remaining) {
+  const start = Date.now();
+  let emailAloneSince = 0;
+  for (;;) {
+    const fields = pickSignInFields(await readInputs(page));
+    if (fields.password >= 0) {
+      return fields;
+    }
+    emailAloneSince = fields.email >= 0 ? emailAloneSince || Date.now() : 0;
+    if (emailAloneSince && Date.now() - emailAloneSince >= SIGN_IN_EMAIL_ONLY_SETTLE_MS) {
+      return fields;
+    }
+    if (Date.now() - start >= SIGN_IN_FORM_WAIT_MS || remaining() <= SIGN_IN_POLL_MS) {
+      return fields;
+    }
+    await sleep(SIGN_IN_POLL_MS);
+  }
+}
+
+// waitForPasswordField waits up to SIGN_IN_PASSWORD_WAIT_MS for the password
+// field an email-first form shows once the email was entered.
+async function waitForPasswordField(page, remaining) {
+  const start = Date.now();
+  for (;;) {
+    const fields = pickSignInFields(await readInputs(page));
+    if (fields.password >= 0 || Date.now() - start >= SIGN_IN_PASSWORD_WAIT_MS || remaining() <= SIGN_IN_POLL_MS) {
+      return fields;
+    }
+    await sleep(SIGN_IN_POLL_MS);
+  }
+}
+
+// submitSignIn presses Enter in the password field; when the field is still
+// there and enabled SIGN_IN_CLICK_AFTER_MS later, it clicks its form's submit
+// control once. password is a handle on the field. It returns '' once no password field is visible (seen twice,
+// either side of the page's load event, so a page between documents doesn't
+// count), or the reason after SIGN_IN_SUBMITTED_WAIT_MS.
+async function submitSignIn(page, password, remaining) {
+  const submitted = Date.now();
+  const timeout = Math.min(SIGN_IN_FIELD_TIMEOUT_MS, remaining());
+  if (timeout > 0) {
+    await password.press('Enter', { timeout }).catch(() => {});
+  }
+  let clicked = false;
+  for (;;) {
+    const elapsed = Date.now() - submitted;
+    const inputs = await readInputs(page);
+    if (inputs !== null && !hasVisiblePasswordField(inputs)) {
+      await waitQuietly(page, 'load', Math.max(0, SIGN_IN_SUBMITTED_WAIT_MS - elapsed), remaining);
+      const again = await readInputs(page);
+      if (again !== null && !hasVisiblePasswordField(again)) {
+        return '';
+      }
+    }
+    if (elapsed >= SIGN_IN_SUBMITTED_WAIT_MS || remaining() <= 0) {
+      return SIGN_IN_REASONS.stillOnForm;
+    }
+    if (!clicked && inputs !== null && elapsed >= SIGN_IN_CLICK_AFTER_MS) {
+      clicked = true;
+      await clickSubmitControl(page, inputs, remaining);
+    }
+    await sleep(Math.max(0, Math.min(SIGN_IN_POLL_MS, remaining())));
+  }
+}
+
+// signInInputs are the inputs of the main frame (open shadow roots included,
+// not iframes); readInputs describes them in the same order, so a
+// pickSignInFields index is an nth() of it.
+function signInInputs(page) {
+  return page.locator('input');
+}
+
+// readInputs describes the main frame's inputs for pickSignInFields, or
+// returns null when the page couldn't be read (between documents).
+async function readInputs(page) {
+  return withTimeout(signInInputs(page).evaluateAll(describeInputs), EVALUATE_TIMEOUT_MS, null);
+}
+
+// describeInputs runs in the page.
+function describeInputs(inputs) {
+  return inputs.map((el) => {
+    const r = el.getBoundingClientRect();
+    const shown =
+      typeof el.checkVisibility === 'function'
+        ? el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })
+        : el.getClientRects().length > 0;
+    return {
+      type: el.getAttribute('type') || '',
+      autocomplete: el.getAttribute('autocomplete') || '',
+      name: el.getAttribute('name') || '',
+      id: el.getAttribute('id') || '',
+      visible: shown && r.width > 0 && r.height > 0,
+      // :disabled, unlike el.disabled, counts a disabled ancestor fieldset.
+      enabled: !el.matches(':disabled'),
+    };
+  });
+}
+
+// fillInput types value into the index-th input and reports whether it
+// could. The error is dropped: it may quote the value.
+async function fillInput(page, index, value, remaining) {
+  const timeout = Math.min(SIGN_IN_FIELD_TIMEOUT_MS, remaining());
+  if (timeout <= 0) {
+    return false;
+  }
+  return signInInputs(page)
+    .nth(index)
+    .fill(value, { timeout })
+    .then(
+      () => true,
+      () => false,
+    );
+}
+
+async function pressEnter(page, index, remaining) {
+  const timeout = Math.min(SIGN_IN_FIELD_TIMEOUT_MS, remaining());
+  if (timeout > 0) {
+    await signInInputs(page).nth(index).press('Enter', { timeout }).catch(() => {});
+  }
+}
+
+// clickSubmitControl clicks the visible submit control of the password
+// field's form, if the field is still visible and enabled and has one.
+async function clickSubmitControl(page, inputs, remaining) {
+  const { password } = pickSignInFields(inputs);
+  const timeout = Math.min(SIGN_IN_FIELD_TIMEOUT_MS, remaining());
+  if (password < 0 || timeout <= 0) {
+    return;
+  }
+  let handle = null;
+  try {
+    handle = await signInInputs(page).nth(password).evaluateHandle(findSubmitControl, undefined, { timeout });
+    const control = handle.asElement();
+    if (control) {
+      await control.click({ timeout });
+    }
+  } catch {
+    // Not clicked; the form is reported as still showing.
+  } finally {
+    await handle?.dispose().catch(() => {});
+  }
+}
+
+// findSubmitControl runs in the page: the first visible submit control of
+// the input's form — a button without a type, type="submit", or an input
+// type="submit" — or null.
+function findSubmitControl(input) {
+  const form = input.form;
+  if (!form) {
+    return null;
+  }
+  for (const el of form.elements) {
+    const tag = el.tagName.toLowerCase();
+    const type = (el.getAttribute('type') ?? '').trim().toLowerCase();
+    const submits = (tag === 'button' && (el.getAttribute('type') === null || type === 'submit')) || (tag === 'input' && type === 'submit');
+    if (!submits) {
+      continue;
+    }
+    const r = el.getBoundingClientRect();
+    const shown =
+      typeof el.checkVisibility === 'function'
+        ? el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })
+        : el.getClientRects().length > 0;
+    if (shown && r.width > 0 && r.height > 0) {
+      return el;
+    }
+  }
+  return null;
+}
+
+// watchRefusedCookies collects the cookies the browser refuses to store or to
+// send for the page's requests, from the DevTools Network domain of a
+// session of its own (only a check with sign_in opens it).
+async function watchRefusedCookies(context, page, cookies) {
+  const cdp = await context.newCDPSession(page);
+  cdp.on('Network.requestWillBeSent', (ev) =>
+    cookies.request(ev.requestId, ev.request?.url, ev.redirectResponse ? ev.redirectHasExtraInfo : undefined),
+  );
+  cdp.on('Network.responseReceived', (ev) => cookies.response(ev.requestId, ev.hasExtraInfo));
+  cdp.on('Network.requestWillBeSentExtraInfo', (ev) => cookies.refused(ev.requestId, 'request', ev));
+  cdp.on('Network.responseReceivedExtraInfo', (ev) => cookies.refused(ev.requestId, 'response', ev));
+  await cdp.send('Network.enable');
+}
+
+// loadAndCheck is the check after the browser is ready (and signed in): the
+// first load, the steps and the assertions. Signed in, a check of the front
+// page of the host the app landed on stays on the page the app showed instead
+// of loading it again.
+async function loadAndCheck(page, input, remaining, c) {
+  const blockedBefore = c.blockedCount;
+  let loaded;
+  if (c.signIn && staysAfterSignIn(input.url, page.url())) {
+    loaded = await settleAfterSignIn(page, remaining, c);
+  } else {
+    loaded = await firstLoad(page, input.url, remaining, c);
+    if (loaded && c.signIn) {
+      c.signIn.signedOutOnLoad = hasVisiblePasswordField(await readInputs(page));
+    }
+  }
+  if (!loaded && c.blockedCount === blockedBefore) {
+    throw new Error(`the page could not be loaded: ${c.firstLoadError}`);
+  }
+  await runSteps(page, input.steps, remaining, c, loaded);
+  for (const a of input.assertions) {
+    c.assertions.push({ type: a.type, ...(await checkAssertion(page, a, remaining)) });
+  }
 }
 
 // popupGuard runs in every frame before the page's scripts: window.open and
@@ -494,12 +852,19 @@ function readOnlyGuard(o) {
 //
 // In a read_only check, a request read_only refused is in blocked_requests and
 // is not reported again as failed.
+//
+// With sign_in, what happens before the sign-in ended is not the check's: a
+// request that started then goes to sign_in.failed_requests, and page and
+// console errors from then are dropped.
 function watchPage(page, allowedHosts, allowed, c, readOnly) {
   let mainNavigations = 0;
   const frameNavigations = new WeakMap();
   const counts = (frame) => ({ main: mainNavigations, frame: frameNavigations.get(frame) ?? 0 });
   const sentAt = new WeakMap();
+  const duringSignIn = new WeakMap();
+  const signInRequest = (req) => duringSignIn.get(req) ?? c.signingIn;
   page.on('request', (req) => {
+    duringSignIn.set(req, c.signingIn);
     const frame = req.frame();
     if (req.isNavigationRequest()) {
       frameNavigations.set(frame, (frameNavigations.get(frame) ?? 0) + 1);
@@ -510,11 +875,14 @@ function watchPage(page, allowedHosts, allowed, c, readOnly) {
     sentAt.set(req, counts(frame));
   });
   page.on('pageerror', (err) => {
+    if (c.signingIn) {
+      return;
+    }
     const text = err?.name && err?.message ? `${err.name}: ${err.message}` : String(err?.message ?? err);
     pushCapped(c.pageErrors, text, CAPS.pageErrors);
   });
   page.on('console', (msg) => {
-    if (msg.type() === 'error') {
+    if (msg.type() === 'error' && !c.signingIn) {
       pushCapped(c.consoleErrors, msg.text(), CAPS.consoleErrors);
     }
   });
@@ -534,18 +902,15 @@ function watchPage(page, allowedHosts, allowed, c, readOnly) {
       },
       allowedHosts,
     );
-    if (entry && c.failedRequests.length < CAPS.failedRequests) {
-      c.failedRequests.push(entry);
-    }
+    recordFailedRequest(c, entry, signInRequest(req));
   });
   page.on('response', (resp) => {
-    const entry = firstPartyFailure(
-      { url: resp.url(), method: resp.request().method(), status: resp.status(), failure: '' },
-      allowedHosts,
-    );
-    if (entry && c.failedRequests.length < CAPS.failedRequests) {
-      c.failedRequests.push(entry);
+    const req = resp.request();
+    if (req.isNavigationRequest() && resp.frame() === page.mainFrame()) {
+      c.docStatus = resp.status();
     }
+    const entry = firstPartyFailure({ url: resp.url(), method: req.method(), status: resp.status(), failure: '' }, allowedHosts);
+    recordFailedRequest(c, entry, signInRequest(req));
   });
   page.on('dialog', (d) => {
     d.dismiss().catch(() => {});
@@ -568,6 +933,18 @@ async function firstLoad(page, url, remaining, c) {
   await waitQuietly(page, 'load', LOAD_EVENT_WAIT_MS, remaining);
   await waitQuietly(page, 'networkidle', NETWORK_IDLE_WAIT_MS, remaining);
   c.timings = await withTimeout(page.evaluate(readTimings), EVALUATE_TIMEOUT_MS, {});
+  return true;
+}
+
+// settleAfterSignIn is the first load of a check that stays on the page the
+// app showed after signing in: it waits for that page to settle as firstLoad
+// does and reads its timings. http_status is the last main-frame document
+// response's since the sign-in started.
+async function settleAfterSignIn(page, remaining, c) {
+  await waitQuietly(page, 'load', LOAD_EVENT_WAIT_MS, remaining);
+  await waitQuietly(page, 'networkidle', NETWORK_IDLE_WAIT_MS, remaining);
+  c.timings = await withTimeout(page.evaluate(readTimings), EVALUATE_TIMEOUT_MS, {});
+  c.httpStatus = c.docStatus;
   return true;
 }
 
