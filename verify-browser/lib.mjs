@@ -27,6 +27,7 @@ export const CAPS = Object.freeze({
   domTextChars: 1000,
   outlineEntries: 60,
   outlineTextChars: 120,
+  refusedCookies: 20,
 });
 
 // VIEWPORT_LIMITS bound a custom {width, height} viewport.
@@ -289,6 +290,7 @@ export function normalizeInput(raw) {
   if (!Array.isArray(assertions) || assertions.length > LIMITS.maxAssertions) {
     throw new Error(`assertions must be an array of at most ${LIMITS.maxAssertions}`);
   }
+  const readOnly = normalizeReadOnly(raw.read_only);
   const t = raw.timeout_ms;
   if (!Number.isInteger(t) || t < LIMITS.minTimeoutMs || t > LIMITS.maxTimeoutMs) {
     throw new Error(`timeout_ms must be an integer between ${LIMITS.minTimeoutMs} and ${LIMITS.maxTimeoutMs}`);
@@ -300,7 +302,8 @@ export function normalizeInput(raw) {
     assertions: assertions.map((a, i) => normalizeAssertion(a, i)),
     timeoutMs: t,
     viewport: normalizeViewport(raw.viewport),
-    readOnly: normalizeReadOnly(raw.read_only),
+    readOnly,
+    signIn: normalizeSignIn(raw.sign_in, allowedHosts, readOnly),
   };
 }
 
@@ -314,6 +317,330 @@ export function normalizeReadOnly(raw) {
     throw new Error(`read_only must be true or false, got ${JSON.stringify(raw)}`);
   }
   return raw;
+}
+
+// SIGN_IN_LIMITS bound sign_in's email and password, in characters.
+export const SIGN_IN_LIMITS = Object.freeze({ emailChars: 320, passwordChars: 200 });
+
+// SIGN_IN_REASONS are the result's sign_in.reason values; loadFailed is
+// followed by the load error.
+export const SIGN_IN_REASONS = Object.freeze({
+  noPasswordField: 'the sign-in page has no password field',
+  noEmailField: 'the sign-in page has no email field',
+  stillOnForm: 'still on the sign-in form 10 seconds after submitting',
+  loadFailed: 'the sign-in page could not be loaded: ',
+});
+
+// SIGN_IN_NOT_RUN is every step's error and every assertion's detail when
+// the sign-in failed.
+export const SIGN_IN_NOT_RUN = 'not run: the sign-in failed';
+
+const SIGN_IN_KEYS = Object.freeze(['url', 'email', 'password']);
+const LINE_BREAK = /[\n\r\v\f\u0085\u2028\u2029]/;
+
+// normalizeSignIn validates input.json's optional sign_in: absent is null;
+// else exactly {url, email, password}, url as the check's url. Its errors
+// name the field, never its value.
+export function normalizeSignIn(raw, allowedHosts, readOnly) {
+  if (raw === undefined) {
+    return null;
+  }
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new Error('sign_in must be an object: {"url": ..., "email": ..., "password": ...}');
+  }
+  if (Object.keys(raw).some((k) => !SIGN_IN_KEYS.includes(k))) {
+    throw new Error('sign_in takes only url, email and password');
+  }
+  const url = requireString(raw, 'url', 'sign_in');
+  if (!isAllowedUrl(url, allowedHosts)) {
+    throw new Error('sign_in: url must be https on a host in allowed_hosts');
+  }
+  const email = credential(raw, 'email', SIGN_IN_LIMITS.emailChars);
+  const password = credential(raw, 'password', SIGN_IN_LIMITS.passwordChars);
+  if (readOnly === true) {
+    throw new Error('sign_in cannot be used with read_only: a read-only check is of a live site, which has no test users');
+  }
+  return { url, email, password };
+}
+
+function credential(raw, key, max) {
+  const v = raw[key];
+  if (typeof v !== 'string' || v === '') {
+    throw new Error(`sign_in.${key} must be a non-empty string`);
+  }
+  if (charCount(v) > max) {
+    throw new Error(`sign_in.${key} is longer than ${max} characters`);
+  }
+  if (LINE_BREAK.test(v)) {
+    throw new Error(`sign_in.${key} must not contain a line break`);
+  }
+  return v;
+}
+
+// TEXT_LIKE_TYPES are the input types an email field without type="email"
+// may have ('' is no type attribute).
+const TEXT_LIKE_TYPES = new Set(['', 'text', 'email']);
+
+function inputType(f) {
+  return String(f?.type ?? '').trim().toLowerCase();
+}
+
+function looksLikeUsername(f) {
+  const autocomplete = String(f.autocomplete ?? '').toLowerCase();
+  if (autocomplete.includes('username') || autocomplete.includes('email')) {
+    return true;
+  }
+  return [f.name, f.id].some((v) => /email|user|login/i.test(String(v ?? '')));
+}
+
+// pickSignInFields chooses the sign-in form's fields among the main frame's
+// inputs, described in document order as {type, autocomplete, name, id,
+// visible, enabled}: the password field is the first visible, enabled input
+// with type="password"; the email field the first with type="email", else
+// the first text-like one whose autocomplete, name or id says it holds a user
+// name or email. It returns their indexes, -1 for none.
+export function pickSignInFields(fields) {
+  const list = Array.isArray(fields) ? fields : [];
+  const usable = list.flatMap((f, i) => (f && f.visible === true && f.enabled === true ? [i] : []));
+  const first = (pred) => usable.find((i) => pred(list[i])) ?? -1;
+  const password = first((f) => inputType(f) === 'password');
+  let email = first((f) => inputType(f) === 'email');
+  if (email === -1) {
+    email = first((f) => TEXT_LIKE_TYPES.has(inputType(f)) && looksLikeUsername(f));
+  }
+  return { password, email };
+}
+
+// hasVisiblePasswordField reports whether any described input is a visible
+// type="password" one, enabled or not: the sign-in form is still showing.
+export function hasVisiblePasswordField(fields) {
+  return (Array.isArray(fields) ? fields : []).some((f) => f && f.visible === true && inputType(f) === 'password');
+}
+
+// signInPlan says what to do with the fields pickSignInFields chose: 'both'
+// (fill email and password, then submit), 'email-first' (a form that asks
+// for the email first), or 'fail' with the reason.
+export function signInPlan({ password, email }) {
+  if (password >= 0) {
+    return email >= 0 ? { plan: 'both' } : { plan: 'fail', reason: SIGN_IN_REASONS.noEmailField };
+  }
+  return email >= 0 ? { plan: 'email-first' } : { plan: 'fail', reason: SIGN_IN_REASONS.noPasswordField };
+}
+
+// staysAfterSignIn is whether the check continues on the page the app showed
+// after signing in instead of opening its url: url is the site's front page
+// (path "/", no query) on the host the browser is on (currentUrl). An app
+// that keeps its session in memory would sign out on a reload.
+export function staysAfterSignIn(url, currentUrl) {
+  let u;
+  try {
+    u = new URL(String(url));
+  } catch {
+    return false;
+  }
+  if (u.pathname !== '/' || u.search !== '') {
+    return false;
+  }
+  const here = hostOf(currentUrl);
+  return here !== '' && here === normalizeHost(u.hostname);
+}
+
+// cookieName is a refused cookie's name: the parsed cookie's, else the text
+// before the first "=" of its Set-Cookie line. A line without "=" is a
+// cookie with an empty name whose value is the line, so it gives "".
+function cookieName(cookie, cookieLine) {
+  if (typeof cookie?.name === 'string') {
+    return cookie.name;
+  }
+  const line = String(cookieLine ?? '');
+  const eq = line.indexOf('=');
+  return eq < 0 ? '' : line.slice(0, eq).trim();
+}
+
+// cookieRefusals lists the cookies a DevTools Network event says the browser
+// refused — responseReceivedExtraInfo's blockedCookies (not stored) or
+// requestWillBeSentExtraInfo's associatedCookies with blocked reasons (not
+// sent) — as {name, reason}, reason being Chromium's first blocked reason.
+// Never a value.
+export function cookieRefusals(event) {
+  const out = [];
+  const add = (cookie, cookieLine, reasons) => {
+    if (Array.isArray(reasons) && reasons.length > 0) {
+      out.push({ name: cookieName(cookie, cookieLine), reason: String(reasons[0]) });
+    }
+  };
+  for (const b of Array.isArray(event?.blockedCookies) ? event.blockedCookies : []) {
+    add(b?.cookie, b?.cookieLine, b?.blockedReasons);
+  }
+  for (const a of Array.isArray(event?.associatedCookies) ? event.associatedCookies : []) {
+    add(a?.cookie, undefined, a?.blockedReasons);
+  }
+  return out;
+}
+
+// PENDING_REQUESTS_MAX bounds the refusals RefusedCookies holds for request
+// hops it can't attribute yet.
+const PENDING_REQUESTS_MAX = 200;
+
+// RefusedCookies collects sign_in.refused_cookies from DevTools Network
+// events: request(requestId, url, redirectHasExtraInfo) for each
+// requestWillBeSent (a redirect hop reuses the requestId and passes its
+// redirectHasExtraInfo; undefined otherwise), response(requestId,
+// hasExtraInfo) for each responseReceived, and refused(requestId, kind,
+// event) for each ExtraInfo event — kind "request" for
+// requestWillBeSentExtraInfo, "response" for responseReceivedExtraInfo.
+// Chromium sends ExtraInfo events in order but independently of the hops,
+// and only for a hop whose response says it has extra info (a hop served
+// from a cache has none), one of each kind. So, as Playwright correlates
+// them, the nth event of a kind belongs to the nth hop with extra info; an
+// event waits until the hops before it are known, and flush() attributes
+// what still waits at the end of the check, taking a hop whose response
+// never came as one with extra info. entries holds {host, name, reason} for
+// hosts in allowedHosts, deduplicated, at most CAPS.refusedCookies.
+export class RefusedCookies {
+  constructor(allowedHosts) {
+    this.allowedHosts = allowedHosts.map(normalizeHost);
+    this.entries = [];
+    this.requests = new Map();
+    this.pendingCount = 0;
+  }
+
+  state(requestId) {
+    let st = this.requests.get(requestId);
+    if (!st) {
+      // hops: {url, extra} with extra true, false or undefined (no response
+      // yet); next: per kind, the hop the next event is matched from;
+      // queue: per kind, the events (as refusals) not attributed yet.
+      st = { hops: [], next: { request: 0, response: 0 }, queue: { request: [], response: [] } };
+      this.requests.set(requestId, st);
+    }
+    return st;
+  }
+
+  request(requestId, url, redirectHasExtraInfo) {
+    const st = this.state(requestId);
+    const last = st.hops[st.hops.length - 1];
+    if (last && last.extra === undefined) {
+      last.extra = redirectHasExtraInfo !== false;
+    }
+    st.hops.push({ url: String(url ?? ''), extra: undefined });
+    this.match(st, false);
+  }
+
+  response(requestId, hasExtraInfo) {
+    const st = this.requests.get(requestId);
+    const last = st?.hops[st.hops.length - 1];
+    if (last && last.extra === undefined) {
+      last.extra = hasExtraInfo !== false;
+      this.match(st, false);
+    }
+  }
+
+  refused(requestId, kind, event) {
+    const st = this.state(requestId);
+    if (this.pendingCount >= PENDING_REQUESTS_MAX) {
+      // Still counted, so later events keep their place.
+      st.queue[kind].push([]);
+    } else {
+      const refusals = cookieRefusals(event);
+      this.pendingCount += refusals.length;
+      st.queue[kind].push(refusals);
+    }
+    this.match(st, false);
+  }
+
+  // flush attributes the events still waiting, at the end of the check.
+  flush() {
+    for (const st of this.requests.values()) {
+      this.match(st, true);
+    }
+  }
+
+  // match attributes st's queued events to their hops, in order, while the
+  // hop of the next one is known (or, final, can be assumed).
+  match(st, final) {
+    for (const kind of ['request', 'response']) {
+      const queue = st.queue[kind];
+      while (queue.length > 0) {
+        let i = st.next[kind];
+        while (i < st.hops.length && st.hops[i].extra === false) {
+          i++;
+        }
+        st.next[kind] = i;
+        if (i >= st.hops.length || (st.hops[i].extra === undefined && !final)) {
+          break;
+        }
+        const refusals = queue.shift();
+        this.pendingCount -= refusals.length;
+        refusals.forEach((r) => this.add(st.hops[i].url, r));
+        st.next[kind] = i + 1;
+      }
+    }
+  }
+
+  add(url, { name, reason }) {
+    const host = hostOf(url);
+    if (host === '' || !this.allowedHosts.includes(host) || this.entries.length >= CAPS.refusedCookies) {
+      return;
+    }
+    const entry = { host, name: redactText(name), reason: capString(reason, CAPS.detailChars) };
+    if (!this.entries.some((e) => e.host === entry.host && e.name === entry.name && e.reason === entry.reason)) {
+      this.entries.push(entry);
+    }
+  }
+}
+
+// recordFailedRequest files a failed_requests entry (from firstPartyFailure;
+// null is ignored): a request that started before the sign-in ended is the
+// sign-in's (c.signIn.failedRequests), not the check's.
+export function recordFailedRequest(c, entry, startedDuringSignIn) {
+  if (!entry) {
+    return;
+  }
+  const list = startedDuringSignIn && c.signIn ? c.signIn.failedRequests : c.failedRequests;
+  if (list.length < CAPS.failedRequests) {
+    list.push(entry);
+  }
+}
+
+// secretForms are the forms of sign_in's password redactText replaces: as
+// it is and URL-encoded (a form sent with GET puts it in a URL). Empty
+// without sign_in.
+let secretForms = [];
+
+// setSecret sets the password redactText replaces ("" for none). run.mjs
+// sets it once the input is read, so that every string is redacted before
+// capString or oneLine shortens or reshapes it: a password cut by a cap would
+// no longer be recognised, here or by cmd/verify-browser.
+export function setSecret(secret) {
+  secretForms = secret ? [...new Set([secret, encodeURIComponent(secret), new URLSearchParams({ p: secret }).toString().slice(2)])] : [];
+}
+
+// redactText replaces the password set by setSecret in s with "<redacted>".
+export function redactText(s) {
+  return secretForms.reduce((acc, f) => acc.split(f).join('<redacted>'), String(s ?? ''));
+}
+
+// redactSecret replaces the password set by setSecret in every string value
+// and object key of v, at any depth. cmd/verify-browser redacts it as it is
+// again before writing the result.
+export function redactSecret(v) {
+  if (secretForms.length === 0) {
+    return v;
+  }
+  const walk = (x) => {
+    if (typeof x === 'string') {
+      return redactText(x);
+    }
+    if (Array.isArray(x)) {
+      return x.map(walk);
+    }
+    if (x !== null && typeof x === 'object') {
+      return Object.fromEntries(Object.entries(x).map(([k, val]) => [redactText(k), walk(val)]));
+    }
+    return x;
+  };
+  return walk(v);
 }
 
 // READ_ONLY_METHODS are the methods a read_only check lets through: the ones
@@ -341,9 +668,10 @@ export function blockedByReadOnly(method, readOnly) {
   return readOnly === true && !isReadOnlyMethod(method);
 }
 
-// capString truncates s to max characters (code points), marking the cut.
+// capString truncates s to max characters (code points), marking the cut,
+// after redacting the password.
 export function capString(s, max) {
-  const str = String(s ?? '');
+  const str = redactText(s);
   const chars = [...str];
   if (chars.length <= max) {
     return str;
@@ -352,10 +680,11 @@ export function capString(s, max) {
 }
 
 // oneLine collapses whitespace and strips ANSI colour codes, for Playwright
-// error messages that carry a multi-line call log.
+// error messages that carry a multi-line call log. The password is redacted
+// first.
 export function oneLine(s) {
   // eslint-disable-next-line no-control-regex
-  return String(s ?? '').replace(/\u001b\[[0-9;]*m/g, '').replace(/\s+/g, ' ').trim();
+  return redactText(s).replace(/\u001b\[[0-9;]*m/g, '').replace(/\s+/g, ' ').trim();
 }
 
 // isNoiseFailure reports failures that say nothing about the page: requests
@@ -443,9 +772,10 @@ export function pushCapped(list, value, max) {
 
 // computeVerdict is the contract's rule: "pass" only when the first load's
 // final response is 2xx, every step succeeded, every assertion passed, and
-// there are no page errors and no failed first-party requests. Console
-// errors, timings and blocked navigations on their own never decide it (a
-// blocked navigation fails the step that caused it).
+// there are no page errors and no failed first-party requests; with sign_in,
+// only when it signed in. Console errors, timings, blocked navigations and
+// the sign-in's refused cookies on their own never decide it (a blocked
+// navigation fails the step that caused it).
 export function computeVerdict(r) {
   const ok =
     Number.isInteger(r.http_status) &&
@@ -454,7 +784,8 @@ export function computeVerdict(r) {
     r.steps.every((s) => s.ok) &&
     r.assertions.every((a) => a.passed) &&
     r.page_errors.length === 0 &&
-    r.failed_requests.length === 0;
+    r.failed_requests.length === 0 &&
+    (r.sign_in === undefined || r.sign_in.signed_in === true);
   return ok ? 'pass' : 'fail';
 }
 
@@ -463,7 +794,9 @@ function roundTiming(v) {
 }
 
 // buildResult assembles a completed result.json from what the browser
-// collected, applying every cap and the verdict.
+// collected, applying every cap and the verdict. With c.signIn it adds
+// sign_in; when the sign-in failed, every step and assertion is reported as
+// not run.
 export function buildResult(c) {
   const result = {
     schema_version: SCHEMA_VERSION,
@@ -492,7 +825,7 @@ export function buildResult(c) {
       .slice(0, CAPS.blockedNavigations)
       .map((u) => capString(u, CAPS.urlChars)),
     timings_ms: {},
-    dom_text_snippet: capString(String(c.domText ?? '').trim(), CAPS.domTextChars),
+    dom_text_snippet: capString(redactText(c.domText).trim(), CAPS.domTextChars),
     outline: buildOutline(c.outline, c.finalUrl),
   };
   const t = c.timings ?? {};
@@ -506,8 +839,29 @@ export function buildResult(c) {
       result.timings_ms[key] = v;
     }
   }
+  if (c.signIn) {
+    result.sign_in = signInResult(c.signIn);
+    if (!result.sign_in.signed_in) {
+      result.steps = result.steps.map((s) => ({ ...s, ok: false, error: SIGN_IN_NOT_RUN }));
+      result.assertions = result.assertions.map((a) => ({ ...a, passed: false, detail: SIGN_IN_NOT_RUN }));
+    }
+  }
   result.verdict = computeVerdict(result);
   return result;
+}
+
+// signInResult is the result's sign_in: reason only when not signed in,
+// signed_out_on_load only when signed in.
+function signInResult(s) {
+  const out = { signed_in: s.signedIn === true };
+  if (out.signed_in) {
+    out.signed_out_on_load = s.signedOutOnLoad === true;
+  } else {
+    out.reason = capString(oneLine(s.reason), CAPS.detailChars);
+  }
+  out.failed_requests = (s.failedRequests ?? []).slice(0, CAPS.failedRequests);
+  out.refused_cookies = (s.refusedCookies ?? []).slice(0, CAPS.refusedCookies);
+  return out;
 }
 
 // FIELD_ROLES are ARIA roles that make an element a form field.

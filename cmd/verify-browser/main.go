@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/deployment-io/agentbox/internal/proxy"
@@ -69,15 +70,15 @@ func run(ctx context.Context, cfg config) int {
 	resultPath := filepath.Join(cfg.ioDir, "result.json")
 	data, err := os.ReadFile(filepath.Join(cfg.ioDir, "input.json"))
 	if err != nil {
-		return fail(resultPath, fmt.Errorf("reading input.json: %w", err), "")
+		return fail(resultPath, fmt.Errorf("reading input.json: %w", err), "", "")
 	}
 	in, err := parseInput(data)
 	if err != nil {
-		return fail(resultPath, fmt.Errorf("invalid input: %w", err), "")
+		return fail(resultPath, fmt.Errorf("invalid input: %w", err), "", rawSecret(data))
 	}
 	srv, err := startProxy(proxy.NewAllowAllList(), proxy.Config{Logger: os.Stderr, BlockPrivateIPs: true})
 	if err != nil {
-		return fail(resultPath, fmt.Errorf("starting the egress proxy: %w", err), "")
+		return fail(resultPath, fmt.Errorf("starting the egress proxy: %w", err), "", in.secret())
 	}
 	defer srv.Close()
 
@@ -95,13 +96,18 @@ func run(ctx context.Context, cfg config) int {
 		grace:     cfg.grace,
 		stderrMax: stderrTailBytes,
 	})
-	return finish(resultPath, tmpResult, outcome)
+	return finish(resultPath, tmpResult, outcome, in.secret())
 }
 
-// fail writes an error result and returns exit code 1.
-func fail(resultPath string, err error, stderrTail string) int {
-	fmt.Fprintf(os.Stderr, "[verify-browser] %v\n", err)
-	if werr := writeErrorResult(resultPath, err.Error(), stderrTail); werr != nil {
+// fail writes an error result, with secret (sign_in's password, or "")
+// redacted, and returns exit code 1.
+func fail(resultPath string, err error, stderrTail, secret string) int {
+	msg := err.Error()
+	if secret != "" {
+		msg = strings.ReplaceAll(msg, secret, redacted)
+	}
+	fmt.Fprintf(os.Stderr, "[verify-browser] %s\n", msg)
+	if werr := writeErrorResult(resultPath, err.Error(), stderrTail, secret); werr != nil {
 		fmt.Fprintf(os.Stderr, "[verify-browser] writing result.json: %v\n", werr)
 	}
 	return 1

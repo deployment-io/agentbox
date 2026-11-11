@@ -27,6 +27,9 @@ const (
 	maxViewportWidth  = 2560
 	minViewportHeight = 480
 	maxViewportHeight = 1600
+
+	maxEmailChars    = 320
+	maxPasswordChars = 200
 )
 
 // viewportPresets are the named window sizes verify-browser/lib.mjs knows.
@@ -46,6 +49,45 @@ type input struct {
 	// ReadOnly is kept raw for the same reason: only true or false is a
 	// read_only, and a null or a string must not quietly mean false.
 	ReadOnly json.RawMessage `json:"read_only,omitempty"`
+	// SignIn is kept raw so that an unknown key, a missing field or a null
+	// is reported; validate fills signIn from it.
+	SignIn json.RawMessage `json:"sign_in,omitempty"`
+
+	signIn *signIn
+}
+
+// signIn is input.json's sign_in: a test user's credentials and the page to
+// sign in on.
+type signIn struct {
+	URL      string
+	Email    string
+	Password string
+}
+
+// secret is what is redacted from every result file: the sign-in's password,
+// or "" when the check has no sign_in.
+func (in *input) secret() string {
+	if in == nil || in.signIn == nil {
+		return ""
+	}
+	return in.signIn.Password
+}
+
+// rawSecret is sign_in.password from input.json that did not validate, or ""
+// when there is none, so that an invalid-input error never carries it.
+func rawSecret(data []byte) string {
+	var raw struct {
+		SignIn struct {
+			Password any `json:"password"`
+		} `json:"sign_in"`
+	}
+	if json.Unmarshal(data, &raw) != nil {
+		return ""
+	}
+	if s, ok := raw.SignIn.Password.(string); ok {
+		return s
+	}
+	return ""
 }
 
 type step struct {
@@ -112,14 +154,83 @@ func (in *input) validate() error {
 			return fmt.Errorf("assertions[%d]: %w", i, err)
 		}
 	}
+	readOnly := false
 	if in.ReadOnly != nil {
-		var b bool
-		if string(in.ReadOnly) == "null" || json.Unmarshal(in.ReadOnly, &b) != nil {
+		if string(in.ReadOnly) == "null" || json.Unmarshal(in.ReadOnly, &readOnly) != nil {
 			return fmt.Errorf("read_only must be true or false, got %s", in.ReadOnly)
 		}
 	}
 	if in.Viewport != nil {
-		return validateViewport(in.Viewport)
+		if err := validateViewport(in.Viewport); err != nil {
+			return err
+		}
+	}
+	if in.SignIn != nil {
+		s, err := in.validateSignIn(in.SignIn, readOnly)
+		if err != nil {
+			return err
+		}
+		in.signIn = s
+	}
+	return nil
+}
+
+// signInKeys are sign_in's fields, all required.
+var signInKeys = []string{"url", "email", "password"}
+
+// validateSignIn checks the optional sign_in: exactly {url, email,
+// password}, all strings; url as the check's url; email and password
+// non-empty, within their limits and on one line. Its errors name the field,
+// never its value.
+func (in *input) validateSignIn(raw json.RawMessage, readOnly bool) (*signIn, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil || fields == nil {
+		return nil, errors.New(`sign_in must be an object: {"url": ..., "email": ..., "password": ...}`)
+	}
+	for k := range fields {
+		if !slices.Contains(signInKeys, k) {
+			return nil, errors.New("sign_in takes only url, email and password")
+		}
+	}
+	values := map[string]string{}
+	for _, k := range signInKeys {
+		var s *string
+		if v, ok := fields[k]; !ok || json.Unmarshal(v, &s) != nil || s == nil {
+			return nil, fmt.Errorf("sign_in.%s must be a string", k)
+		}
+		values[k] = *s
+	}
+	if err := checkString("sign_in.url", values["url"], false); err != nil {
+		return nil, err
+	}
+	if !in.allowedURL(values["url"]) {
+		// Not quoted: a url with user info could hold the password.
+		return nil, errors.New("sign_in.url must be an https URL on a host in allowed_hosts")
+	}
+	if err := checkCredential("sign_in.email", values["email"], maxEmailChars); err != nil {
+		return nil, err
+	}
+	if err := checkCredential("sign_in.password", values["password"], maxPasswordChars); err != nil {
+		return nil, err
+	}
+	if readOnly {
+		return nil, errors.New("sign_in cannot be used with read_only: a read-only check is of a live site, which has no test users")
+	}
+	return &signIn{URL: values["url"], Email: values["email"], Password: values["password"]}, nil
+}
+
+// lineBreaks are the characters a sign-in credential may not hold
+// (verify-browser/lib.mjs refuses the same ones).
+const lineBreaks = "\n\r\v\f\u0085\u2028\u2029"
+
+func checkCredential(name, v string, max int) error {
+	switch {
+	case v == "":
+		return fmt.Errorf("%s must be a non-empty string", name)
+	case utf8.RuneCountInString(v) > max:
+		return fmt.Errorf("%s is longer than %d characters", name, max)
+	case strings.ContainsAny(v, lineBreaks):
+		return fmt.Errorf("%s must not contain a line break", name)
 	}
 	return nil
 }
