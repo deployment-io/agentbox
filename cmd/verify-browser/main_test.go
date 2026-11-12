@@ -8,6 +8,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -666,4 +667,238 @@ func TestTailBufferReportsACut(t *testing.T) {
 	if got := dropFirstLine("no break"); got != "" {
 		t.Errorf("dropFirstLine = %q", got)
 	}
+}
+
+func TestParseInputScreenshot(t *testing.T) {
+	in, err := parseInput([]byte(validInputJSON))
+	if err != nil || in.Screenshot != nil {
+		t.Fatalf("without screenshot: %v, screenshot = %s — absent must mean false", err, in.Screenshot)
+	}
+	for _, v := range []bool{true, false} {
+		if _, err := parseInput(mutate(t, func(m map[string]any) { m["screenshot"] = v })); err != nil {
+			t.Errorf("screenshot %v: %v", v, err)
+		}
+	}
+	if _, err := parseInput(mutate(t, func(m map[string]any) { m["screenshot"] = true; m["read_only"] = true })); err != nil {
+		t.Errorf("screenshot with read_only: %v", err)
+	}
+	if _, err := parseInput(mutate(t, func(m map[string]any) { m["screenshot"] = true; withSignIn(m) })); err != nil {
+		t.Errorf("screenshot with sign_in: %v", err)
+	}
+	for name, v := range map[string]any{"null": nil, "string": "true", "number": 1, "object": map[string]any{}} {
+		t.Run(name, func(t *testing.T) {
+			_, err := parseInput(mutate(t, func(m map[string]any) { m["screenshot"] = v }))
+			if err == nil || !strings.Contains(err.Error(), "screenshot must be true or false") {
+				t.Fatalf("parseInput: %v, want an error naming screenshot", err)
+			}
+		})
+	}
+}
+
+func TestRunRefusesAnInvalidScreenshot(t *testing.T) {
+	h := newHarness(t, `exit 0`)
+	if err := os.WriteFile(filepath.Join(h.cfg.ioDir, "input.json"), mutate(t, func(m map[string]any) { m["screenshot"] = "true" }), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, r := h.run()
+	wantError(t, code, r, "invalid input", "screenshot")
+}
+
+// testJPEG is the start of a JPEG file: SOI, then an APP0 marker.
+var testJPEG = append([]byte{0xFF, 0xD8, 0xFF, 0xE0}, []byte("rest of the image")...)
+
+// withScreenshot asks for a screenshot.
+func withScreenshot(m map[string]any) { m["screenshot"] = true }
+
+// scriptWithScreenshot is a fake script that writes image (unless nil) to
+// its fourth argument, then result as its result.
+func scriptWithScreenshot(t *testing.T, result string, image []byte) string {
+	t.Helper()
+	script := scriptWriting(t, result)
+	if image == nil {
+		return script
+	}
+	path := filepath.Join(t.TempDir(), "image")
+	if err := os.WriteFile(path, image, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return fmt.Sprintf(`cat %q > "$4"; %s`, path, script)
+}
+
+// newScreenshotHarness is a harness whose input asks for a screenshot, and
+// has sign_in when signIn is true.
+func newScreenshotHarness(t *testing.T, script string, signIn bool) *harness {
+	t.Helper()
+	h := newHarness(t, script)
+	in := mutate(t, func(m map[string]any) {
+		withScreenshot(m)
+		if signIn {
+			withSignIn(m)
+		}
+	})
+	if err := os.WriteFile(filepath.Join(h.cfg.ioDir, "input.json"), in, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return h
+}
+
+// wantIO fails unless /io holds exactly names (sorted).
+func (h *harness) wantIO(names ...string) {
+	h.t.Helper()
+	if got := h.ioEntries(); !slices.Equal(got, names) {
+		h.t.Errorf("/io holds %v, want %v", got, names)
+	}
+}
+
+const capturedResult = `{"schema_version":1,"status":"completed","verdict":"pass","x":"<&> é","n":1.50,"screenshot":{"width":412,"height":839}}`
+
+func TestRunPassesTheScreenshotPath(t *testing.T) {
+	h := newScreenshotHarness(t, `printf '{"schema_version":1,"status":"completed","verdict":"pass","path":"%s"}' "$4" > "$2"`, false)
+	_, r := h.run()
+	want := filepath.Join(h.cfg.ioDir, fmt.Sprintf(".screenshot-%d.tmp.jpg", os.Getpid()))
+	if r["path"] != want {
+		t.Errorf("fourth argument = %v, want %s", r["path"], want)
+	}
+}
+
+func TestRunKeepsTheScreenshot(t *testing.T) {
+	h := newScreenshotHarness(t, scriptWithScreenshot(t, capturedResult, testJPEG), false)
+	code, _ := h.run()
+	if code != 0 {
+		t.Fatalf("exit code = %d", code)
+	}
+	data, err := os.ReadFile(filepath.Join(h.cfg.ioDir, "result.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != capturedResult {
+		t.Errorf("result = %s, want byte-for-byte %s", data, capturedResult)
+	}
+	image, err := os.ReadFile(filepath.Join(h.cfg.ioDir, "screenshot.jpg"))
+	if err != nil || !bytes.Equal(image, testJPEG) {
+		t.Errorf("screenshot.jpg = %q (%v), want the script's image", image, err)
+	}
+	h.wantIO("input.json", "result.json", "screenshot.jpg")
+}
+
+func TestRunKeepsAScreenshotOfExactly1MiB(t *testing.T) {
+	image := append(slices.Clone(testJPEG), make([]byte, maxScreenshotBytes-len(testJPEG))...)
+	h := newScreenshotHarness(t, scriptWithScreenshot(t, capturedResult, image), false)
+	_, r := h.run()
+	if r["screenshot"] == nil || r["screenshot_error"] != nil {
+		t.Fatalf("result = %v, want the screenshot kept", r)
+	}
+	h.wantIO("input.json", "result.json", "screenshot.jpg")
+}
+
+func TestRunKeepsTheScreenshotWithSignIn(t *testing.T) {
+	result := `{"schema_version":1,"status":"completed","verdict":"pass","x":"typed pa\"ss\\<wörd>","screenshot":{"width":1280,"height":800}}`
+	h := newScreenshotHarness(t, scriptWithScreenshot(t, result, testJPEG), true)
+	code, r := h.run()
+	if code != 0 {
+		t.Fatalf("exit code = %d, result %v", code, r)
+	}
+	if r["x"] != "typed <redacted>" {
+		t.Errorf("x = %v, want the password redacted", r["x"])
+	}
+	if s, _ := r["screenshot"].(map[string]any); s["width"] != float64(1280) || s["height"] != float64(800) {
+		t.Errorf("screenshot = %v", r["screenshot"])
+	}
+	h.wantIO("input.json", "result.json", "screenshot.jpg")
+}
+
+func TestRunDropsAScreenshotItCannotKeep(t *testing.T) {
+	tooLarge := append(slices.Clone(testJPEG), make([]byte, maxScreenshotBytes)...)
+	cases := map[string]struct {
+		image []byte
+		want  string
+	}{
+		"too large":  {tooLarge, "too large"},
+		"not a JPEG": {[]byte("\x89PNG\r\n\x1a\n"), "the page could not be captured"},
+		"empty":      {[]byte{}, "the page could not be captured"},
+		"missing":    {nil, "the page could not be captured"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			h := newScreenshotHarness(t, scriptWithScreenshot(t, capturedResult, tc.image), false)
+			code, r := h.run()
+			if code != 0 {
+				t.Fatalf("exit code = %d", code)
+			}
+			if _, ok := r["screenshot"]; ok || r["screenshot_error"] != tc.want {
+				t.Errorf("result = %v, want screenshot_error %q and no screenshot", r, tc.want)
+			}
+			// Without sign_in, every value is kept as the script wrote it.
+			if r["x"] != "<&> é" || r["verdict"] != "pass" {
+				t.Errorf("result = %v, want its other values unchanged", r)
+			}
+			data, _ := os.ReadFile(filepath.Join(h.cfg.ioDir, "result.json"))
+			if bytes.Contains(data, []byte(redacted)) || !bytes.Contains(data, []byte(`"n":1.50`)) || !bytes.Contains(data, []byte(`"<&> é"`)) {
+				t.Errorf("result = %s, want strings and numbers as the script wrote them", data)
+			}
+			h.wantIO("input.json", "result.json")
+		})
+	}
+}
+
+func TestRunDropsAScreenshotItCannotKeepWithSignIn(t *testing.T) {
+	result := `{"schema_version":1,"status":"completed","verdict":"pass","x":"typed pa\"ss\\<wörd>","n":1.50,"screenshot":{"width":1280,"height":800}}`
+	h := newScreenshotHarness(t, scriptWithScreenshot(t, result, []byte("not a jpeg")), true)
+	code, r := h.run()
+	if code != 0 {
+		t.Fatalf("exit code = %d, result %v", code, r)
+	}
+	if r["x"] != "typed <redacted>" || r["screenshot_error"] != "the page could not be captured" || r["screenshot"] != nil {
+		t.Errorf("result = %v, want it redacted with screenshot_error", r)
+	}
+	data, _ := os.ReadFile(filepath.Join(h.cfg.ioDir, "result.json"))
+	if !bytes.Contains(data, []byte(`"n":1.50`)) {
+		t.Errorf("result = %s, want numbers as written", data)
+	}
+	h.wantIO("input.json", "result.json")
+}
+
+func TestRunLeavesNoScreenshotWithoutTheKey(t *testing.T) {
+	// The script wrote an image but its result does not say so: the result
+	// is handed on as it is and the image dropped.
+	for name, result := range map[string]string{
+		"completed":        `{"schema_version":1,"status":"completed","verdict":"fail"}`,
+		"screenshot_error": `{"schema_version":1,"status":"completed","verdict":"fail","screenshot_error":"not enough time left"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newScreenshotHarness(t, scriptWithScreenshot(t, result, testJPEG), false)
+			h.run()
+			data, _ := os.ReadFile(filepath.Join(h.cfg.ioDir, "result.json"))
+			if string(data) != result {
+				t.Errorf("result = %s, want byte-for-byte %s", data, result)
+			}
+			h.wantIO("input.json", "result.json")
+		})
+	}
+}
+
+func TestRunErrorResultsLeaveNoScreenshot(t *testing.T) {
+	cases := map[string]string{
+		"script error result": scriptWithScreenshot(t, `{"schema_version":1,"status":"error","error":"boom"}`, testJPEG),
+		"no result":           scriptWithScreenshot(t, `not json`, testJPEG),
+		"script crashed":      `printf '\377\330\377' > "$4"; exit 3`,
+	}
+	for name, script := range cases {
+		t.Run(name, func(t *testing.T) {
+			h := newScreenshotHarness(t, script, false)
+			code, r := h.run()
+			wantError(t, code, r)
+			if _, ok := r["screenshot"]; ok {
+				t.Errorf("result = %v, want no screenshot", r)
+			}
+			h.wantIO("input.json", "result.json")
+		})
+	}
+	t.Run("timeout", func(t *testing.T) {
+		h := newScreenshotHarness(t, `printf '\377\330\377' > "$4"; trap '' TERM; sleep 2`, false)
+		h.cfg.timeout = 300 * time.Millisecond
+		code, r := h.run()
+		wantError(t, code, r, "timeout_ms")
+		h.wantIO("input.json", "result.json")
+	})
 }

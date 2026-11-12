@@ -5,6 +5,7 @@ import {
   LIMITS,
   READ_ONLY_METHODS,
   RefusedCookies,
+  SCREENSHOT_ERRORS,
   SIGN_IN_NOT_RUN,
   SIGN_IN_REASONS,
   abortedByNavigation,
@@ -20,6 +21,7 @@ import {
   hasVisiblePasswordField,
   isAllowedUrl,
   isReadOnlyMethod,
+  jpegSize,
   normalizeInput,
   oneLine,
   normalizeViewport,
@@ -224,6 +226,7 @@ describe('viewport', () => {
       timeoutMs: 30000,
       readOnly: false,
       signIn: null,
+      screenshot: false,
     });
     assert.deepEqual(options(undefined), {
       viewport: { width: 1280, height: 720 },
@@ -1058,5 +1061,77 @@ describe('redactSecret', () => {
     assert.equal(oneLine(`failed: ${pw}`), 'failed: <redacted>');
     const failed = firstPartyFailure({ url: `https://preview-abc.example.net/${'p'.repeat(CAPS.urlChars - 40)}?pw=${encodeURIComponent(pw)}`, status: 500 }, HOSTS);
     assert.ok(!failed.url.includes('hunt'));
+  });
+});
+
+describe('screenshot', () => {
+  const signIn = { url: 'https://preview-abc.example.net/login', email: 'qa@example.com', password: 'pw' };
+  it('defaults to false', () => {
+    assert.equal(normalizeInput(validInput()).screenshot, false);
+  });
+  it('accepts true and false, with read_only and with sign_in', () => {
+    assert.equal(normalizeInput(validInput({ screenshot: true })).screenshot, true);
+    assert.equal(normalizeInput(validInput({ screenshot: false })).screenshot, false);
+    assert.equal(normalizeInput(validInput({ screenshot: true, read_only: true })).screenshot, true);
+    assert.equal(normalizeInput(validInput({ screenshot: true, sign_in: signIn })).screenshot, true);
+  });
+  for (const v of [null, 'true', 1, 0, {}, []]) {
+    it(`rejects ${JSON.stringify(v)}`, () => {
+      assert.throws(() => normalizeInput(validInput({ screenshot: v })), /^Error: screenshot must be true or false/);
+    });
+  }
+  it('adds screenshot with the image size when captured', () => {
+    const r = buildResult({ httpStatus: 200, steps: [], assertions: [], screenshot: { width: 412, height: 839 } });
+    assert.deepEqual(r.screenshot, { width: 412, height: 839 });
+    assert.equal('screenshot_error' in r, false);
+    assert.equal(r.verdict, 'pass');
+  });
+  for (const error of [SCREENSHOT_ERRORS.noTime, SCREENSHOT_ERRORS.captureFailed]) {
+    it(`adds screenshot_error "${error}" without failing the check`, () => {
+      const r = buildResult({ httpStatus: 200, steps: [], assertions: [], screenshot: { error } });
+      assert.equal(r.screenshot_error, error);
+      assert.equal('screenshot' in r, false);
+      assert.equal(r.verdict, 'pass');
+    });
+  }
+  it('has the documented error texts', () => {
+    assert.equal(SCREENSHOT_ERRORS.noTime, 'not enough time left');
+    assert.equal(SCREENSHOT_ERRORS.captureFailed, 'the page could not be captured');
+  });
+  it('adds neither key when not asked', () => {
+    const r = buildResult({ httpStatus: 200 });
+    assert.equal('screenshot' in r, false);
+    assert.equal('screenshot_error' in r, false);
+    const e = errorResult('boom');
+    assert.equal('screenshot' in e, false);
+    assert.equal('screenshot_error' in e, false);
+  });
+});
+
+describe('jpegSize', () => {
+  // jpeg builds a JPEG's header: SOI, an APP0 segment, a DQT segment, then
+  // a start-of-frame segment with the given marker and size.
+  function jpeg(sof, width, height, { fill = false } = {}) {
+    const app0 = [0xff, 0xe0, 0x00, 0x10, ...Buffer.from('JFIF\0'), 1, 1, 0, 0, 1, 0, 1, 0, 0];
+    const dqt = [0xff, 0xdb, 0x00, 0x04, 0x00, 0x01];
+    const frame = [0xff, sof, 0x00, 0x11, 8, height >> 8, height & 0xff, width >> 8, width & 0xff, 3];
+    return Buffer.from([0xff, 0xd8, ...app0, ...(fill ? [0xff] : []), ...dqt, ...frame, 0xff, 0xda, 0x00, 0x02, 0xff, 0xd9]);
+  }
+  it('reads a baseline and a progressive frame', () => {
+    assert.deepEqual(jpegSize(jpeg(0xc0, 412, 839)), { width: 412, height: 839 });
+    assert.deepEqual(jpegSize(jpeg(0xc2, 1280, 800)), { width: 1280, height: 800 });
+    assert.deepEqual(jpegSize(new Uint8Array(jpeg(0xc0, 2560, 1600))), { width: 2560, height: 1600 });
+  });
+  it('skips fill bytes and the DHT segment', () => {
+    assert.deepEqual(jpegSize(jpeg(0xc0, 300, 500, { fill: true })), { width: 300, height: 500 });
+    assert.equal(jpegSize(jpeg(0xc4, 300, 500)), null);
+  });
+  it('is null for what it cannot read', () => {
+    assert.equal(jpegSize(undefined), null);
+    assert.equal(jpegSize(Buffer.alloc(0)), null);
+    assert.equal(jpegSize(Buffer.from('\x89PNG\r\n\x1a\n', 'latin1')), null);
+    assert.equal(jpegSize(jpeg(0xc0, 0, 500)), null);
+    assert.equal(jpegSize(jpeg(0xc0, 412, 839).subarray(0, 30)), null);
+    assert.equal(jpegSize(Buffer.from([0xff, 0xd8, 0xff, 0xd9])), null);
   });
 });

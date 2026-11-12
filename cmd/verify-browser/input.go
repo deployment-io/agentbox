@@ -49,6 +49,8 @@ type input struct {
 	// ReadOnly is kept raw for the same reason: only true or false is a
 	// read_only, and a null or a string must not quietly mean false.
 	ReadOnly json.RawMessage `json:"read_only,omitempty"`
+	// Screenshot is kept raw for the same reason as ReadOnly.
+	Screenshot json.RawMessage `json:"screenshot,omitempty"`
 	// SignIn is kept raw so that an unknown key, a missing field or a null
 	// is reported; validate fills signIn from it.
 	SignIn json.RawMessage `json:"sign_in,omitempty"`
@@ -154,11 +156,12 @@ func (in *input) validate() error {
 			return fmt.Errorf("assertions[%d]: %w", i, err)
 		}
 	}
-	readOnly := false
-	if in.ReadOnly != nil {
-		if string(in.ReadOnly) == "null" || json.Unmarshal(in.ReadOnly, &readOnly) != nil {
-			return fmt.Errorf("read_only must be true or false, got %s", in.ReadOnly)
-		}
+	readOnly, err := optionalBool("read_only", in.ReadOnly)
+	if err != nil {
+		return err
+	}
+	if _, err := optionalBool("screenshot", in.Screenshot); err != nil {
+		return err
 	}
 	if in.Viewport != nil {
 		if err := validateViewport(in.Viewport); err != nil {
@@ -173,6 +176,16 @@ func (in *input) validate() error {
 		in.signIn = s
 	}
 	return nil
+}
+
+// optionalBool decodes an optional boolean field: absent is false, and
+// anything but true or false (a null, a string, a number) is an error.
+func optionalBool(name string, raw json.RawMessage) (bool, error) {
+	v := false
+	if raw != nil && (string(raw) == "null" || json.Unmarshal(raw, &v) != nil) {
+		return false, fmt.Errorf("%s must be true or false, got %s", name, raw)
+	}
+	return v, nil
 }
 
 // signInKeys are sign_in's fields, all required.
