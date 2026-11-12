@@ -132,14 +132,45 @@ func hasPreviews(cfg *config.Config) bool {
 	return !production(cfg) && len(cfg.QAPreviews) > 0
 }
 
-// browserRoles says a QA_PREVIEWS run has a deployed site preview with roles
-// to sign in as in the browser (verify_preview_rendered's as).
+// browserRoles says a QA_PREVIEWS run has a deployed preview — a site, or a
+// backend that serves pages — with roles to sign in as in the browser
+// (verify_preview_rendered's as).
 func browserRoles(cfg *config.Config) bool {
 	if !hasPreviews(cfg) {
 		return false
 	}
 	for _, p := range cfg.QAPreviews {
-		if p.Kind == config.QAPreviewSite && p.Error == "" && len(p.BrowserRoles) > 0 {
+		if p.Error == "" && len(p.BrowserRoles) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// backendBrowserRoles says a QA_PREVIEWS run has a deployed backend preview
+// with roles to sign in as in the browser on its own pages. Such a run's
+// browser sign-in rule speaks of previews, not only sites.
+func backendBrowserRoles(cfg *config.Config) bool {
+	if !hasPreviews(cfg) {
+		return false
+	}
+	for _, p := range cfg.QAPreviews {
+		if p.Kind == config.QAPreviewBackend && p.URL != "" && len(p.BrowserRoles) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// servesPages says a QA_PREVIEWS run has a deployed backend preview whose
+// front page answered with a web page: its pages are checked in the browser
+// (pagesRule), and a smoke check loads it as it does a site.
+func servesPages(cfg *config.Config) bool {
+	if !hasPreviews(cfg) {
+		return false
+	}
+	for _, p := range cfg.QAPreviews {
+		if p.Kind == config.QAPreviewBackend && p.URL != "" && p.ServesPages {
 			return true
 		}
 	}
@@ -219,6 +250,11 @@ func Build(cfg *config.Config) string {
 		for i, c := range criteria {
 			fmt.Fprintf(&b, "%d. %s\n", i+1, c)
 		}
+	} else if servesPages(cfg) {
+		b.WriteString(`
+[Acceptance criteria]
+This Task has no acceptance criteria. Run a SMOKE CHECK instead: each site preview, and each backend preview marked "serves pages", loads at its URL with no page errors and no failed first-party requests; each other backend preview answers its health check. A backend preview not marked "serves pages" is an API: its health check is its whole smoke check. Don't open its URL or any other path of it, in the browser or with a request, and what another path of it answers (such as a 404 at /) is not a finding. Say in your summary that this was a smoke check.
+`)
 	} else if backendSmoke(cfg) {
 		b.WriteString(`
 [Acceptance criteria]
@@ -311,10 +347,15 @@ You have no source code and no diff. All you have is the previews listed below, 
 		case p.Error != "":
 			fmt.Fprintf(b, "- %s (%s): failed to deploy: %s\n", p.Repository, p.Kind, p.Error)
 		case p.Kind == config.QAPreviewBackend:
-			fmt.Fprintf(b, "- %s (backend): %s (health check: %s)\n", p.Repository, p.URL, p.HealthURL)
+			kind := "backend"
+			if p.ServesPages {
+				kind = "backend, serves pages"
+			}
+			fmt.Fprintf(b, "- %s (%s): %s (health check: %s)\n", p.Repository, kind, p.URL, p.HealthURL)
 			if apiSignInTool(cfg) {
 				writeRoles(b, p.Roles)
 			}
+			writeBrowserRoles(b, p.BrowserRoles)
 		default:
 			fmt.Fprintf(b, "- %s (site): %s", p.Repository, p.URL)
 			if len(p.ConnectedBackends) > 0 {
@@ -340,14 +381,25 @@ You have no source code and no diff. All you have is the previews listed below, 
 	case kinds.backend:
 		b.WriteString(getRule(false, deployedBackends(cfg) > 1) + "\n")
 	}
+	if servesPages(cfg) {
+		b.WriteString(pagesRule() + "\n")
+	}
 	if browserRoles(cfg) {
-		b.WriteString(browserSignInRule() + "\n")
+		b.WriteString(browserSignInRule(backendBrowserRoles(cfg)) + "\n")
 	}
 }
 
-// writeBrowserRoles lists a site preview's roles to sign in as in the browser
-// under its entry, each with the backend it is a role of. A description is
-// put on one line.
+// pagesRule is the paragraph of a run with a backend preview that serves
+// pages: a criterion about its pages is checked in the browser, as a site
+// preview's are, and one about its API stays with the API rule or GET rule
+// before it.
+func pagesRule() string {
+	return fmt.Sprintf(`A backend preview marked "serves pages" is also a web app: its front page answered with a web page. A criterion about its pages — what a page shows, a form, a link, a flow through its pages — is checked in the browser with %s on its URL, as for a site preview's pages; a criterion about how its API answers a request stays with the rule above.`, ToolRendered)
+}
+
+// writeBrowserRoles lists a preview's roles to sign in as in the browser
+// under its entry (a site's, or a backend's that serves pages), each with the
+// backend it is a role of. A description is put on one line.
 func writeBrowserRoles(b *strings.Builder, roles []config.QABrowserRole) {
 	if len(roles) == 0 {
 		return
@@ -362,12 +414,17 @@ func writeBrowserRoles(b *strings.Builder, roles []config.QABrowserRole) {
 	}
 }
 
-// browserSignInRule is the paragraph of a run whose site previews have roles
-// to sign in as in the browser: a criterion about a signed-in page is checked
+// browserSignInRule is the paragraph of a run whose previews have roles to
+// sign in as in the browser: a criterion about a signed-in page is checked
 // with verify_preview_rendered's as, and one whose sign-in doesn't work is not
-// checked (ReasonCookieRefused or ReasonCouldntSignIn), never failed.
-func browserSignInRule() string {
-	return fmt.Sprintf(`A criterion about a site preview's pages that needs a signed-in user is checked as one of the roles listed under that site to sign in as in the browser: the one the criterion names, else the one whose description fits. Call %[1]s with as = that role, and backend = the backend shown beside it when the site lists that role for more than one backend; deployment.io signs in on the app's own sign-in page with the role's email and password before the check, and you never see them. Pass the site's front page (its URL with path /) as url and reach the page the criterion is about by clicking, not with goto: the check starts on the page the app shows after signing in, and a full page load (a goto, or any other url) can sign the browser out on a preview. The result's sign_in says how the sign-in went. If sign_in.signed_in is false, or sign_in.signed_out_on_load is true, try once more; if it still doesn't work, the criterion is not checked — with reason '%[2]s' when sign_in.refused_cookies is not empty, else '%[3]s' — never failed. sign_in.failed_requests and sign_in.refused_cookies are never findings or observations: they come from signing in and from how previews are hosted, not from the change. A criterion that needs a signed-in page of a site with no roles to sign in as in the browser is not checked, with reason 'needs a login'. "<redacted>" in a result stands for a secret: never try to recover it or put it in a step.`, ToolRendered, ReasonCookieRefused, ReasonCouldntSignIn)
+// checked (ReasonCookieRefused or ReasonCouldntSignIn), never failed. It
+// speaks of site previews unless a backend preview has such roles (backends).
+func browserSignInRule(backends bool) string {
+	pages, preview := "a site preview's", "site"
+	if backends {
+		pages, preview = "a preview's", "preview"
+	}
+	return fmt.Sprintf(`A criterion about %[4]s pages that needs a signed-in user is checked as one of the roles listed under that %[5]s to sign in as in the browser: the one the criterion names, else the one whose description fits. Call %[1]s with as = that role, and backend = the backend shown beside it when the %[5]s lists that role for more than one backend; deployment.io signs in on the app's own sign-in page with the role's email and password before the check, and you never see them. Pass the %[5]s's front page (its URL with path /) as url and reach the page the criterion is about by clicking, not with goto: the check starts on the page the app shows after signing in, and a full page load (a goto, or any other url) can sign the browser out on a preview. The result's sign_in says how the sign-in went. If sign_in.signed_in is false, or sign_in.signed_out_on_load is true, try once more; if it still doesn't work, the criterion is not checked — with reason '%[2]s' when sign_in.refused_cookies is not empty, else '%[3]s' — never failed. sign_in.failed_requests and sign_in.refused_cookies are never findings or observations: they come from signing in and from how previews are hosted, not from the change. A criterion that needs a signed-in page of a %[5]s with no roles to sign in as in the browser is not checked, with reason 'needs a login'. "<redacted>" in a result stands for a secret: never try to recover it or put it in a step.`, ToolRendered, ReasonCookieRefused, ReasonCouldntSignIn, pages, preview)
 }
 
 // writeRoles lists a backend preview's roles under its entry, in a run with
@@ -452,7 +509,7 @@ func writePreviewsSteps(b *strings.Builder, cfg *config.Config) {
 		steps = append(steps, backendHealthStep())
 	}
 	if apiRequestTool(cfg) {
-		steps = append(steps, apiCriterionStep(), pageCriterionStep())
+		steps = append(steps, apiCriterionStep(), pageCriterionStep(servesPages(cfg)))
 	} else {
 		steps = append(steps, criterionStep())
 	}
@@ -492,8 +549,12 @@ func criterionStep() string {
 }
 
 // pageCriterionStep is criterionStep in a run with verify_api_request: the
-// browser is for the criteria apiCriterionStep leaves (a site preview's pages).
-func pageCriterionStep() string {
+// browser is for the criteria apiCriterionStep leaves (a site preview's pages,
+// and with a backend preview that serves pages (backendPages), its pages).
+func pageCriterionStep(backendPages bool) string {
+	if backendPages {
+		return browserCriterionStep(`Check each other criterion — about the pages of a site preview or of a backend preview marked "serves pages" — with`)
+	}
 	return browserCriterionStep("Check each other criterion — about the pages of a site preview — with")
 }
 
@@ -557,7 +618,10 @@ func Instruction(cfg *config.Config) string {
 	criteriaRule := `- "criteria" has one entry per acceptance criterion: "index" is its number in the list, "state" is "passed", "failed" or "not_checked", and "reason" says briefly what you saw.`
 	if len(criteria) == 0 {
 		criteriaRule = `- There are no acceptance criteria, so "criteria" is []. A smoke check that finds a page error or a failed first-party request reports it as a finding with location = the preview URL path.`
-		if backendSmoke(cfg) {
+		switch {
+		case servesPages(cfg):
+			criteriaRule = `- There are no acceptance criteria, so "criteria" is []. A smoke check that finds a page error or a failed first-party request on a site preview, or on a backend preview marked "serves pages", reports it as a finding with location = the preview URL path. The smoke check of a backend preview not marked "serves pages" is its health check alone: what any other path of it answers is neither a finding nor an observation.`
+		case backendSmoke(cfg):
 			criteriaRule = `- There are no acceptance criteria, so "criteria" is []. A smoke check that finds a page error or a failed first-party request on a site preview reports it as a finding with location = the preview URL path. A backend preview's smoke check is its health check alone: what any other path of it answers is neither a finding nor an observation.`
 		}
 	}
