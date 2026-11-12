@@ -166,6 +166,14 @@ func deployedBackends(cfg *config.Config) int {
 	return n
 }
 
+// backendSmoke says a run without acceptance criteria smoke-checks at least
+// one backend preview: a preview run with backends from QA_BACKENDS or
+// QA_PREVIEWS, deployed or not. A backend preview is an API, so its smoke
+// check is its health check alone.
+func backendSmoke(cfg *config.Config) bool {
+	return !production(cfg) && (len(cfg.QABackends) > 0 || kindsOf(cfg.QAPreviews).backend)
+}
+
 func production(cfg *config.Config) bool {
 	return cfg.QATarget == config.QATargetProduction
 }
@@ -192,6 +200,11 @@ func Build(cfg *config.Config) string {
 		for i, c := range criteria {
 			fmt.Fprintf(&b, "%d. %s\n", i+1, c)
 		}
+	} else if backendSmoke(cfg) {
+		b.WriteString(`
+[Acceptance criteria]
+This Task has no acceptance criteria. Run a SMOKE CHECK instead: each site preview loads with no page errors and no failed first-party requests, and each backend preview answers its health check. A backend preview is an API, not a site: its health check is its whole smoke check. Don't open a backend preview's URL or any other path of it, in the browser or with a request, and what another path of it answers (such as a 404 at /) is not a finding. Say in your summary that this was a smoke check.
+`)
 	} else {
 		b.WriteString(`
 [Acceptance criteria]
@@ -496,6 +509,9 @@ func Instruction(cfg *config.Config) string {
 	criteriaRule := `- "criteria" has one entry per acceptance criterion: "index" is its number in the list, "state" is "passed", "failed" or "not_checked", and "reason" says briefly what you saw.`
 	if len(criteria) == 0 {
 		criteriaRule = `- There are no acceptance criteria, so "criteria" is []. A smoke check that finds a page error or a failed first-party request reports it as a finding with location = the preview URL path.`
+		if backendSmoke(cfg) {
+			criteriaRule = `- There are no acceptance criteria, so "criteria" is []. A smoke check that finds a page error or a failed first-party request on a site preview reports it as a finding with location = the preview URL path. A backend preview's smoke check is its health check alone: what any other path of it answers is neither a finding nor an observation.`
+		}
 	}
 	notChecked := `it needs a login, it is not observable on a static preview (an email, a webhook, a backend), you couldn't find the page, or the preview failed`
 	where := "preview"
