@@ -56,3 +56,41 @@ func TestJqEntryStillCollapsesOnVerifiedReadOnlyMounts(t *testing.T) {
 		t.Errorf("reviewAllowedTools(false) = %v, want the read-only list %v", got, readOnlyAllowedTools)
 	}
 }
+
+// A session's working directory is not a repository and plain git cannot be
+// pointed at one, so repo-git is the only way a read-only session reads
+// history — and the prompt has to say so, word for word, only when read-only.
+func TestReadOnlySessionGetsRepoGit(t *testing.T) {
+	if !slices.Contains(readOnlyAllowedTools, "Bash(agentbox repo-git *)") {
+		t.Errorf("the read-only allowlist has no repo-git entry: %v", readOnlyAllowedTools)
+	}
+	for _, entry := range []string{"Bash(git log *)", "Bash(git diff *)", "Bash(git show *)", "Bash(git status *)", "Bash(git blame *)"} {
+		if !slices.Contains(readOnlyAllowedTools, entry) {
+			t.Errorf("the read-only allowlist lost %s", entry)
+		}
+	}
+	d := &Driver{}
+	args := d.BuildInteractiveArgs(&config.Config{Mode: config.ModeInteractive, ReadOnly: true, AppendSystemPrompt: "base"})
+	if !slices.Contains(args, "Bash(agentbox repo-git *)") {
+		t.Errorf("a read-only session was not given repo-git: %v", args)
+	}
+	if v, _ := argValue(args, "--append-system-prompt"); v != "base\n\n"+readOnlyGitPrompt {
+		t.Errorf("--append-system-prompt = %q", v)
+	}
+	args = d.BuildInteractiveArgs(&config.Config{Mode: config.ModeInteractive, ReadOnly: true})
+	if v, _ := argValue(args, "--append-system-prompt"); v != readOnlyGitPrompt {
+		t.Errorf("empty AppendSystemPrompt: --append-system-prompt = %q", v)
+	}
+	if !strings.HasPrefix(readOnlyGitPrompt, "Git: a plain git command is refused here") ||
+		!strings.HasSuffix(readOnlyGitPrompt, "work with what you can run.") {
+		t.Errorf("the paragraph changed: %q", readOnlyGitPrompt)
+	}
+
+	args = d.BuildInteractiveArgs(&config.Config{Mode: config.ModeInteractive, AppendSystemPrompt: "base"})
+	if v, _ := argValue(args, "--append-system-prompt"); v != "base" {
+		t.Errorf("a non-read-only session's prompt changed: %q", v)
+	}
+	if args := d.BuildInteractiveArgs(&config.Config{Mode: config.ModeInteractive}); hasArg(args, "--append-system-prompt") {
+		t.Errorf("a non-read-only session without a prompt got one: %v", args)
+	}
+}

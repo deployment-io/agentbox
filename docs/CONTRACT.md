@@ -54,7 +54,7 @@ is batch-only in v1 (no interactive wire yet); use `AGENT_MODE=batch`.
 |---|---|
 | `AGENT_MODE` | `batch` (default) or `interactive`. |
 | `SESSION_ID` | Stable session id forwarded as `claude --session-id` (must be a valid UUID) so the transcript persists and can be resumed after a container restart. Optional but recommended. |
-| `READ_ONLY` | `1` / `true` / `yes` restricts the agent to read-only investigation. **claude-code**: a tool allowlist (`Read`, `Grep`, `Glob`, safe read-only `Bash(...)` patterns) with `--dangerously-skip-permissions` omitted so the allowlist is enforced. **codex**: the app-server read-only sandbox with `approvalPolicy: never`. Default: off. |
+| `READ_ONLY` | `1` / `true` / `yes` restricts the agent to read-only investigation. **claude-code**: a tool allowlist (`Read`, `Grep`, `Glob`, safe read-only `Bash(...)` patterns, and [`agentbox repo-git`](#repo-git) for git) with `--dangerously-skip-permissions` omitted so the allowlist is enforced. **codex**: the app-server read-only sandbox with `approvalPolicy: never`. Default: off. |
 | `MAX_BUDGET_USD` | Cap total spend for the session (`claude --max-budget-usd`); the agent self-exits when reached. Default: uncapped. |
 | `APPEND_SYSTEM_PROMPT_FILE` | Path to a file whose contents are appended to the agent's system prompt. **claude-code**: passed inline via `--append-system-prompt` (the CLI has no `-file` variant). **codex**: prepended to the first user turn (the app-server has no separate system-prompt channel). |
 
@@ -103,6 +103,36 @@ same turn) or until its repair turn has ended. A turn whose spec reads cleanly
 The session ends when the agent exits (e.g. `MAX_BUDGET_USD` reached), the
 container receives SIGTERM (graceful: stdin is closed, then SIGTERM with a
 10s grace), or `NO_ACTIVITY_TIMEOUT` elapses with no agent output.
+
+<a id="repo-git"></a>**`agentbox repo-git`** (Added in 1.9.45). A read-only
+claude-code session works in `$WORK_DIR`, which isn't a repository, and both
+`cd <repo> && git …` and `git -C <repo> …` are refused there, so the
+allowlist carries `Bash(agentbox repo-git *)` instead:
+
+    agentbox repo-git <repository directory> <log|diff|show|blame|status> [arguments…]
+
+The repository directory is relative to `$WORK_DIR` (or absolute inside it),
+e.g. `0-acme/web`. It must stay inside `$WORK_DIR`, no component of it may be a
+symbolic link, and its `.git` must be a directory (not a symbolic link, not a
+submodule's `.git` file). Only the five subcommands above run; `--output`,
+`--ext-diff` and `--textconv` (or any abbreviation of them, `--text` aside) are
+refused wherever they appear. Git runs as `/usr/bin/git` under an environment
+built from scratch, with hooks, fsmonitor, the pager, external diff programs,
+textconv and every transport (`protocol.allow=never`) switched off — no fetch,
+no network — and only on a repository whose configuration holds nothing beyond
+what a runner clone writes (`core.*` basics, `remote.<name>.url`/`fetch`,
+`branch.<name>.remote`/`merge`, `submodule.<name>.url`/`active`/`path`/`branch`,
+`extensions.objectformat`), from the repository's own `.git/config` only. The
+same holds for every populated submodule (status and diff look into them)
+and every submodule git directory under `.git/modules`, populated or not
+(`--submodule=diff` opens it), which may also have `core.worktree`; a symbolic
+link on a submodule's path or under `.git/modules` is refused. Standard input is passed to git (`log --stdin`). A
+refusal is one `[repo-git] <reason>` line on stderr and exit code 2; otherwise
+the output and exit code are git's own (no agentbox banner). A read-only
+session's `--append-system-prompt` gets a paragraph after
+`APPEND_SYSTEM_PROMPT_FILE`'s contents saying how to run git this way (compare
+with a base branch as `origin/<branch>`) and never to ask the person to approve
+a command. Not wired for codex or opencode, whose sessions run git directly.
 
 ### Review mode
 

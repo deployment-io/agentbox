@@ -19,6 +19,7 @@ import (
 	"github.com/deployment-io/agentbox/internal/config"
 	"github.com/deployment-io/agentbox/internal/interactive"
 	"github.com/deployment-io/agentbox/internal/proxy"
+	"github.com/deployment-io/agentbox/internal/repogit"
 	"github.com/deployment-io/agentbox/internal/result"
 	"github.com/deployment-io/agentbox/internal/review"
 	"github.com/deployment-io/agentbox/internal/signals"
@@ -46,6 +47,16 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "mcp-bridge" {
 		runMCPBridge()
 		return
+	}
+	// repo-git runs a read-only git subcommand for a read-only session and
+	// prints only git's own output (or one refusal line) — no banner, no
+	// config loading, no agent.
+	if len(os.Args) > 1 && os.Args[1] == "repo-git" {
+		workDir := os.Getenv("WORK_DIR")
+		if workDir == "" {
+			workDir = "/work"
+		}
+		os.Exit(repogit.Main(os.Args[2:], workDir, os.Stdin, os.Stdout, os.Stderr))
 	}
 	fmt.Fprintf(os.Stderr, "[agentbox] agentbox %s\n", version)
 	if len(os.Args) > 1 && os.Args[1] == "vendor" {
