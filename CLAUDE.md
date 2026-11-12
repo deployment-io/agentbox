@@ -55,6 +55,7 @@ internal/
 │   ├── driver.go      #   claude.Driver + Ensure/BuildArgs/DetectVersion
 │   └── parser.go      #   Stream-json OutputParser
 ├── config/            # Env var loading + validation
+├── repogit/           # `agentbox repo-git`: read-only git for read-only sessions
 ├── result/            # /result.json schema + writer
 ├── verify/            # Baseline replay of a failed verify (agent-agnostic)
 └── signals/           # SIGTERM/SIGINT → context cancellation

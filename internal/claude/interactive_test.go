@@ -53,7 +53,7 @@ func TestBuildInteractiveArgs_ReadOnly(t *testing.T) {
 	if v, _ := argValue(args, "--session-id"); v != "sess-123" {
 		t.Errorf("--session-id = %q", v)
 	}
-	if v, _ := argValue(args, "--append-system-prompt"); v != "be read only" {
+	if v, _ := argValue(args, "--append-system-prompt"); v != "be read only\n\n"+readOnlyGitPrompt {
 		t.Errorf("--append-system-prompt = %q", v)
 	}
 	if v, _ := argValue(args, "--model"); v != "claude-sonnet-4-6" {

@@ -32,6 +32,13 @@ var readOnlyAllowedTools = []string{
 	"Bash(git show *)",
 	"Bash(git status *)",
 	"Bash(git blame *)",
+	// A session's working directory is /work, not a repository, and both
+	// `cd <repo> && git …` and `git -C <repo> …` are refused there, so the
+	// git entries above never match in a session. repo-git runs log, diff,
+	// show, blame and status on a repository under the work directory with
+	// nothing that writes a file, runs a program or uses the network
+	// (internal/repogit).
+	"Bash(agentbox repo-git *)",
 	"Bash(ls *)",
 	"Bash(cat *)",
 	// jq is how a session reads the pre-built context under /work/context,
@@ -91,6 +98,10 @@ func reviewAllowedTools(readOnlyMounts bool) []string {
 	return out
 }
 
+// readOnlyGitPrompt is appended to a read-only session's system prompt: how
+// to run git there, since a plain git command is refused.
+const readOnlyGitPrompt = "Git: a plain git command is refused here (your working directory isn't a repository, and changing into one before git needs an approval nobody can give). Run git through `agentbox repo-git <repository directory> <log|diff|show|blame|status> [arguments]`, where the repository directory is the directory under your working directory that holds the repository (e.g. `agentbox repo-git 0-deployment-io/agentbox log --oneline -20`). Compare with a base branch as origin/<branch> (e.g. `diff --stat origin/main...HEAD`). It reads only what is already checked out: no fetch, no network. Never ask the person to approve a command — they can't, and a refused command stays refused; work with what you can run."
+
 // BuildInteractiveArgs builds the argv for a long-lived bidirectional
 // session: user turns arrive as line-delimited stream-json on stdin and
 // the agent emits its events (including token-level partials) as
@@ -106,8 +117,15 @@ func (d *Driver) BuildInteractiveArgs(cfg *config.Config) []string {
 	if cfg.SessionID != "" {
 		args = append(args, "--session-id", cfg.SessionID)
 	}
-	if cfg.AppendSystemPrompt != "" {
-		args = append(args, "--append-system-prompt", cfg.AppendSystemPrompt)
+	appendPrompt := cfg.AppendSystemPrompt
+	if cfg.ReadOnly {
+		if appendPrompt != "" {
+			appendPrompt += "\n\n"
+		}
+		appendPrompt += readOnlyGitPrompt
+	}
+	if appendPrompt != "" {
+		args = append(args, "--append-system-prompt", appendPrompt)
 	}
 	if cfg.MaxBudgetUSD != "" {
 		args = append(args, "--max-budget-usd", cfg.MaxBudgetUSD)
