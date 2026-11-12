@@ -569,6 +569,8 @@ const (
 // deployed site's ConnectedBackends are the backend entries' repositories it
 // was built to call; its UnconnectedBackends are the run's other backends.
 // A deployed backend's Roles are the roles deployment.io made a test user for.
+// A deployed site's BrowserRoles are the roles of its connected backends QA
+// can sign in as in the browser (verify_preview_rendered's as).
 type QAPreview struct {
 	Repository          string
 	Kind                string
@@ -578,6 +580,7 @@ type QAPreview struct {
 	ConnectedBackends   []string
 	UnconnectedBackends []string
 	Roles               []QARole
+	BrowserRoles        []QABrowserRole
 }
 
 // QARole is one role of a QA_PREVIEWS backend entry: a test user QA can sign
@@ -587,7 +590,17 @@ type QARole struct {
 	Description string
 }
 
-// The limits on a QA_PREVIEWS backend entry's roles.
+// QABrowserRole is one role of a QA_PREVIEWS site entry's browser_roles: a
+// test user of Backend (one of the site's connected backends) QA can sign in
+// as on the site's pages, and what the role is for (may be empty).
+type QABrowserRole struct {
+	Name        string
+	Description string
+	Backend     string
+}
+
+// The limits on a QA_PREVIEWS backend entry's roles (and on a site entry's
+// browser roles, per backend).
 const (
 	maxQARoles                 = 10
 	maxQARoleDescriptionLength = 200
@@ -728,7 +741,8 @@ func parseQABackends(raw string) ([]QABackend, error) {
 // directory inside /work, kind is "site" or "backend", each URL follows
 // QA_URLS' rules, no (repository, kind) appears twice, and every backend a
 // site names is a backend entry of the array, in at most one of its lists. A
-// backend entry with a url may have "roles" (parseQARoles).
+// backend entry with a url may have "roles" (checkQARoles), and a site entry
+// with a url may have "browser_roles" (checkQABrowserRoles).
 func parseQAPreviews(raw string) ([]QAPreview, error) {
 	var elements []json.RawMessage
 	if err := json.Unmarshal([]byte(raw), &elements); err != nil {
@@ -761,6 +775,11 @@ func parseQAPreviews(raw string) ([]QAPreview, error) {
 				Name        string `json:"name"`
 				Description string `json:"description"`
 			} `json:"roles"`
+			BrowserRoles []struct {
+				Name        string `json:"name"`
+				Description string `json:"description"`
+				Backend     string `json:"backend"`
+			} `json:"browser_roles"`
 		}
 		if err := json.Unmarshal(element, &e); err != nil {
 			return nil, fmt.Errorf("%s is not a valid preview entry: %v", name, err)
@@ -830,6 +849,20 @@ func parseQAPreviews(raw string) ([]QAPreview, error) {
 				return nil, err
 			}
 		}
+		if _, hasBrowserRoles := fields["browser_roles"]; hasBrowserRoles {
+			switch {
+			case p.Error != "":
+				return nil, fmt.Errorf("%s failed to deploy, so it must not have browser_roles", name)
+			case p.Kind != QAPreviewSite:
+				return nil, fmt.Errorf("%s is a backend, so it must not have browser_roles", name)
+			}
+			for _, r := range e.BrowserRoles {
+				p.BrowserRoles = append(p.BrowserRoles, QABrowserRole{Name: r.Name, Description: r.Description, Backend: strings.TrimSpace(r.Backend)})
+			}
+			if err := checkQABrowserRoles(name, p.BrowserRoles, p.ConnectedBackends); err != nil {
+				return nil, err
+			}
+		}
 		previews = append(previews, p)
 		names = append(names, name)
 	}
@@ -873,6 +906,41 @@ func checkQARoles(name string, roles []QARole) error {
 		seen[r.Name] = true
 		if n := utf8.RuneCountInString(r.Description); n > maxQARoleDescriptionLength {
 			return fmt.Errorf("%s: role %q has a description of %d characters: at most %d", name, r.Name, n, maxQARoleDescriptionLength)
+		}
+	}
+	return nil
+}
+
+// checkQABrowserRoles checks a site entry's browser roles: each of a backend
+// in connected (the entry's connected_backends), with a name matching
+// qaRoleName, a description of at most maxQARoleDescriptionLength characters,
+// no (backend, name) twice and at most maxQARoles per backend. name names the
+// entry in the error.
+func checkQABrowserRoles(name string, roles []QABrowserRole, connected []string) error {
+	perBackend := map[string]int{}
+	for _, r := range roles {
+		perBackend[r.Backend]++
+	}
+	for _, backend := range connected {
+		if n := perBackend[backend]; n > maxQARoles {
+			return fmt.Errorf("%s has %d browser roles of backend %q: at most %d", name, n, backend, maxQARoles)
+		}
+	}
+	type key struct{ backend, name string }
+	seen := map[key]bool{}
+	for i, r := range roles {
+		if !slices.Contains(connected, r.Backend) {
+			return fmt.Errorf("%s: browser role %d has backend %q, which is not in its connected_backends", name, i+1, r.Backend)
+		}
+		if !qaRoleName.MatchString(r.Name) {
+			return fmt.Errorf("%s: browser role %d has name %q: must match %s", name, i+1, r.Name, qaRoleName)
+		}
+		if seen[key{r.Backend, r.Name}] {
+			return fmt.Errorf("%s repeats browser role %q of backend %q", name, r.Name, r.Backend)
+		}
+		seen[key{r.Backend, r.Name}] = true
+		if n := utf8.RuneCountInString(r.Description); n > maxQARoleDescriptionLength {
+			return fmt.Errorf("%s: browser role %q has a description of %d characters: at most %d", name, r.Name, n, maxQARoleDescriptionLength)
 		}
 	}
 	return nil

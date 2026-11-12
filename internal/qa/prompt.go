@@ -116,6 +116,11 @@ const ReasonCloudFrontHeader = "is about a header CloudFront sets"
 // the agent puts the role's name in place of <role>.
 const ReasonCouldntSignIn = "couldn't sign in as <role>"
 
+// ReasonCookieRefused is the not_checked reason of the browser sign-in rule
+// (browserSignInRule) for a criterion checked signed in whose sign-in the
+// browser lost because it refused a cookie across preview hosts.
+const ReasonCookieRefused = "the browser refused the session cookie across preview hosts"
+
 // ReasonSiteNotConnected is the not_checked reason of a run given QA_PREVIEWS
 // for a criterion that needs a site preview to use a backend preview it was
 // not built to call.
@@ -125,6 +130,20 @@ const ReasonSiteNotConnected = "this site's preview isn't connected to that back
 // (QA_PREVIEWS): the run deploys nothing.
 func hasPreviews(cfg *config.Config) bool {
 	return !production(cfg) && len(cfg.QAPreviews) > 0
+}
+
+// browserRoles says a QA_PREVIEWS run has a deployed site preview with roles
+// to sign in as in the browser (verify_preview_rendered's as).
+func browserRoles(cfg *config.Config) bool {
+	if !hasPreviews(cfg) {
+		return false
+	}
+	for _, p := range cfg.QAPreviews {
+		if p.Kind == config.QAPreviewSite && p.Error == "" && len(p.BrowserRoles) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // previewKinds says which kinds of preview a QA_PREVIEWS run has: any
@@ -305,6 +324,7 @@ You have no source code and no diff. All you have is the previews listed below, 
 				fmt.Fprintf(b, " — NOT connected to the backend preview of %s: it calls whatever API Preview configuration points it at", strings.Join(p.UnconnectedBackends, ", "))
 			}
 			b.WriteString("\n")
+			writeBrowserRoles(b, p.BrowserRoles)
 		}
 	}
 	var rules []string
@@ -320,6 +340,34 @@ You have no source code and no diff. All you have is the previews listed below, 
 	case kinds.backend:
 		b.WriteString(getRule(false, deployedBackends(cfg) > 1) + "\n")
 	}
+	if browserRoles(cfg) {
+		b.WriteString(browserSignInRule() + "\n")
+	}
+}
+
+// writeBrowserRoles lists a site preview's roles to sign in as in the browser
+// under its entry, each with the backend it is a role of. A description is
+// put on one line.
+func writeBrowserRoles(b *strings.Builder, roles []config.QABrowserRole) {
+	if len(roles) == 0 {
+		return
+	}
+	fmt.Fprintf(b, "  Roles to sign in as in the browser (%s's as):\n", ToolRendered)
+	for _, r := range roles {
+		if d := strings.Join(strings.Fields(r.Description), " "); d != "" {
+			fmt.Fprintf(b, "  - %s (%s): %s\n", r.Name, r.Backend, d)
+		} else {
+			fmt.Fprintf(b, "  - %s (%s)\n", r.Name, r.Backend)
+		}
+	}
+}
+
+// browserSignInRule is the paragraph of a run whose site previews have roles
+// to sign in as in the browser: a criterion about a signed-in page is checked
+// with verify_preview_rendered's as, and one whose sign-in doesn't work is not
+// checked (ReasonCookieRefused or ReasonCouldntSignIn), never failed.
+func browserSignInRule() string {
+	return fmt.Sprintf(`A criterion about a site preview's pages that needs a signed-in user is checked as one of the roles listed under that site to sign in as in the browser: the one the criterion names, else the one whose description fits. Call %[1]s with as = that role, and backend = the backend shown beside it when the site lists that role for more than one backend; deployment.io signs in on the app's own sign-in page with the role's email and password before the check, and you never see them. Pass the site's front page (its URL with path /) as url and reach the page the criterion is about by clicking, not with goto: the check starts on the page the app shows after signing in, and a full page load (a goto, or any other url) can sign the browser out on a preview. The result's sign_in says how the sign-in went. If sign_in.signed_in is false, or sign_in.signed_out_on_load is true, try once more; if it still doesn't work, the criterion is not checked — with reason '%[2]s' when sign_in.refused_cookies is not empty, else '%[3]s' — never failed. sign_in.failed_requests and sign_in.refused_cookies are never findings or observations: they come from signing in and from how previews are hosted, not from the change. A criterion that needs a signed-in page of a site with no roles to sign in as in the browser is not checked, with reason 'needs a login'. "<redacted>" in a result stands for a secret: never try to recover it or put it in a step.`, ToolRendered, ReasonCookieRefused, ReasonCouldntSignIn)
 }
 
 // writeRoles lists a backend preview's roles under its entry, in a run with
@@ -530,6 +578,12 @@ func Instruction(cfg *config.Config) string {
 		}
 		if kinds.backend {
 			notChecked += `, ` + apiReasons(cfg)
+		}
+		if browserRoles(cfg) {
+			notChecked += `, "` + ReasonCookieRefused + `"`
+			if !kinds.backend || !apiSignInTool(cfg) {
+				notChecked += `, "` + ReasonCouldntSignIn + `"`
+			}
 		}
 		notChecked += `, it needs a preview that failed to deploy, you couldn't find the page, or a preview failed to load`
 		couldntRun = "No preview that loads at all"
