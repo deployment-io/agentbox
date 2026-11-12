@@ -115,18 +115,24 @@ The repository directory is relative to `$WORK_DIR` (or absolute inside it),
 e.g. `0-acme/web`. It must stay inside `$WORK_DIR`, no component of it may be a
 symbolic link, and its `.git` must be a directory (not a symbolic link, not a
 submodule's `.git` file). Only the five subcommands above run; `--output`,
-`--ext-diff` and `--textconv` (or any abbreviation of them, `--text` aside) are
-refused wherever they appear. Git runs as `/usr/bin/git` under an environment
-built from scratch, with hooks, fsmonitor, the pager, external diff programs,
-textconv and every transport (`protocol.allow=never`) switched off — no fetch,
-no network — and only on a repository whose configuration holds nothing beyond
+`--ext-diff`, `--textconv`, `--remerge-diff`, `--diff-merges`,
+`--show-signature`, `--ignore-submodules` and `--no-ignore-submodules` (or
+any abbreviation of them, `--text` aside) are refused wherever they appear;
+`-m`, `--cc`, `-c` and `--first-parent` remain for merges. Git runs as `/usr/bin/git` under an
+environment built from scratch, with hooks, fsmonitor, the pager, external
+diff programs, textconv, every transport (`protocol.allow=never`) and every
+signature-verification program (`gpg.*program` set to a path that doesn't
+exist, so a signature shows as unverifiable) switched off — no fetch, no
+network — and only on a repository whose configuration holds nothing beyond
 what a runner clone writes (`core.*` basics, `remote.<name>.url`/`fetch`,
 `branch.<name>.remote`/`merge`, `submodule.<name>.url`/`active`/`path`/`branch`,
-`extensions.objectformat`), from the repository's own `.git/config` only. The
-same holds for every populated submodule (status and diff look into them)
-and every submodule git directory under `.git/modules`, populated or not
-(`--submodule=diff` opens it), which may also have `core.worktree`; a symbolic
-link on a submodule's path or under `.git/modules` is refused. Standard input is passed to git (`log --stdin`). A
+`extensions.objectformat`), from the repository's own `.git/config` only.
+Submodules are never opened: `status`, `diff`, `log` and `show` run with
+`--ignore-submodules=all`, and `status -v`/`--verbose` is refused (its diff
+doesn't carry that flag and can open a submodule; `diff` and `diff --cached`
+show the same), so submodule changes, pointer changes included,
+don't show in repo-git's output. Standard input is passed to git (`log
+--stdin`). A
 refusal is one `[repo-git] <reason>` line on stderr and exit code 2; otherwise
 the output and exit code are git's own (no agentbox banner). A read-only
 session's `--append-system-prompt` gets a paragraph after

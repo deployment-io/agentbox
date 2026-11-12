@@ -11,17 +11,21 @@
 //   - only log, diff, show, blame and status;
 //   - only a real repository directory inside the work directory, reached
 //     without a symbolic link, whose .git is a directory;
-//   - no argument that writes a file (--output) or runs a program
-//     (--ext-diff, --textconv), however abbreviated;
+//   - no argument that writes a file (--output), runs a program (--ext-diff,
+//     --textconv, --show-signature), writes objects (--remerge-diff,
+//     --diff-merges) or opens submodules again (--ignore-submodules), however
+//     abbreviated;
 //   - git by absolute path, under an environment built from scratch, with -c
-//     settings that close hooks, fsmonitor, the pager and every transport;
-//   - and only a repository whose configuration — and that of every
-//     populated submodule, which status and diff look into, and of every
-//     submodule git directory under .git/modules, which --submodule=diff
-//     opens even without a working tree — holds nothing
-//     beyond what a runner clone writes, so a filter driver, an include, a
-//     credential helper or any other key that could start a program is
-//     refused before git runs.
+//     settings that close hooks, fsmonitor, the pager, every transport and
+//     every signature-verification program;
+//   - submodules never opened: status, diff, log and show run with
+//     --ignore-submodules=all, and status's -v/--verbose (whose diff doesn't
+//     carry it) is refused, so no child git starts under a submodule's own
+//     configuration;
+//   - and only a repository whose configuration holds nothing beyond what a
+//     runner clone writes, so a filter driver, an include, a credential
+//     helper or any other key that could start a program is refused before
+//     git runs.
 package repogit
 
 import (
@@ -43,19 +47,47 @@ const gitPath = "/usr/bin/git"
 const Usage = "usage: agentbox repo-git <repository directory> <log|diff|show|blame|status> [arguments…]"
 
 // subcommandFlags are the allowed subcommands, each with the flags that go
-// right after it to keep external diff programs and textconv filters from
-// running whatever the repository's configuration says.
+// right after it: --ignore-submodules=all keeps git from opening a submodule
+// (a child git there reads the submodule's own configuration), and
+// --no-ext-diff --no-textconv keep external diff programs and textconv
+// filters from running whatever the repository's configuration says.
 var subcommandFlags = map[string][]string{
-	"log":    {"--no-ext-diff", "--no-textconv"},
-	"diff":   {"--no-ext-diff", "--no-textconv"},
-	"show":   {"--no-ext-diff", "--no-textconv"},
+	"log":    {"--ignore-submodules=all", "--no-ext-diff", "--no-textconv"},
+	"diff":   {"--ignore-submodules=all", "--no-ext-diff", "--no-textconv"},
+	"show":   {"--ignore-submodules=all", "--no-ext-diff", "--no-textconv"},
 	"blame":  {"--no-textconv"},
-	"status": nil,
+	"status": {"--ignore-submodules=all"},
 }
 
 // refusedOptions are the long options refused wherever they appear, by any
-// unambiguous abbreviation git's option parser could accept.
-var refusedOptions = []string{"--output", "--ext-diff", "--textconv"}
+// unambiguous abbreviation git's option parser could accept: --output writes
+// a file, --ext-diff and --textconv run programs, --remerge-diff and
+// --diff-merges (=remerge) write temporary objects under .git/objects,
+// --show-signature runs gpg, and a later --ignore-submodules or
+// --no-ignore-submodules (status) would undo the --ignore-submodules=all
+// repo-git puts after the subcommand.
+var refusedOptions = []string{
+	"--output", "--ext-diff", "--textconv",
+	"--remerge-diff", "--diff-merges", "--show-signature",
+	"--ignore-submodules", "--no-ignore-submodules",
+}
+
+// statusShortValued are status's short options whose (optional) value is
+// stuck to them, ending a bundle: -u<mode>, -M<n>.
+const statusShortValued = "uM"
+
+// status -v/-vv builds its own diff options for the diff it prints, and
+// they don't carry --ignore-submodules=all: with a pathspec, -vv's
+// working-tree diff starts a child git in a populated submodule (whose
+// .gitmodules ignore setting --ignore-submodules=all would have
+// overridden). So status refuses --verbose by the same name/prefix rule and
+// -v in any bundle of short options; diff and diff --cached show the same.
+const statusVerbose = "--verbose"
+
+// noGPG is the program every gpg.*program setting names, so verifying a
+// signature (--format's %G placeholders, log.showSignature) runs nothing
+// and the signature shows as unverifiable.
+const noGPG = "/nonexistent/repo-git-no-gpg"
 
 // overrides are the -c settings every git invocation carries.
 var overrides = []string{
@@ -63,6 +95,10 @@ var overrides = []string{
 	"-c", "core.hooksPath=/dev/null",
 	"-c", "core.pager=cat",
 	"-c", "protocol.allow=never",
+	"-c", "gpg.program=" + noGPG,
+	"-c", "gpg.openpgp.program=" + noGPG,
+	"-c", "gpg.x509.program=" + noGPG,
+	"-c", "gpg.ssh.program=" + noGPG,
 }
 
 // Env is the whole environment git runs under; nothing is inherited.
@@ -96,13 +132,7 @@ func refuse(format string, a ...any) error {
 func Main(args []string, workDir string, stdin io.Reader, stdout, stderr io.Writer) int {
 	repo, sub, rest, err := Parse(args, workDir)
 	if err == nil {
-		err = checkConfig(repo, "this repository", false)
-	}
-	if err == nil {
-		err = checkSubmodules(repo, "", 0)
-	}
-	if err == nil {
-		err = checkModules(filepath.Join(repo, ".git", "modules"), ".git/modules", 0)
+		err = checkConfig(repo)
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "[repo-git] %s\n", oneLine(err.Error()))
@@ -139,6 +169,11 @@ func Parse(args []string, workDir string) (repo, sub string, rest []string, err 
 	rest = args[2:]
 	if err := checkArgs(rest); err != nil {
 		return "", "", nil, err
+	}
+	if sub == "status" {
+		if err := checkStatusArgs(rest); err != nil {
+			return "", "", nil, err
+		}
 	}
 	return repo, sub, rest, nil
 }
@@ -191,9 +226,9 @@ func repoDir(dir, workDir string) (string, error) {
 	return path, nil
 }
 
-// checkArgs refuses --output, --ext-diff and --textconv wherever they appear,
-// including after "--", by their name (the argument up to its first "=")
-// being a non-empty prefix of one of them — except exactly --text.
+// checkArgs refuses refusedOptions wherever they appear, including after
+// "--", by their name (the argument up to its first "=") being a non-empty
+// prefix of one of them — except exactly --text.
 func checkArgs(args []string) error {
 	for _, a := range args {
 		if !strings.HasPrefix(a, "--") {
@@ -205,7 +240,34 @@ func checkArgs(args []string) error {
 		}
 		for _, opt := range refusedOptions {
 			if strings.HasPrefix(opt, name) {
-				return refuse("the argument %s (%s) isn't allowed: it writes a file or runs a program", a, opt)
+				return refuse("the argument %s (%s) isn't allowed: it writes files or objects, runs a program or reopens submodules", a, opt)
+			}
+		}
+	}
+	return nil
+}
+
+// checkStatusArgs refuses status's verbose option wherever it appears:
+// --verbose or a non-empty prefix of it, and -v in a bundle of short
+// options (up to a -u or -M, whose value runs to the bundle's end).
+func checkStatusArgs(args []string) error {
+	for _, a := range args {
+		if strings.HasPrefix(a, "--") {
+			name, _, _ := strings.Cut(a, "=")
+			if len(name) > 2 && strings.HasPrefix(statusVerbose, name) {
+				return refuse("the argument %s (%s) isn't allowed with status: its diff would open submodules; use diff or diff --cached", a, statusVerbose)
+			}
+			continue
+		}
+		if !strings.HasPrefix(a, "-") {
+			continue
+		}
+		for _, c := range a[1:] {
+			if strings.ContainsRune(statusShortValued, c) {
+				break
+			}
+			if c == 'v' {
+				return refuse("the argument %s (-v) isn't allowed with status: its diff would open submodules; use diff or diff --cached", a)
 			}
 		}
 	}
@@ -225,17 +287,6 @@ func GitArgs(repo, sub string, rest []string) []string {
 // git would use for repo, under the same -c settings.
 func ConfigArgs(repo string) []string {
 	args := []string{"--no-pager", "--no-optional-locks", "-C", repo}
-	args = append(args, overrides...)
-	return append(args, "config", "--list", "--null", "--show-scope")
-}
-
-// GitDirConfigArgs is ConfigArgs for a git directory named with --git-dir
-// and --work-tree rather than -C: a submodule's git directory under
-// .git/modules has a core.worktree that git would change into, and that
-// working tree may be missing. Listing the configuration doesn't read the
-// working tree, so the git directory itself stands in for it.
-func GitDirConfigArgs(gitDir string) []string {
-	args := []string{"--no-pager", "--no-optional-locks", "--git-dir=" + gitDir, "--work-tree=" + gitDir}
 	args = append(args, overrides...)
 	return append(args, "config", "--list", "--null", "--show-scope")
 }
@@ -261,12 +312,9 @@ var allowedNamedKeys = map[string][]string{
 }
 
 // keyAllowed reports whether a local-scope key is one a runner clone writes.
-// Section and variable names compare case-insensitively, as git does. A
-// submodule's configuration may also have core.worktree, which git and go-git
-// write for a submodule whose git directory is under .git/modules.
-func keyAllowed(key string, submodule bool) bool {
-	lower := strings.ToLower(key)
-	if allowedKeys[lower] || submodule && lower == "core.worktree" {
+// Section and variable names compare case-insensitively, as git does.
+func keyAllowed(key string) bool {
+	if allowedKeys[strings.ToLower(key)] {
 		return true
 	}
 	section, after, ok := strings.Cut(key, ".")
@@ -288,45 +336,9 @@ func keyAllowed(key string, submodule bool) bool {
 
 // checkConfig reads the configuration git would use for repo and refuses
 // unless every local key is on the runner-clone list and nothing comes from
-// any scope other than local and command (repo-git's own -c settings). what
-// names the repository in a refusal.
-func checkConfig(repo, what string, submodule bool) error {
-	return checkConfigWith(ConfigArgs(repo), what, submodule)
-}
-
-// checkConfigWith is checkConfig with the argv that lists the configuration.
-func checkConfigWith(args []string, what string, submodule bool) error {
-	cmd := exec.Command(gitPath, args...)
-	cmd.Env = Env()
-	var out, errOut bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &errOut
-	if err := cmd.Run(); err != nil {
-		msg := strings.TrimSpace(errOut.String())
-		if i := strings.IndexByte(msg, '\n'); i >= 0 {
-			msg = msg[:i]
-		}
-		if msg == "" {
-			msg = err.Error()
-		}
-		return refuse("couldn't read %s's git configuration: %s", what, msg)
-	}
-	return checkConfigList(out.Bytes(), what, submodule)
-}
-
-// maxSubmoduleDepth bounds how deep checkSubmodules follows nested
-// submodules.
-const maxSubmoduleDepth = 8
-
-// checkSubmodules checks the configuration of every populated submodule of
-// repo, and theirs in turn. git status and a working-tree diff look into a
-// populated submodule with a child git that reads the submodule's own
-// configuration (and a diff with --submodule=diff runs one without
-// --no-ext-diff or --no-textconv), so that configuration is held to the same
-// list as the repository's. prefix is repo's path below the repository
-// repo-git was given, for messages.
-func checkSubmodules(repo, prefix string, depth int) error {
-	cmd := exec.Command(gitPath, LsFilesArgs(repo)...)
+// any scope other than local and command (repo-git's own -c settings).
+func checkConfig(repo string) error {
+	cmd := exec.Command(gitPath, ConfigArgs(repo)...)
 	cmd.Env = Env()
 	var out, errOut bytes.Buffer
 	cmd.Stdout = &out
@@ -336,145 +348,20 @@ func checkSubmodules(repo, prefix string, depth int) error {
 		if msg == "" {
 			msg = err.Error()
 		}
-		return refuse("couldn't list the submodules of %s: %s", describe(prefix), msg)
+		return refuse("couldn't read this repository's git configuration: %s", msg)
 	}
-	for _, record := range strings.Split(out.String(), "\x00") {
-		meta, path, ok := strings.Cut(record, "\t")
-		if !ok || !strings.HasPrefix(meta, "160000 ") {
-			continue
-		}
-		name := filepath.ToSlash(filepath.Join(prefix, path))
-		dir, populated, err := submoduleDir(repo, path, name)
-		if err != nil {
-			return err
-		}
-		if !populated {
-			continue
-		}
-		if depth >= maxSubmoduleDepth {
-			return refuse("submodule %s is nested more than %d deep, which repo-git doesn't follow", name, maxSubmoduleDepth)
-		}
-		if err := checkConfig(dir, "submodule "+name, true); err != nil {
-			return err
-		}
-		if err := checkSubmodules(dir, name, depth+1); err != nil {
-			return err
-		}
-		if info, err := os.Lstat(filepath.Join(dir, ".git")); err == nil && info.IsDir() {
-			if err := checkModules(filepath.Join(dir, ".git", "modules"), name+"/.git/modules", 0); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-// checkModules checks the configuration of every submodule git directory
-// under modules (a repository's .git/modules), populated or not, and of the
-// ones nested under theirs. A diff or log with --submodule=diff opens a
-// submodule's git directory there even when its working tree is missing,
-// and runs a child git under that directory's configuration. A module name
-// may contain slashes, so a directory that isn't a git directory is walked
-// into. A symbolic link is refused rather than followed. what names modules
-// in messages.
-func checkModules(modules, what string, depth int) error {
-	entries, err := os.ReadDir(modules)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return refuse("%s: %v", what, errors.Unwrap(err))
-	}
-	if depth >= maxSubmoduleDepth {
-		return refuse("%s is nested more than %d deep, which repo-git doesn't follow", what, maxSubmoduleDepth)
-	}
-	for _, e := range entries {
-		dir := filepath.Join(modules, e.Name())
-		name := what + "/" + e.Name()
-		if e.Type()&fs.ModeSymlink != 0 {
-			return refuse("%s is a symbolic link, which repo-git doesn't follow", name)
-		}
-		if !e.IsDir() {
-			continue
-		}
-		if !isGitDir(dir) {
-			if err := checkModules(dir, name, depth+1); err != nil {
-				return err
-			}
-			continue
-		}
-		if err := checkConfigWith(GitDirConfigArgs(dir), "submodule repository "+name, true); err != nil {
-			return err
-		}
-		if err := checkModules(filepath.Join(dir, "modules"), name+"/modules", depth+1); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// isGitDir reports whether dir looks like a git directory to git: HEAD, an
-// objects directory and a refs directory.
-func isGitDir(dir string) bool {
-	for _, part := range []string{"HEAD", "objects", "refs"} {
-		if _, err := os.Lstat(filepath.Join(dir, part)); err != nil {
-			return false
-		}
-	}
-	return true
-}
-
-// submoduleDir returns the directory of the submodule at path (relative to
-// repo) and whether it is populated (has a .git). A symbolic link on the way
-// is refused rather than followed.
-func submoduleDir(repo, path, name string) (string, bool, error) {
-	cur := repo
-	for _, part := range strings.Split(filepath.FromSlash(path), string(filepath.Separator)) {
-		cur = filepath.Join(cur, part)
-		info, err := os.Lstat(cur)
-		if errors.Is(err, fs.ErrNotExist) {
-			return "", false, nil
-		}
-		if err != nil {
-			return "", false, refuse("submodule %s: %v", name, errors.Unwrap(err))
-		}
-		if info.Mode()&fs.ModeSymlink != 0 {
-			return "", false, refuse("submodule %s: %s is a symbolic link, which repo-git doesn't follow", name, cur)
-		}
-		if !info.IsDir() {
-			return "", false, nil
-		}
-	}
-	if _, err := os.Lstat(filepath.Join(cur, ".git")); err != nil {
-		return "", false, nil
-	}
-	return cur, true, nil
-}
-
-func describe(prefix string) string {
-	if prefix == "" {
-		return "this repository"
-	}
-	return "submodule " + prefix
-}
-
-// LsFilesArgs is the argv (without the binary) that lists repo's index,
-// where submodules appear as mode 160000 entries.
-func LsFilesArgs(repo string) []string {
-	args := []string{"--no-pager", "--no-optional-locks", "-C", repo}
-	args = append(args, overrides...)
-	return append(args, "ls-files", "--stage", "-z")
+	return checkConfigList(out.Bytes())
 }
 
 // checkConfigList checks `git config --list --null --show-scope` output:
 // records of scope NUL key [LF value] NUL.
-func checkConfigList(out []byte, what string, submodule bool) error {
+func checkConfigList(out []byte) error {
 	fields := strings.Split(string(out), "\x00")
 	if n := len(fields); n > 0 && fields[n-1] == "" {
 		fields = fields[:n-1]
 	}
 	if len(fields)%2 != 0 {
-		return refuse("couldn't read %s's git configuration: unexpected output from git config", what)
+		return refuse("couldn't read this repository's git configuration: unexpected output from git config")
 	}
 	for i := 0; i < len(fields); i += 2 {
 		scope := fields[i]
@@ -482,11 +369,11 @@ func checkConfigList(out []byte, what string, submodule bool) error {
 		switch scope {
 		case "command":
 		case "local":
-			if !keyAllowed(key, submodule) {
-				return refuse("%s's git configuration has %s, which repo-git doesn't allow", what, key)
+			if !keyAllowed(key) {
+				return refuse("this repository's git configuration has %s, which repo-git doesn't allow", key)
 			}
 		default:
-			return refuse("%s's git configuration has %s (%s scope), which repo-git doesn't allow", what, key, scope)
+			return refuse("this repository's git configuration has %s (%s scope), which repo-git doesn't allow", key, scope)
 		}
 	}
 	return nil

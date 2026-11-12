@@ -168,7 +168,11 @@ func TestArguments(t *testing.T) {
 	for _, bad := range [][]string{
 		{"--output=x"}, {"--output", "x"}, {"--outp=x"}, {"--ext-diff"}, {"--ext-d"},
 		{"--textconv"}, {"--textc"},
-		{"--", "--output=x"}, {"--", "--ext-diff"}, {"--", "--textc"},
+		{"--remerge-diff"}, {"--remerge"}, {"--diff-merges=remerge"}, {"--diff-merges=r"}, {"--diff-m=on"},
+		{"--show-signature"}, {"--show-sig"},
+		{"--ignore-submodules=none"}, {"--ignore-submodules"}, {"--ignore-sub"},
+		{"--no-ignore-submodules"}, {"--no-ignore-sub"}, {"--no-ig"},
+		{"--", "--output=x"}, {"--", "--ext-diff"}, {"--", "--textc"}, {"--", "--ignore-submodules=none"},
 	} {
 		args := append([]string{"0-acme/web", "diff"}, bad...)
 		assertRefused(t, work, "isn't allowed", args...)
@@ -180,6 +184,7 @@ func TestArguments(t *testing.T) {
 		{"--text"}, {"--no-ext-diff"}, {"--no-textconv"}, {"--output-indicator-new=+"},
 		{"--output-indicator-old=-", "--output-indicator-context=x"},
 		{"--stat", "origin/main...HEAD"}, {"origin/main", "--", "a.txt"},
+		{"--first-parent", "origin/main"}, {"-m", "origin/main"}, {"--cc", "origin/main"},
 	} {
 		_, _, rest, err := Parse(append([]string{"0-acme/web", "diff"}, ok...), work)
 		if err != nil || !slices.Equal(rest, ok) {
@@ -191,25 +196,48 @@ func TestArguments(t *testing.T) {
 	}
 }
 
+// Options that only share a prefix with a refused one aren't refused.
+func TestArgumentsNotRefusedByPrefix(t *testing.T) {
+	work, _ := newWork(t)
+	for _, ok := range [][]string{
+		{"--no-index", "a", "b"}, {"--no-ext-diff"}, {"--no-textconv"}, {"--no-renames"},
+	} {
+		if _, _, _, err := Parse(append([]string{"0-acme/web", "diff"}, ok...), work); err != nil {
+			t.Errorf("%q refused: %v", ok, err)
+		}
+	}
+}
+
+func TestLogArgumentsPass(t *testing.T) {
+	work, _ := newWork(t)
+	for _, ok := range [][]string{
+		{"--first-parent", "--format=%H"}, {"-m", "-p"}, {"--cc"}, {"-c"}, {"--format=%H %G? %GS"},
+	} {
+		if code, _, errOut := runMain(work, append([]string{"0-acme/web", "log"}, ok...)...); code != 0 {
+			t.Errorf("log %q: exit %d, %q", ok, code, errOut)
+		}
+	}
+}
+
 func TestGitArgsAndEnv(t *testing.T) {
 	prefix := []string{"--no-pager", "--no-optional-locks", "-C", "/work/0-acme/web",
 		"-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
-		"-c", "core.pager=cat", "-c", "protocol.allow=never"}
+		"-c", "core.pager=cat", "-c", "protocol.allow=never",
+		"-c", "gpg.program=/nonexistent/repo-git-no-gpg",
+		"-c", "gpg.openpgp.program=/nonexistent/repo-git-no-gpg",
+		"-c", "gpg.x509.program=/nonexistent/repo-git-no-gpg",
+		"-c", "gpg.ssh.program=/nonexistent/repo-git-no-gpg"}
 	for sub, flags := range map[string][]string{
-		"log":    {"--no-ext-diff", "--no-textconv"},
-		"diff":   {"--no-ext-diff", "--no-textconv"},
-		"show":   {"--no-ext-diff", "--no-textconv"},
+		"log":    {"--ignore-submodules=all", "--no-ext-diff", "--no-textconv"},
+		"diff":   {"--ignore-submodules=all", "--no-ext-diff", "--no-textconv"},
+		"show":   {"--ignore-submodules=all", "--no-ext-diff", "--no-textconv"},
 		"blame":  {"--no-textconv"},
-		"status": nil,
+		"status": {"--ignore-submodules=all"},
 	} {
 		want := append(append(append(slices.Clone(prefix), sub), flags...), "--x", "y")
 		if got := GitArgs("/work/0-acme/web", sub, []string{"--x", "y"}); !slices.Equal(got, want) {
 			t.Errorf("%s: argv = %q\nwant %q", sub, got, want)
 		}
-	}
-	wantLsFiles := append(slices.Clone(prefix), "ls-files", "--stage", "-z")
-	if got := LsFilesArgs("/work/0-acme/web"); !slices.Equal(got, wantLsFiles) {
-		t.Errorf("ls-files argv = %q", got)
 	}
 	wantConfig := append(slices.Clone(prefix), "config", "--list", "--null", "--show-scope")
 	if got := ConfigArgs("/work/0-acme/web"); !slices.Equal(got, wantConfig) {
@@ -377,33 +405,21 @@ func TestEndToEnd(t *testing.T) {
 func TestKeyAllowed(t *testing.T) {
 	for _, k := range []string{"core.bare", "CORE.Bare", "core.repositoryformatversion", "extensions.objectformat",
 		"remote.origin.url", "Remote.Up.Stream.FETCH", "branch.main.merge", "submodule.lib.path"} {
-		if !keyAllowed(k, false) {
+		if !keyAllowed(k) {
 			t.Errorf("%s refused", k)
 		}
 	}
 	for _, k := range []string{"core.pager", "remote.url", "remote..url", "remote.origin.pushurl",
-		"branch.main.rebase", "url.x.insteadof", "core", ""} {
-		if keyAllowed(k, false) {
+		"branch.main.rebase", "url.x.insteadof", "core.worktree", "core", ""} {
+		if keyAllowed(k) {
 			t.Errorf("%s allowed", k)
 		}
 	}
-	if err := checkConfigList([]byte("global\x00user.name\nme\x00"), "this repository", false); err == nil || !strings.Contains(err.Error(), "global") {
+	if err := checkConfigList([]byte("global\x00user.name\nme\x00")); err == nil || !strings.Contains(err.Error(), "global") {
 		t.Errorf("global scope: %v", err)
 	}
-	if err := checkConfigList([]byte("local\x00core.bare\nfalse\x00command\x00core.pager\ncat\x00"), "this repository", false); err != nil {
+	if err := checkConfigList([]byte("local\x00core.bare\nfalse\x00command\x00core.pager\ncat\x00")); err != nil {
 		t.Errorf("clean list: %v", err)
-	}
-}
-
-func TestKeyAllowedSubmodule(t *testing.T) {
-	if keyAllowed("core.worktree", false) {
-		t.Error("core.worktree allowed in the repository's own configuration")
-	}
-	if !keyAllowed("core.worktree", true) || !keyAllowed("Core.WorkTree", true) {
-		t.Error("core.worktree refused in a submodule's configuration")
-	}
-	if keyAllowed("filter.x.clean", true) {
-		t.Error("filter.x.clean allowed in a submodule's configuration")
 	}
 }
 
@@ -433,12 +449,11 @@ func TestRefusalIsOneLine(t *testing.T) {
 	}
 }
 
-// newWorkWithSubmodule adds a populated submodule "lib" to newWork's
-// repository, with its git directory under .git/modules/lib as git and
-// go-git lay it out, and returns the submodule's git directory.
-func newWorkWithSubmodule(t *testing.T) (work, repo, subGitDir string) {
-	t.Helper()
-	work, repo = newWork(t)
+// A populated submodule whose own configuration has a clean filter, with a
+// modified file it applies to: a child git in the submodule would run it.
+// --ignore-submodules=all keeps git out of the submodule, so nothing runs.
+func TestSubmodulesNeverOpened(t *testing.T) {
+	work, repo := newWork(t)
 	src := filepath.Join(t.TempDir(), "lib")
 	if err := os.MkdirAll(src, 0o755); err != nil {
 		t.Fatal(err)
@@ -449,132 +464,104 @@ func newWorkWithSubmodule(t *testing.T) (work, repo, subGitDir string) {
 	git(t, src, "commit", "-q", "-m", "lib")
 	git(t, repo, "-c", "protocol.file.allow=always", "submodule", "add", "-q", src, "lib")
 	git(t, repo, "commit", "-q", "-m", "add lib")
+	sub := filepath.Join(repo, "lib")
+	git(t, sub, "commit", "-q", "--allow-empty", "-m", "lib 2")
+	git(t, repo, "commit", "-q", "-am", "bump lib")
 	// Back to a runner clone's parent config, plus the submodule's entries.
 	write(t, filepath.Join(repo, ".git", "config"), goGitConfig+"\tactive = true\n")
-	subGitDir = filepath.Join(repo, ".git", "modules", "lib")
-	write(t, filepath.Join(subGitDir, "config"), `[core]
-	repositoryformatversion = 0
-	filemode = true
-	bare = false
-	logallrefupdates = true
-	worktree = ../../../lib
-[remote "origin"]
-	url = https://github.com/acme/lib.git
-	fetch = +refs/heads/*:refs/remotes/origin/*
-[branch "main"]
-	remote = origin
-	merge = refs/heads/main
-`)
-	return work, repo, subGitDir
-}
 
-func TestSubmoduleConfigCheck(t *testing.T) {
-	work, repo, subGitDir := newWorkWithSubmodule(t)
-	if code, out, errOut := runMain(work, "0-acme/web", "status", "--short"); code != 0 || errOut != "" {
-		t.Fatalf("clean submodule: exit %d, stdout %q, stderr %q", code, out, errOut)
-	}
-
-	// A clean filter in the submodule's configuration, and a modified file
-	// it applies to: git status would run it in the submodule's child git.
 	marker := filepath.Join(t.TempDir(), "marker")
 	script := filepath.Join(t.TempDir(), "evil.sh")
 	write(t, script, "#!/bin/sh\ntouch "+marker+"\ncat\n")
 	if err := os.Chmod(script, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	clean, _ := os.ReadFile(filepath.Join(subGitDir, "config"))
-	write(t, filepath.Join(subGitDir, "config"), string(clean)+"[filter \"x\"]\n\tclean = "+script+"\n")
-	write(t, filepath.Join(subGitDir, "info", "attributes"), "*.txt filter=x\n")
-	write(t, filepath.Join(repo, "lib", "lib.txt"), "changed\n")
+	git(t, sub, "config", "filter.x.clean", script)
+	git(t, sub, "config", "diff.external", script)
+	write(t, filepath.Join(sub, ".gitattributes"), "*.txt filter=x\n")
+	// Same size as before, so the child git has to hash it (running the filter).
+	write(t, filepath.Join(sub, "lib.txt"), "LIB\n")
+	// A modified parent file and .gitmodules saying not to ignore lib (the
+	// repository's content, which --ignore-submodules=all overrides).
+	write(t, filepath.Join(repo, "a.txt"), "a changed\n")
+	git(t, repo, "config", "-f", ".gitmodules", "submodule.lib.ignore", "none")
+
 	for _, args := range [][]string{
-		{"0-acme/web", "status"},
-		{"0-acme/web", "diff"},
-		{"0-acme/web", "diff", "--submodule=diff"},
+		{"status"},
+		{"status", "-sb", "--", "a.txt"},
+		{"diff"},
+		{"diff", "--submodule=diff"},
+		{"diff", "--submodule=diff", "HEAD~1", "HEAD"},
+		{"log", "-p", "--submodule=diff"},
+		{"show", "--submodule=diff"},
 	} {
-		assertRefused(t, work, "submodule lib's git configuration has filter.x.clean", args...)
+		code, out, errOut := runMain(work, append([]string{"0-acme/web"}, args...)...)
+		if code != 0 {
+			t.Errorf("%q: exit %d, stdout %q, stderr %q", args, code, out, errOut)
+		}
+		if _, err := os.Stat(marker); err == nil {
+			t.Fatalf("%q ran the submodule's filter or external diff", args)
+		}
 	}
+	assertRefused(t, work, "--ignore-submodules", "0-acme/web", "diff", "--ignore-submodules=none")
+	assertRefused(t, work, "--ignore-submodules", "0-acme/web", "status", "--ignore-sub")
+	assertRefused(t, work, "--no-ignore-submodules", "0-acme/web", "status", "--no-ignore-submodules")
+	assertRefused(t, work, "--no-ignore-submodules", "0-acme/web", "status", "--no-ignore-sub")
+	// status -vv's own working-tree diff doesn't carry --ignore-submodules=all.
+	for _, v := range [][]string{{"-v"}, {"-vv"}, {"-vv", "--", "a.txt"}, {"-sv"}, {"-bvs"}, {"--verbose"}, {"--verb"}, {"--v"}, {"-s", "-v"}} {
+		assertRefused(t, work, "isn't allowed with status", append([]string{"0-acme/web", "status"}, v...)...)
+	}
+	for _, args := range [][]string{{"status", "-uv"}, {"status", "-sbuno"}, {"status", "-M50"}, {"status", "--no-verbose"}, {"diff", "-v"}, {"log", "--verbose"}} {
+		_, _, errOut := runMain(work, append([]string{"0-acme/web"}, args...)...)
+		if strings.Contains(errOut, "[repo-git]") {
+			t.Errorf("%q refused: %s", args, errOut)
+		}
+	}
+	// Without the refusal, status -vv with a pathspec does open lib on this git.
+	verbose := exec.Command(gitPath, GitArgs(repo, "status", []string{"-vv", "--", "a.txt"})...)
+	verbose.Env = Env()
+	verbose.Run()
 	if _, err := os.Stat(marker); err == nil {
-		t.Error("the submodule's filter ran")
+		t.Log("status -vv -- a.txt ran the submodule's filter: refusing -v is needed on this git")
+		os.Remove(marker)
 	}
 
-	// The repository's own core.worktree stays refused.
-	write(t, filepath.Join(subGitDir, "config"), string(clean))
-	write(t, filepath.Join(repo, ".git", "config"), goGitConfig+"[core]\n\tworktree = /tmp\n")
-	assertRefused(t, work, "this repository's git configuration has core.worktree", "0-acme/web", "status")
-}
-
-func TestSubmoduleSymlinkRefused(t *testing.T) {
-	work, repo, _ := newWorkWithSubmodule(t)
-	// Move the submodule's directory away and leave a symbolic link to it.
-	moved := filepath.Join(repo, "lib-real")
-	if err := os.Rename(filepath.Join(repo, "lib"), moved); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(moved, filepath.Join(repo, "lib")); err != nil {
-		t.Fatal(err)
-	}
-	assertRefused(t, work, "is a symbolic link", "0-acme/web", "status")
-}
-
-func TestUnpopulatedSubmoduleRuns(t *testing.T) {
-	work, repo, _ := newWorkWithSubmodule(t)
-	if err := os.RemoveAll(filepath.Join(repo, "lib")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Join(repo, "lib"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if code, out, errOut := runMain(work, "0-acme/web", "log", "--format=%s", "-1"); code != 0 || out != "add lib\n" {
-		t.Errorf("exit %d, stdout %q, stderr %q", code, out, errOut)
+	// Without --ignore-submodules=all the filter does run: the test is real.
+	cmd := exec.Command(gitPath, "-C", repo, "diff", "--submodule=diff")
+	cmd.Env = Env()
+	cmd.Run()
+	if _, err := os.Stat(marker); err != nil {
+		t.Log("this git didn't run the submodule's filter even without --ignore-submodules=all")
 	}
 }
 
-func TestUnpopulatedSubmoduleConfigCheck(t *testing.T) {
-	work, repo, subGitDir := newWorkWithSubmodule(t)
-	// A second commit moving the submodule, so a diff has a submodule
-	// change to show, then the working tree removed: only
-	// .git/modules/lib is left.
-	git(t, filepath.Join(repo, "lib"), "commit", "-q", "--allow-empty", "-m", "lib 2")
-	git(t, repo, "commit", "-q", "-am", "bump lib")
-	if err := os.RemoveAll(filepath.Join(repo, "lib")); err != nil {
-		t.Fatal(err)
-	}
-	if code, out, errOut := runMain(work, "0-acme/web", "log", "-p", "--submodule=diff", "-1"); code != 0 || errOut != "" {
-		t.Fatalf("clean submodule repository: exit %d, stdout %q, stderr %q", code, out, errOut)
-	}
-
+// Verifying a signature never runs a program: every gpg.*program
+// names a path that doesn't exist.
+func TestSignatureVerificationRunsNothing(t *testing.T) {
+	_, repo := newWork(t)
 	marker := filepath.Join(t.TempDir(), "marker")
-	script := filepath.Join(t.TempDir(), "evil.sh")
+	script := filepath.Join(t.TempDir(), "gpg.sh")
 	write(t, script, "#!/bin/sh\ntouch "+marker+"\n")
 	if err := os.Chmod(script, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	clean, _ := os.ReadFile(filepath.Join(subGitDir, "config"))
-	write(t, filepath.Join(subGitDir, "config"), string(clean)+"[diff]\n\texternal = "+script+"\n")
-	for _, args := range [][]string{
-		{"0-acme/web", "log", "-p", "--submodule=diff", "-1"},
-		{"0-acme/web", "diff", "--submodule=diff", "HEAD~1", "HEAD"},
-		{"0-acme/web", "status"},
-	} {
-		assertRefused(t, work, "submodule repository .git/modules/lib's git configuration has diff.external", args...)
+	// A commit with a (fake) gpgsig header, written with hash-object.
+	tree := strings.TrimSpace(git(t, repo, "rev-parse", "HEAD^{tree}"))
+	commit := "tree " + tree + "\nauthor Test <t@example.com> 1 +0000\ncommitter Test <t@example.com> 1 +0000\n" +
+		"gpgsig -----BEGIN PGP SIGNATURE-----\n \n AAAA\n -----END PGP SIGNATURE-----\n\nsigned\n"
+	obj := filepath.Join(t.TempDir(), "commit")
+	write(t, obj, commit)
+	sha := strings.TrimSpace(git(t, repo, "hash-object", "-t", "commit", "-w", obj))
+	git(t, repo, "update-ref", "refs/heads/signed", sha)
+
+	// Run git directly with a gpg.program in the repository's configuration,
+	// as if it had changed after the check; the -c override still wins.
+	write(t, filepath.Join(repo, ".git", "config"), goGitConfig+"[gpg]\n\tprogram = "+script+"\n[log]\n\tshowSignature = true\n")
+	var out, errOut bytes.Buffer
+	if code := run(GitArgs(repo, "log", []string{"--format=%H %G?", "-1", "signed"}), nil, &out, &errOut); code != 0 {
+		t.Fatalf("exit %d, %q", code, errOut.String())
 	}
 	if _, err := os.Stat(marker); err == nil {
-		t.Error("the submodule repository's external diff ran")
+		t.Fatal("signature verification ran the configured gpg program")
 	}
-
-	// A module name with a slash is a nested directory under .git/modules.
-	write(t, filepath.Join(subGitDir, "config"), string(clean))
-	nested := filepath.Join(repo, ".git", "modules", "vendor", "x")
-	git(t, t.TempDir(), "init", "-q", "--bare", nested)
-	write(t, filepath.Join(nested, "config"), "[core]\n\tbare = true\n[filter \"x\"]\n\tclean = "+script+"\n")
-	assertRefused(t, work, "submodule repository .git/modules/vendor/x's git configuration has filter.x.clean", "0-acme/web", "status")
-
-	// A symbolic link under .git/modules is refused.
-	if err := os.RemoveAll(filepath.Join(repo, ".git", "modules", "vendor")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(subGitDir, filepath.Join(repo, ".git", "modules", "vendor")); err != nil {
-		t.Fatal(err)
-	}
-	assertRefused(t, work, "is a symbolic link", "0-acme/web", "status")
 }
