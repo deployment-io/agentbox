@@ -331,6 +331,71 @@ func TestLoadQAPreviewsRejectsBadBrowserRoles(t *testing.T) {
 	}
 }
 
+// qaPagesBackend is a deployed backend entry whose front page answered a web
+// page, with the extra keys given.
+func qaPagesBackend(extra string) string {
+	return `{"repository":"1-acme/api","kind":"backend","url":"https://d2.cloudfront.net","health_url":"https://d2.cloudfront.net/healthz","serves_pages":true` + extra + `}`
+}
+
+func TestLoadQAPreviewsServesPages(t *testing.T) {
+	qaPreviewsEnv(t, `[`+qaPagesBackend("")+`,{"repository":"2-acme/auth","kind":"backend","url":"https://d5.cloudfront.net","health_url":"https://d5.cloudfront.net/healthz","serves_pages":false}]`)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %s", err)
+	}
+	if !cfg.QAPreviews[0].ServesPages || cfg.QAPreviews[1].ServesPages {
+		t.Errorf("ServesPages = %v, %v, want true, false", cfg.QAPreviews[0].ServesPages, cfg.QAPreviews[1].ServesPages)
+	}
+
+	// A backend that serves pages may have browser roles of its own.
+	qaPreviewsEnv(t, `[`+qaPagesBackend(`,"browser_roles":[{"name":"owner","description":"Owns the workspace","backend":" 1-acme/api "},{"name":"member","backend":"1-acme/api"}]`)+`]`)
+	cfg, err = Load()
+	if err != nil {
+		t.Fatalf("Load: %s", err)
+	}
+	want := []QABrowserRole{
+		{Name: "owner", Description: "Owns the workspace", Backend: "1-acme/api"},
+		{Name: "member", Backend: "1-acme/api"},
+	}
+	if got := cfg.QAPreviews[0].BrowserRoles; !reflect.DeepEqual(got, want) {
+		t.Errorf("BrowserRoles = %+v, want %+v", got, want)
+	}
+}
+
+func TestLoadQAPreviewsRejectsBadServesPages(t *testing.T) {
+	const api = `{"repository":"1-acme/api","kind":"backend","url":"https://d2.cloudfront.net","health_url":"https://d2.cloudfront.net/healthz"}`
+	for _, tc := range []struct {
+		name, raw, want string
+	}{
+		{"on a site entry", `[{"repository":"0-acme/web","kind":"site","url":"https://d1.cloudfront.net","serves_pages":true}]`, `QA_PREVIEWS entry 1 ("0-acme/web") is a site, so it must not have serves_pages`},
+		{"false on a site entry", `[{"repository":"0-acme/web","kind":"site","url":"https://d1.cloudfront.net","serves_pages":false}]`, `QA_PREVIEWS entry 1 ("0-acme/web") is a site, so it must not have serves_pages`},
+		{"on a failed backend entry", `[{"repository":"1-acme/api","kind":"backend","error":"x","serves_pages":true}]`, `QA_PREVIEWS entry 1 ("1-acme/api") failed to deploy, so it must not have serves_pages`},
+		{"false on a failed site entry", `[{"repository":"0-acme/web","kind":"site","error":"x","serves_pages":false}]`, `QA_PREVIEWS entry 1 ("0-acme/web") failed to deploy, so it must not have serves_pages`},
+		{"not a bool", `[{"repository":"1-acme/api","kind":"backend","url":"https://d2.cloudfront.net","health_url":"https://d2.cloudfront.net/healthz","serves_pages":"yes"}]`, `QA_PREVIEWS entry 1 ("1-acme/api") is not a valid preview entry`},
+		{"browser roles on a backend without serves_pages", `[{"repository":"1-acme/api","kind":"backend","url":"https://d2.cloudfront.net","health_url":"https://d2.cloudfront.net/healthz","serves_pages":false,"browser_roles":[{"name":"admin","backend":"1-acme/api"}]}]`, `QA_PREVIEWS entry 1 ("1-acme/api") is a backend, so it must not have browser_roles`},
+		{"a browser role of another backend", `[` + qaPagesBackend(`,"browser_roles":[{"name":"admin","backend":"1-acme/api"},{"name":"admin","backend":"2-acme/auth"}]`) + `,{"repository":"2-acme/auth","kind":"backend","url":"https://d5.cloudfront.net","health_url":"https://d5.cloudfront.net/healthz"}]`, `QA_PREVIEWS entry 1 ("1-acme/api"): browser role 2 has backend "2-acme/auth", which is not its own repository`},
+		{"a browser role with no backend", `[` + qaPagesBackend(`,"browser_roles":[{"name":"admin"}]`) + `]`, `QA_PREVIEWS entry 1 ("1-acme/api"): browser role 1 has backend "", which is not its own repository`},
+		{"a repeated browser role", `[` + qaPagesBackend(`,"browser_roles":[{"name":"admin","backend":"1-acme/api"},{"name":"admin","backend":"1-acme/api"}]`) + `]`, `QA_PREVIEWS entry 1 ("1-acme/api") repeats browser role "admin" of backend "1-acme/api"`},
+		{"a bad browser role name", `[` + api + `,{"repository":"2-acme/auth","kind":"backend","url":"https://d5.cloudfront.net","health_url":"https://d5.cloudfront.net/healthz","serves_pages":true,"browser_roles":[{"name":"Admin","backend":"2-acme/auth"}]}]`, `QA_PREVIEWS entry 2 ("2-acme/auth"): browser role 1 has name "Admin": must match`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			qaPreviewsEnv(t, tc.raw)
+			_, err := Load()
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("err = %v, want one containing %q", err, tc.want)
+			}
+		})
+	}
+	var eleven []string
+	for i := 0; i < 11; i++ {
+		eleven = append(eleven, `{"name":"role`+string(rune('a'+i))+`","backend":"1-acme/api"}`)
+	}
+	qaPreviewsEnv(t, `[`+qaPagesBackend(`,"browser_roles":[`+strings.Join(eleven, ",")+`]`)+`]`)
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), `QA_PREVIEWS entry 1 ("1-acme/api") has 11 browser roles of backend "1-acme/api": at most 10`) {
+		t.Errorf("11 browser roles: err = %v", err)
+	}
+}
+
 // QA_API_SIGN_IN_TOOL is read like QA_API_REQUEST_TOOL: only "1", only for
 // the preview target.
 func TestLoadQAAPISignInTool(t *testing.T) {

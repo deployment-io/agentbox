@@ -568,9 +568,11 @@ const (
 // and HealthURL for a backend) or one whose deploy failed (Error set). A
 // deployed site's ConnectedBackends are the backend entries' repositories it
 // was built to call; its UnconnectedBackends are the run's other backends.
-// A deployed backend's Roles are the roles deployment.io made a test user for.
-// A deployed site's BrowserRoles are the roles of its connected backends QA
-// can sign in as in the browser (verify_preview_rendered's as).
+// A deployed backend's Roles are the roles deployment.io made a test user for,
+// and ServesPages says its front page answered with a web page. A deployed
+// site's BrowserRoles are the roles of its connected backends QA can sign in
+// as in the browser (verify_preview_rendered's as); a deployed backend that
+// serves pages may have BrowserRoles too, each a role of its own.
 type QAPreview struct {
 	Repository          string
 	Kind                string
@@ -581,6 +583,7 @@ type QAPreview struct {
 	UnconnectedBackends []string
 	Roles               []QARole
 	BrowserRoles        []QABrowserRole
+	ServesPages         bool
 }
 
 // QARole is one role of a QA_PREVIEWS backend entry: a test user QA can sign
@@ -590,9 +593,10 @@ type QARole struct {
 	Description string
 }
 
-// QABrowserRole is one role of a QA_PREVIEWS site entry's browser_roles: a
-// test user of Backend (one of the site's connected backends) QA can sign in
-// as on the site's pages, and what the role is for (may be empty).
+// QABrowserRole is one role of a QA_PREVIEWS entry's browser_roles: a test
+// user of Backend (one of a site's connected backends, or a backend that
+// serves pages itself) QA can sign in as on the entry's pages, and what the
+// role is for (may be empty).
 type QABrowserRole struct {
 	Name        string
 	Description string
@@ -741,8 +745,9 @@ func parseQABackends(raw string) ([]QABackend, error) {
 // directory inside /work, kind is "site" or "backend", each URL follows
 // QA_URLS' rules, no (repository, kind) appears twice, and every backend a
 // site names is a backend entry of the array, in at most one of its lists. A
-// backend entry with a url may have "roles" (checkQARoles), and a site entry
-// with a url may have "browser_roles" (checkQABrowserRoles).
+// backend entry with a url may have "roles" (checkQARoles) and
+// "serves_pages", and a site entry with a url, or a backend entry with
+// serves_pages, may have "browser_roles" (checkQABrowserRoles).
 func parseQAPreviews(raw string) ([]QAPreview, error) {
 	var elements []json.RawMessage
 	if err := json.Unmarshal([]byte(raw), &elements); err != nil {
@@ -780,16 +785,18 @@ func parseQAPreviews(raw string) ([]QAPreview, error) {
 				Description string `json:"description"`
 				Backend     string `json:"backend"`
 			} `json:"browser_roles"`
+			ServesPages bool `json:"serves_pages"`
 		}
 		if err := json.Unmarshal(element, &e); err != nil {
 			return nil, fmt.Errorf("%s is not a valid preview entry: %v", name, err)
 		}
 		p := QAPreview{
-			Repository: strings.TrimSpace(e.Repository),
-			Kind:       strings.TrimSpace(e.Kind),
-			URL:        strings.TrimSpace(e.URL),
-			HealthURL:  strings.TrimSpace(e.HealthURL),
-			Error:      strings.TrimSpace(e.Error),
+			Repository:  strings.TrimSpace(e.Repository),
+			Kind:        strings.TrimSpace(e.Kind),
+			URL:         strings.TrimSpace(e.URL),
+			HealthURL:   strings.TrimSpace(e.HealthURL),
+			Error:       strings.TrimSpace(e.Error),
+			ServesPages: e.ServesPages,
 		}
 		p.ConnectedBackends = trimmedUnique(e.ConnectedBackends)
 		p.UnconnectedBackends = trimmedUnique(e.UnconnectedBackends)
@@ -849,17 +856,25 @@ func parseQAPreviews(raw string) ([]QAPreview, error) {
 				return nil, err
 			}
 		}
+		if _, hasServesPages := fields["serves_pages"]; hasServesPages {
+			switch {
+			case p.Error != "":
+				return nil, fmt.Errorf("%s failed to deploy, so it must not have serves_pages", name)
+			case p.Kind != QAPreviewBackend:
+				return nil, fmt.Errorf("%s is a site, so it must not have serves_pages", name)
+			}
+		}
 		if _, hasBrowserRoles := fields["browser_roles"]; hasBrowserRoles {
 			switch {
 			case p.Error != "":
 				return nil, fmt.Errorf("%s failed to deploy, so it must not have browser_roles", name)
-			case p.Kind != QAPreviewSite:
+			case p.Kind == QAPreviewBackend && !p.ServesPages:
 				return nil, fmt.Errorf("%s is a backend, so it must not have browser_roles", name)
 			}
 			for _, r := range e.BrowserRoles {
 				p.BrowserRoles = append(p.BrowserRoles, QABrowserRole{Name: r.Name, Description: r.Description, Backend: strings.TrimSpace(r.Backend)})
 			}
-			if err := checkQABrowserRoles(name, p.BrowserRoles, p.ConnectedBackends); err != nil {
+			if err := checkQABrowserRoles(name, p); err != nil {
 				return nil, err
 			}
 		}
@@ -911,12 +926,16 @@ func checkQARoles(name string, roles []QARole) error {
 	return nil
 }
 
-// checkQABrowserRoles checks a site entry's browser roles: each of a backend
-// in connected (the entry's connected_backends), with a name matching
-// qaRoleName, a description of at most maxQARoleDescriptionLength characters,
-// no (backend, name) twice and at most maxQARoles per backend. name names the
-// entry in the error.
-func checkQABrowserRoles(name string, roles []QABrowserRole, connected []string) error {
+// checkQABrowserRoles checks entry p's browser roles: each of a backend in a
+// site's connected_backends, or of a backend entry itself, with a name
+// matching qaRoleName, a description of at most maxQARoleDescriptionLength
+// characters, no (backend, name) twice and at most maxQARoles per backend.
+// name names the entry in the error.
+func checkQABrowserRoles(name string, p QAPreview) error {
+	roles, connected, list := p.BrowserRoles, p.ConnectedBackends, "is not in its connected_backends"
+	if p.Kind == QAPreviewBackend {
+		connected, list = []string{p.Repository}, "is not its own repository"
+	}
 	perBackend := map[string]int{}
 	for _, r := range roles {
 		perBackend[r.Backend]++
@@ -930,7 +949,7 @@ func checkQABrowserRoles(name string, roles []QABrowserRole, connected []string)
 	seen := map[key]bool{}
 	for i, r := range roles {
 		if !slices.Contains(connected, r.Backend) {
-			return fmt.Errorf("%s: browser role %d has backend %q, which is not in its connected_backends", name, i+1, r.Backend)
+			return fmt.Errorf("%s: browser role %d has backend %q, which %s", name, i+1, r.Backend, list)
 		}
 		if !qaRoleName.MatchString(r.Name) {
 			return fmt.Errorf("%s: browser role %d has name %q: must match %s", name, i+1, r.Name, qaRoleName)
