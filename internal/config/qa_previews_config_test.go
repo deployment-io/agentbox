@@ -253,6 +253,84 @@ func TestLoadQAPreviewsRejectsBadRoles(t *testing.T) {
 	}
 }
 
+// qaPreviewsWithBrowserRoles is a site connected to two backends, with
+// browser_roles.
+func qaPreviewsWithBrowserRoles(roles string) string {
+	return `[{"repository":"0-acme/web","kind":"site","url":"https://d1.cloudfront.net","connected_backends":["1-acme/api","2-acme/auth"],"browser_roles":` + roles + `},` +
+		`{"repository":"1-acme/api","kind":"backend","url":"https://d2.cloudfront.net","health_url":"https://d2.cloudfront.net/healthz"},` +
+		`{"repository":"2-acme/auth","kind":"backend","url":"https://d5.cloudfront.net","health_url":"https://d5.cloudfront.net/healthz"},` +
+		`{"repository":"3-acme/admin","kind":"site","url":"https://d3.cloudfront.net","unconnected_backends":["1-acme/api"]}]`
+}
+
+func TestLoadQAPreviewsBrowserRoles(t *testing.T) {
+	qaPreviewsEnv(t, qaPreviewsWithBrowserRoles(`[{"name":"owner","description":"Owns the workspace","backend":"1-acme/api"},{"name":"member","backend":"1-acme/api"},{"name":"owner","description":"","backend":" 2-acme/auth "}]`))
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %s", err)
+	}
+	want := []QABrowserRole{
+		{Name: "owner", Description: "Owns the workspace", Backend: "1-acme/api"},
+		{Name: "member", Backend: "1-acme/api"},
+		{Name: "owner", Backend: "2-acme/auth"},
+	}
+	if got := cfg.QAPreviews[0].BrowserRoles; !reflect.DeepEqual(got, want) {
+		t.Errorf("BrowserRoles = %+v, want %+v", got, want)
+	}
+	for _, p := range cfg.QAPreviews[1:] {
+		if p.BrowserRoles != nil || p.Roles != nil {
+			t.Errorf("%s has roles %+v %+v", p.Repository, p.Roles, p.BrowserRoles)
+		}
+	}
+
+	// Ten roles per backend, a 32-character name and a 200-character description are the limits.
+	var twenty []string
+	for _, backend := range []string{"1-acme/api", "2-acme/auth"} {
+		for i := 0; i < 10; i++ {
+			twenty = append(twenty, `{"name":"role`+string(rune('a'+i))+`","backend":"`+backend+`"}`)
+		}
+	}
+	twenty[0] = `{"name":"a` + strings.Repeat("b", 31) + `","description":"` + strings.Repeat("é", 200) + `","backend":"1-acme/api"}`
+	qaPreviewsEnv(t, qaPreviewsWithBrowserRoles(`[`+strings.Join(twenty, ",")+`]`))
+	if cfg, err := Load(); err != nil || len(cfg.QAPreviews[0].BrowserRoles) != 20 {
+		t.Errorf("ten browser roles per backend at the limits: err = %v", err)
+	}
+}
+
+func TestLoadQAPreviewsRejectsBadBrowserRoles(t *testing.T) {
+	const api = `{"repository":"1-acme/api","kind":"backend","url":"https://d2.cloudfront.net","health_url":"https://d2.cloudfront.net/healthz"}`
+	var eleven []string
+	for i := 0; i < 11; i++ {
+		eleven = append(eleven, `{"name":"role`+string(rune('a'+i))+`","backend":"2-acme/auth"}`)
+	}
+	for _, tc := range []struct {
+		name, raw, want string
+	}{
+		{"on a backend entry", `[{"repository":"1-acme/api","kind":"backend","url":"https://d2.cloudfront.net","health_url":"https://d2.cloudfront.net/healthz","browser_roles":[{"name":"admin","backend":"1-acme/api"}]}]`, `QA_PREVIEWS entry 1 ("1-acme/api") is a backend, so it must not have browser_roles`},
+		{"empty on a backend entry", `[{"repository":"1-acme/api","kind":"backend","url":"https://d2.cloudfront.net","health_url":"https://d2.cloudfront.net/healthz","browser_roles":[]}]`, `QA_PREVIEWS entry 1 ("1-acme/api") is a backend, so it must not have browser_roles`},
+		{"on a failed site entry", `[` + api + `,{"repository":"0-acme/web","kind":"site","error":"x","browser_roles":[{"name":"admin","backend":"1-acme/api"}]}]`, `QA_PREVIEWS entry 2 ("0-acme/web") failed to deploy, so it must not have browser_roles`},
+		{"on a failed backend entry", `[{"repository":"1-acme/api","kind":"backend","error":"x","browser_roles":[]}]`, `QA_PREVIEWS entry 1 ("1-acme/api") failed to deploy, so it must not have browser_roles`},
+		{"a backend not connected", qaPreviewsWithBrowserRoles(`[{"name":"admin","backend":"1-acme/api"},{"name":"admin","backend":"9-acme/other"}]`), `QA_PREVIEWS entry 1 ("0-acme/web"): browser role 2 has backend "9-acme/other", which is not in its connected_backends`},
+		{"no backend", qaPreviewsWithBrowserRoles(`[{"name":"admin"}]`), `browser role 1 has backend "", which is not in its connected_backends`},
+		{"on a site without connected_backends", `[` + api + `,{"repository":"0-acme/web","kind":"site","url":"https://d1.cloudfront.net","unconnected_backends":["1-acme/api"],"browser_roles":[{"name":"admin","backend":"1-acme/api"}]}]`, `QA_PREVIEWS entry 2 ("0-acme/web"): browser role 1 has backend "1-acme/api", which is not in its connected_backends`},
+		{"an upper-case name", qaPreviewsWithBrowserRoles(`[{"name":"Admin","backend":"1-acme/api"}]`), `QA_PREVIEWS entry 1 ("0-acme/web"): browser role 1 has name "Admin": must match`},
+		{"no name", qaPreviewsWithBrowserRoles(`[{"backend":"1-acme/api"}]`), `browser role 1 has name "": must match`},
+		{"a 33-character name", qaPreviewsWithBrowserRoles(`[{"name":"a` + strings.Repeat("b", 32) + `","backend":"1-acme/api"}]`), `browser role 1 has name`},
+		{"a repeated (backend, name)", qaPreviewsWithBrowserRoles(`[{"name":"admin","backend":"1-acme/api"},{"name":"admin","backend":"2-acme/auth"},{"name":"admin","backend":"1-acme/api"}]`), `QA_PREVIEWS entry 1 ("0-acme/web") repeats browser role "admin" of backend "1-acme/api"`},
+		{"11 roles of one backend", qaPreviewsWithBrowserRoles(`[` + strings.Join(eleven, ",") + `]`), `QA_PREVIEWS entry 1 ("0-acme/web") has 11 browser roles of backend "2-acme/auth": at most 10`},
+		{"a long description", qaPreviewsWithBrowserRoles(`[{"name":"admin","description":"` + strings.Repeat("x", 201) + `","backend":"1-acme/api"}]`), `QA_PREVIEWS entry 1 ("0-acme/web"): browser role "admin" has a description of 201 characters: at most 200`},
+		{"not a list", qaPreviewsWithBrowserRoles(`"admin"`), `QA_PREVIEWS entry 1 ("0-acme/web") is not a valid preview entry`},
+		{"a backend not a string", qaPreviewsWithBrowserRoles(`[{"name":"admin","backend":1}]`), `QA_PREVIEWS entry 1 ("0-acme/web") is not a valid preview entry`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			qaPreviewsEnv(t, tc.raw)
+			_, err := Load()
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("err = %v, want one containing %q", err, tc.want)
+			}
+		})
+	}
+}
+
 // QA_API_SIGN_IN_TOOL is read like QA_API_REQUEST_TOOL: only "1", only for
 // the preview target.
 func TestLoadQAAPISignInTool(t *testing.T) {
