@@ -389,6 +389,53 @@ failed, and the sign-in page as it was left when the sign-in failed.
 - Not redacted: a page that renders a secret in clear text shows it (see
   [The password](#the-password)).
 
+For example, a mobile check of `https://example.com` that asks for a
+screenshot:
+
+```json
+{
+  "schema_version": 1,
+  "url": "https://example.com/",
+  "allowed_hosts": ["example.com"],
+  "steps": [],
+  "assertions": [],
+  "timeout_ms": 45000,
+  "viewport": {"preset": "mobile"},
+  "screenshot": true
+}
+```
+
+When the capture succeeds, its result has these fields (a fragment: the
+other fields are as in [Output](#output)), and `/io/screenshot.jpg` sits
+beside `result.json`; 412×839 is the `mobile` preset's CSS size, not its
+device pixels:
+
+```json
+{
+  "schema_version": 1,
+  "status": "completed",
+  "verdict": "pass",
+  "final_url": "https://example.com/",
+  "viewport": {"width": 412, "height": 839, "preset": "mobile", "mobile": true},
+  "screenshot": {"width": 412, "height": 839}
+}
+```
+
+When the same check has less than 1 s of its budget left when the screenshot
+is due, the result has `screenshot_error` instead of `screenshot` and no
+`/io/screenshot.jpg` is written; the verdict is decided by the steps and
+assertions as usual, never by the screenshot:
+
+```json
+{
+  "schema_version": 1,
+  "status": "completed",
+  "verdict": "pass",
+  "final_url": "https://example.com/",
+  "screenshot_error": "not enough time left"
+}
+```
+
 Added in 1.6.0.
 
 ### Exit codes
