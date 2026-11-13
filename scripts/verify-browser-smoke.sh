@@ -14,7 +14,9 @@
 #      verdict pass with url_path /forms/post.
 #   6. the same page with only a back step — expect steps[0].ok false with the
 #      no-earlier-page error.
-# Cases 3 to 6 are asserted (they need jq); the script exits non-zero when
+#   7. https://example.com on the mobile preset with screenshot true — expect
+#      screenshot 412×839 in the result and a JPEG in screenshot.jpg.
+# Cases 3 to 7 are asserted (they need jq); the script exits non-zero when
 # either does not hold. Needs Docker and network access. Run from anywhere in
 # the repository.
 set -euo pipefail
@@ -118,6 +120,17 @@ JSON
 run_check back "$(back_input '[{"action": "goto", "url": "https://httpbin.org/html"}, {"action": "back"}]')"
 run_check back_first "$(back_input '[{"action": "back"}]')"
 
+run_check screenshot '{
+  "schema_version": 1,
+  "url": "https://example.com/",
+  "allowed_hosts": ["example.com"],
+  "steps": [],
+  "assertions": [],
+  "timeout_ms": 45000,
+  "viewport": {"preset": "mobile"},
+  "screenshot": true
+}'
+
 if ! command -v jq >/dev/null 2>&1; then
   echo "jq is not installed: cannot assert the read_only and back cases" >&2
   exit 1
@@ -142,4 +155,11 @@ expect read_write '.blocked_requests == []' 'blocked_requests is empty'
 expect read_write '.final_url == "https://httpbin.org/post"' "final_url is httpbin's /post response"
 expect back '.verdict == "pass"' 'going back from /html returns to the form'
 expect back_first '.steps[0].ok == false and .steps[0].error == "there is no earlier page in this check to go back to"' 'back on the first page fails with the no-earlier-page error'
+expect screenshot '.screenshot == {"width": 412, "height": 839}' 'the result has the screenshot at the CSS size of the mobile preset'
+if [ "$(head -c 3 "$workdir/screenshot/screenshot.jpg" 2>/dev/null | od -An -tx1 | tr -d ' \n')" = "ffd8ff" ]; then
+  echo "ok   screenshot: screenshot.jpg is a JPEG ($(wc -c < "$workdir/screenshot/screenshot.jpg") bytes)"
+else
+  echo "FAIL screenshot: no JPEG in screenshot.jpg" >&2
+  failed=1
+fi
 exit "$failed"

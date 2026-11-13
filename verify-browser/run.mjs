@@ -1,10 +1,12 @@
 // run.mjs drives headless Chromium for one verify-browser check.
 //
-//   node run.mjs <input.json> <result path> <proxy host:port>
+//   node run.mjs <input.json> <result path> <proxy host:port> <screenshot path>
 //
 // cmd/verify-browser starts it after validating the input and starting the
-// egress proxy, and renames the result into place once this exits. The
-// contract is docs/VERIFY_BROWSER.md; the pure logic is in lib.mjs.
+// egress proxy, and renames the result into place once this exits. When the
+// input asks for a screenshot, it is written to the screenshot path, which
+// cmd/verify-browser moves to /io/screenshot.jpg. The contract is
+// docs/VERIFY_BROWSER.md; the pure logic is in lib.mjs.
 //
 // What keeps the page in its lane:
 //   - every request goes through the proxy (loopback is not bypassed), which
@@ -34,6 +36,7 @@ import {
   CAPS,
   LIMITS,
   RefusedCookies,
+  SCREENSHOT_ERRORS,
   SIGN_IN_REASONS,
   abortedByNavigation,
   blameBlockedNavigation,
@@ -45,6 +48,7 @@ import {
   hasVisiblePasswordField,
   isAllowedUrl,
   isReadOnlyMethod,
+  jpegSize,
   normalizeInput,
   oneLine,
   pickSignInFields,
@@ -79,6 +83,11 @@ const SIGN_IN_CLICK_AFTER_MS = 2000;
 const SIGN_IN_SUBMITTED_WAIT_MS = 10000;
 const SIGN_IN_POLL_MS = 200;
 const SIGN_IN_FIELD_TIMEOUT_MS = 5000;
+// The screenshot (takeScreenshot) is taken only with at least
+// SCREENSHOT_MIN_MS of the budget left, and given at most SCREENSHOT_TIMEOUT_MS.
+const SCREENSHOT_MIN_MS = 1000;
+const SCREENSHOT_TIMEOUT_MS = 5000;
+const SCREENSHOT_QUALITY = 70;
 
 // OUTLINE_RAW_MAX bounds how many visible elements readOutline hands back;
 // lib.mjs's buildOutline keeps CAPS.outlineEntries of them.
@@ -87,9 +96,9 @@ const POPUP_BINDING = '__verifyBrowserBlockedPopup';
 const READ_ONLY_BINDING = '__verifyBrowserBlockedRequest';
 
 async function main() {
-  const [inputPath, resultPath, proxyAddr] = process.argv.slice(2);
+  const [inputPath, resultPath, proxyAddr, screenshotPath = ''] = process.argv.slice(2);
   if (!inputPath || !resultPath || !proxyAddr) {
-    throw new Error('usage: node run.mjs <input.json> <result path> <proxy host:port>');
+    throw new Error('usage: node run.mjs <input.json> <result path> <proxy host:port> <screenshot path>');
   }
   const started = Date.now();
   const c = newCollector();
@@ -98,7 +107,7 @@ async function main() {
     const input = normalizeInput(parseJSON(await readFile(inputPath, 'utf8')));
     setSecret(input.signIn?.password ?? '');
     const wrapUp = Math.min(MAX_WRAP_UP_MS, Math.floor(input.timeoutMs / 4));
-    result = await check(input, proxyAddr, started + input.timeoutMs - wrapUp, c);
+    result = await check(input, proxyAddr, started + input.timeoutMs - wrapUp, c, screenshotPath);
   } catch (err) {
     result = errorResult(errorText(err), c.blockedRequests);
   }
@@ -125,7 +134,7 @@ async function withTimeout(promise, ms, fallback) {
   return Promise.race([promise.catch(() => fallback), sleep(ms, fallback)]);
 }
 
-async function check(input, proxyAddr, deadline, c) {
+async function check(input, proxyAddr, deadline, c, screenshotPath) {
   const remaining = () => deadline - Date.now();
   const browser = await chromium.launch({
     headless: true,
@@ -140,7 +149,7 @@ async function check(input, proxyAddr, deadline, c) {
     timeout: Math.max(1, Math.min(LAUNCH_TIMEOUT_MS, remaining())),
   });
   try {
-    return await checkInBrowser(browser, input, remaining, c);
+    return await checkInBrowser(browser, input, remaining, c, screenshotPath);
   } finally {
     await withTimeout(browser.close(), CLOSE_TIMEOUT_MS, undefined);
   }
@@ -196,7 +205,7 @@ function newCollector() {
   return c;
 }
 
-async function checkInBrowser(browser, input, remaining, c) {
+async function checkInBrowser(browser, input, remaining, c, screenshotPath) {
   c.viewport = input.viewport;
   const allowed = (url) => isAllowedUrl(url, input.allowedHosts);
   const context = await browser.newContext({
@@ -240,8 +249,40 @@ async function checkInBrowser(browser, input, remaining, c) {
     '',
   );
   c.outline = await withTimeout(page.evaluate(readOutline, OUTLINE_RAW_MAX), EVALUATE_TIMEOUT_MS, []);
+  if (input.screenshot) {
+    c.screenshot = await takeScreenshot(page, screenshotPath, remaining);
+  }
   c.flushRefusedCookies?.();
   return buildResult(c);
+}
+
+// takeScreenshot writes a JPEG of the page's viewport, at its CSS size, to
+// path and returns its {width, height}, or {error} with one of
+// SCREENSHOT_ERRORS. It never runs past the check's budget, and never reports
+// Playwright's error, which could quote the page or the password.
+async function takeScreenshot(page, path, remaining) {
+  if (remaining() < SCREENSHOT_MIN_MS) {
+    return { error: SCREENSHOT_ERRORS.noTime };
+  }
+  try {
+    const image = await page.screenshot({
+      type: 'jpeg',
+      quality: SCREENSHOT_QUALITY,
+      fullPage: false,
+      scale: 'css',
+      animations: 'disabled',
+      caret: 'hide',
+      timeout: Math.max(1, Math.min(SCREENSHOT_TIMEOUT_MS, remaining())),
+    });
+    const size = jpegSize(image);
+    if (!size || !path) {
+      return { error: SCREENSHOT_ERRORS.captureFailed };
+    }
+    await writeFile(path, image);
+    return size;
+  } catch {
+    return { error: SCREENSHOT_ERRORS.captureFailed };
+  }
 }
 
 // signIn signs in with sign_in before the check's first load and records the

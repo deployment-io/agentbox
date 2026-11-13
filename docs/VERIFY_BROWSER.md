@@ -4,7 +4,9 @@
 page of a deployment.io Task's preview in headless Chromium, runs a short list
 of steps and assertions, and reports what the browser saw as structured text
 — page errors, failed requests, blocked navigations, timings and the start of
-the page's visible text. No screenshots. Static sites only; Chromium only. A check may first
+the page's visible text. When asked, it also leaves a screenshot of the page
+the check ended on ([`/io/screenshot.jpg`](#screenshot); added in 1.6.0).
+Static sites only; Chromium only. A check may first
 sign in as one of a backend preview's seeded test users
 ([Sign-in](#sign-in)).
 
@@ -25,7 +27,7 @@ runner and the image; both sides implement exactly this.
    `/io/input.json`. Invalid input is a `status: "error"` result, not a crash.
 2. It starts agentbox's egress proxy (`internal/proxy`) on `127.0.0.1` with
    an allow-all host list and `BlockPrivateIPs: true`.
-3. It runs `node /opt/verify-browser/run.mjs <input> <temp result in /io> <proxy address>`.
+3. It runs `node /opt/verify-browser/run.mjs <input> <temp result in /io> <proxy address> <temp screenshot in /io>`.
    The script launches Chromium's headless shell (playwright-core, pinned in
    `verify-browser/package-lock.json`) with the proxy as its proxy server,
    loads the page, runs the steps and assertions, and writes its result.
@@ -36,7 +38,9 @@ runner and the image; both sides implement exactly this.
    renamed to `/io/result.json`; otherwise `/io/result.json` gets
    `status: "error"` with the reason and the last 1000 bytes of the script's
    stderr. With `sign_in`, the password is redacted from either first
-   ([The password](#the-password)).
+   ([The password](#the-password)). A completed result's screenshot is
+   moved to `/io/screenshot.jpg` before the result
+   ([Screenshot](#screenshot)).
 
 ## Input
 
@@ -74,6 +78,7 @@ carrying data.
 | `viewport` | Optional: the window size, `{"preset": "desktop" \| "tablet" \| "mobile"}` or `{"width": W, "height": H}` (see [Viewport](#viewport)). Absent is `desktop`. Added in 1.2.0; earlier images ignore it. |
 | `read_only` | Optional: `true` or `false` (absent is `false`). `true` runs the browser read-only, for a check of a site that is live in production (see [Read-only](#read-only)). Anything but a JSON boolean (`null`, `"true"`, `1`) is invalid input. Added in 1.3.0; earlier images ignore it — a caller that sets it must check that the result has `blocked_requests`. |
 | `sign_in` | Optional: `{"url": "…", "email": "…", "password": "…"}`, a test user to sign in as before the first load (see [Sign-in](#sign-in)). `url` is the sign-in page and follows the same rules as `url`. `email` is a non-empty string of at most 320 characters, `password` one of at most 200, neither with a line break. Any other key, a missing field or a wrong type is invalid input, and so is `sign_in` with `"read_only": true` (a read-only check is of something live in production, which has no test users). Absent, the check runs as without it. Added in 1.5.0; earlier images ignore it — a caller that sets it must check that the result has `sign_in`. |
+| `screenshot` | Optional: `true` or `false` (absent is `false`). `true` leaves a screenshot of the page the check ended on in `/io/screenshot.jpg` (see [Screenshot](#screenshot)). Anything but a JSON boolean (`null`, `"true"`, `1`) is invalid input. May be combined with `read_only` and with `sign_in`. Added in 1.6.0; earlier images ignore it — a caller that sets it must expect no screenshot from them. |
 
 Every string is at most 2000 characters.
 
@@ -234,8 +239,13 @@ fragment of it. An input that fails validation is redacted with whatever
 password its `sign_in` holds.
 Without `sign_in`, results are written exactly as the script wrote them.
 The email is not redacted: it is a generated test address, and pages show
-it. Nothing but `result.json` is written to `/io`; `input.json` is the
-caller's to delete.
+it. Nothing but `result.json` (and, when asked, `screenshot.jpg`) is
+written to `/io`; `input.json` is the caller's to delete.
+
+The [screenshot](#screenshot) is not redacted. It can show the signed-in
+page and the generated `example.com` email; a password typed into a
+password field renders masked, but a page that prints the password in clear
+text shows it in the image. The password is a throwaway test user's.
 
 ### Steps
 
@@ -268,7 +278,9 @@ still run.
 ## Output
 
 The container writes `/io/result.json` atomically (a temp file in `/io`,
-then rename) and exits.
+then rename) and exits. With `"screenshot": true` it may also leave
+`/io/screenshot.jpg`, always before `result.json`
+([Screenshot](#screenshot)).
 
 ```json
 {
@@ -320,6 +332,8 @@ then rename) and exits.
 | `blocked_navigations` | Main-frame navigations — link clicks, redirects, gotos — to a host outside `allowed_hosts`, and new windows (`window.open` without a target or with one naming no frame, links and forms with a target). `window.open(url, '_self')` (or `_top`, `_parent`, an iframe's name) navigates in place and is only blocked when `url` is outside `allowed_hosts`. Each blocked navigation makes the step running at the time fail; one that happens after its step finished (a timer it set, while a later step or the assertions run) fails every step that ran on the page it happened on, since any of them may have scheduled it. A blocked main-frame navigation leaves Chromium's error page in the tab (`final_url` `chrome-error://chromewebdata/`), so the steps and assertions after it run against that page. |
 | `blocked_requests` | Requests a [read-only](#read-only) check refused, in the order they were refused: `url`, `method` (the request's method as the page or worker sent it, or `WEBSOCKET`, `SHAREDWORKER`, `WEBTRANSPORT` or `WEBRTC` for a refused channel). Always present, in an `error` result too: `[]` when there were none or `read_only` is not `true`. An `error` result lists what was refused before the check stopped, except when the entrypoint wrote it itself (invalid input, the script timed out or wrote no valid result), which leaves it `[]`. Added in 1.3.0 (`schema_version` stays 1). |
 | `sign_in` | Only with a `sign_in` input, in a `completed` result (an `error` result has none): `{"signed_in": true \| false, "reason": "…", "signed_out_on_load": true \| false, "failed_requests": […], "refused_cookies": […]}`. `reason` only when `signed_in` is `false`, `signed_out_on_load` only when it is `true`; `failed_requests` (the sign-in's own, as `failed_requests`) and `refused_cookies` (`{"host", "name", "reason"}`) always, maybe empty. See [Sign-in](#sign-in). Added in 1.5.0 (`schema_version` stays 1). |
+| `screenshot` | Only with `"screenshot": true`, in a `completed` result whose `/io/screenshot.jpg` was written: `{"width": W, "height": H}`, the image's size in pixels (the viewport's CSS size, e.g. `412`×`839` for `mobile`). See [Screenshot](#screenshot). Added in 1.6.0 (`schema_version` stays 1). |
+| `screenshot_error` | Only with `"screenshot": true`, in a `completed` result that has no screenshot, instead of `screenshot`: `not enough time left` (less than 1 s of the budget was left), `the page could not be captured` (the browser failed to take it), or `too large` (it was over 1 MiB). Never decides the verdict. Added in 1.6.0. |
 | `timings_ms` | `dom_content_loaded` and `load` (Navigation Timing) and `lcp` (Largest Contentful Paint) of the first load, in ms. `lcp` is omitted when the browser reports none. |
 | `dom_text_snippet` | The start of `document.body.innerText` at the end. **Untrusted page content.** |
 | `outline` | The visible headings, links, buttons and form fields of the page at the end (after the steps and assertions), in document order — a map for a caller that can't read the page's source. Each entry is `{"kind": "heading" \| "link" \| "button" \| "field", "text": "…"}`, plus `level` (1–6, from `aria-level` or the `h1`–`h6` tag) for a heading and `href` (the resolved absolute URL, for `http:`, `https:`, `mailto:` and `tel:` links only; omitted for any other scheme, e.g. `javascript:` or `data:`) for a link. A button with no caption of its own that is an `<input type="submit">` or `type="reset"` gets the browser's default, "Submit" or "Reset". A field's `text` is its label: its `<label>`, else `aria-label`, else `placeholder`, else `name`. An explicit ARIA role wins over the tag (`<a role="button">` is a button). Hidden elements (`hidden`, `aria-hidden`, not rendered) and `<input type="hidden">` are left out, as are entries with nothing to show. Added in 1.1.0 (`schema_version` stays 1). **Untrusted page content**, like `dom_text_snippet`. |
@@ -351,6 +365,78 @@ redirect in `blocked_navigations` and every step reported as not run.
 | `outline` | 60 entries; `text` 120 characters, `href` 2000 |
 | `sign_in.failed_requests` | 20 entries |
 | `sign_in.refused_cookies` | 20 entries |
+
+### Screenshot
+
+With `"screenshot": true`, a `completed` check leaves `/io/screenshot.jpg`:
+the page the check ended on, taken after `final_url`, `dom_text_snippet`
+and `outline` were read — the page as it failed when a step or assertion
+failed, and the sign-in page as it was left when the sign-in failed.
+
+- JPEG, quality 70, of the viewport only (content below the fold is not in
+  it), at the viewport's CSS size (a `mobile` check is 412×839, not its
+  device pixels), with animations stopped and the caret hidden.
+- At most 1 MiB. A larger one is dropped and the result says
+  `"screenshot_error": "too large"`.
+- Taken only when at least 1 s of the check's budget is left, and given at
+  most 5 s (never more than is left): a screenshot never makes a check run
+  past `timeout_ms`.
+- Present exactly when the result has `screenshot`; otherwise the result has
+  `screenshot_error` saying why. An `error` result has neither key and never
+  leaves a screenshot. Without `"screenshot": true`, nothing changes.
+- Written before `result.json`, so a caller that sees `result.json` with
+  `screenshot` finds the file.
+- Not redacted: a page that renders a secret in clear text shows it (see
+  [The password](#the-password)).
+
+For example, a mobile check of `https://example.com` that asks for a
+screenshot:
+
+```json
+{
+  "schema_version": 1,
+  "url": "https://example.com/",
+  "allowed_hosts": ["example.com"],
+  "steps": [],
+  "assertions": [],
+  "timeout_ms": 45000,
+  "viewport": {"preset": "mobile"},
+  "screenshot": true
+}
+```
+
+When the capture succeeds, its result has these fields (a fragment: the
+other fields are as in [Output](#output)), and `/io/screenshot.jpg` sits
+beside `result.json`; 412×839 is the `mobile` preset's CSS size, not its
+device pixels:
+
+```json
+{
+  "schema_version": 1,
+  "status": "completed",
+  "verdict": "pass",
+  "final_url": "https://example.com/",
+  "viewport": {"width": 412, "height": 839, "preset": "mobile", "mobile": true},
+  "screenshot": {"width": 412, "height": 839}
+}
+```
+
+When the same check has less than 1 s of its budget left when the screenshot
+is due, the result has `screenshot_error` instead of `screenshot` and no
+`/io/screenshot.jpg` is written; the verdict is decided by the steps and
+assertions as usual, never by the screenshot:
+
+```json
+{
+  "schema_version": 1,
+  "status": "completed",
+  "verdict": "pass",
+  "final_url": "https://example.com/",
+  "screenshot_error": "not enough time left"
+}
+```
+
+Added in 1.6.0.
 
 ### Exit codes
 
@@ -457,7 +543,10 @@ failed step); and `https://httpbin.org/forms/post` submitted with
 `read_only: true` (the `POST` in `blocked_requests`, every step ok,
 `final_url` still the form) and with `read_only: false` (`final_url`
 httpbin's `/post`) — and prints the results. The two `read_only` cases are
-asserted (with `jq`): the script exits non-zero when either does not hold. (A `goto` to a host outside
+asserted (with `jq`): the script exits non-zero when either does not hold.
+It also runs a `mobile` check of `https://example.com` with
+`"screenshot": true` and asserts the result's `screenshot` is 412×839 and
+`screenshot.jpg` is there. (A `goto` to a host outside
 `allowed_hosts` never reaches the browser: it is invalid input.)
 
 ## Releasing

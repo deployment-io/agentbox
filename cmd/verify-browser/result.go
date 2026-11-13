@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -34,8 +35,10 @@ const redacted = "<redacted>"
 
 // finish turns the script's outcome into /io/result.json and the exit code.
 // With a secret, the script's result is rewritten with it redacted rather
-// than moved into place as it is.
-func finish(resultPath, tmpResult string, out scriptOutcome, secret string) int {
+// than moved into place as it is. A completed result's screenshot is moved
+// to screenshot.jpg beside it first (keepScreenshot); when it can't be, the
+// result is rewritten with "screenshot_error" in place of "screenshot".
+func finish(resultPath, tmpResult, tmpScreenshot string, out scriptOutcome, secret string) int {
 	tail := out.stderrTail
 	if secret != "" && out.stderrCut {
 		tail = dropFirstLine(tail)
@@ -46,59 +49,127 @@ func finish(resultPath, tmpResult string, out scriptOutcome, secret string) int 
 	case out.cancelled:
 		return fail(resultPath, errors.New("verify-browser was stopped before the browser finished"), tail, secret)
 	}
-	status, err := checkScriptResult(tmpResult)
+	res, err := checkScriptResult(tmpResult)
 	if err != nil {
 		if out.err != nil {
 			err = fmt.Errorf("%w (browser script: %v)", err, out.err)
 		}
 		return fail(resultPath, err, tail, secret)
 	}
-	if secret == "" {
+	screenshotPath := filepath.Join(filepath.Dir(resultPath), "screenshot.jpg")
+	screenshotErr := ""
+	if res.status == "completed" && res.hasScreenshot {
+		screenshotErr = keepScreenshot(tmpScreenshot, screenshotPath)
+	}
+	switch {
+	case screenshotErr != "":
+		err = rewriteResult(resultPath, tmpResult, secret, func(r map[string]any) {
+			delete(r, "screenshot")
+			r["screenshot_error"] = screenshotErr
+		})
+	case secret == "":
 		err = os.Rename(tmpResult, resultPath)
-	} else {
+	default:
 		err = writeRedacted(resultPath, tmpResult, secret)
 	}
 	if err != nil {
+		// An error result never leaves a screenshot.
+		os.Remove(screenshotPath)
 		return fail(resultPath, fmt.Errorf("moving the result into place: %w", err), tail, secret)
 	}
-	if status != "completed" {
+	if res.status != "completed" {
 		return 1
 	}
 	return 0
 }
 
+// maxScreenshotBytes bounds /io/screenshot.jpg.
+const maxScreenshotBytes = 1 << 20
+
+// Screenshot errors finish puts in the result in place of its "screenshot".
+const (
+	screenshotTooLarge    = "too large"
+	screenshotNotCaptured = "the page could not be captured"
+)
+
+// keepScreenshot renames the script's screenshot to path when it is a JPEG
+// of at most maxScreenshotBytes, and returns "". Otherwise it removes it and
+// returns the result's screenshot_error.
+func keepScreenshot(tmp, path string) string {
+	reason := checkScreenshot(tmp)
+	if reason == "" && os.Rename(tmp, path) != nil {
+		reason = screenshotNotCaptured
+	}
+	if reason != "" {
+		os.Remove(tmp)
+	}
+	return reason
+}
+
+// jpegMarker is how every JPEG file starts: SOI and the next marker's FF.
+var jpegMarker = []byte{0xFF, 0xD8, 0xFF}
+
+func checkScreenshot(path string) string {
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return screenshotNotCaptured
+	}
+	if info.Size() > maxScreenshotBytes {
+		return screenshotTooLarge
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return screenshotNotCaptured
+	}
+	defer f.Close()
+	head := make([]byte, len(jpegMarker))
+	if _, err := io.ReadFull(f, head); err != nil || !bytes.Equal(head, jpegMarker) {
+		return screenshotNotCaptured
+	}
+	return ""
+}
+
+// scriptResult is what finish needs to know of the script's result.
+type scriptResult struct {
+	status string
+	// hasScreenshot is true when the result has "screenshot": the script
+	// says it wrote one.
+	hasScreenshot bool
+}
+
 // checkScriptResult reads the script's result and returns its status when it
 // is a result.json this program may hand on.
-func checkScriptResult(path string) (string, error) {
+func checkScriptResult(path string) (scriptResult, error) {
 	info, err := os.Stat(path)
 	if err != nil {
-		return "", errors.New("the browser script exited without writing a result")
+		return scriptResult{}, errors.New("the browser script exited without writing a result")
 	}
 	if info.Size() > maxResultBytes {
-		return "", fmt.Errorf("the browser script's result is larger than %d bytes", maxResultBytes)
+		return scriptResult{}, fmt.Errorf("the browser script's result is larger than %d bytes", maxResultBytes)
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return "", fmt.Errorf("reading the browser script's result: %w", err)
+		return scriptResult{}, fmt.Errorf("reading the browser script's result: %w", err)
 	}
 	var r struct {
-		SchemaVersion int    `json:"schema_version"`
-		Status        string `json:"status"`
-		Verdict       string `json:"verdict"`
+		SchemaVersion int             `json:"schema_version"`
+		Status        string          `json:"status"`
+		Verdict       string          `json:"verdict"`
+		Screenshot    json.RawMessage `json:"screenshot"`
 	}
 	if err := json.Unmarshal(data, &r); err != nil {
-		return "", fmt.Errorf("the browser script's result is not valid JSON: %w", err)
+		return scriptResult{}, fmt.Errorf("the browser script's result is not valid JSON: %w", err)
 	}
 	if r.SchemaVersion != schemaVersion {
-		return "", fmt.Errorf("the browser script's result has schema_version %d, want %d", r.SchemaVersion, schemaVersion)
+		return scriptResult{}, fmt.Errorf("the browser script's result has schema_version %d, want %d", r.SchemaVersion, schemaVersion)
 	}
 	switch {
 	case r.Status == "error":
 	case r.Status == "completed" && (r.Verdict == "pass" || r.Verdict == "fail"):
 	default:
-		return "", fmt.Errorf("the browser script's result has status %q and verdict %q", r.Status, r.Verdict)
+		return scriptResult{}, fmt.Errorf("the browser script's result has status %q and verdict %q", r.Status, r.Verdict)
 	}
-	return r.Status, nil
+	return scriptResult{status: r.Status, hasScreenshot: r.Screenshot != nil}, nil
 }
 
 // dropFirstLine drops a cut stderr tail's text up to and including its first
@@ -116,6 +187,13 @@ func dropFirstLine(tail string) string {
 // works on the decoded strings, not the file's bytes, so the secret is found
 // however the script escaped it; numbers are kept as written.
 func writeRedacted(path, scriptResult, secret string) error {
+	return rewriteResult(path, scriptResult, secret, nil)
+}
+
+// rewriteResult writes the script's result to path re-encoded, after edit
+// (when not nil) changed it, with secret redacted when it is not "" (as
+// writeRedacted does). Numbers are kept as written.
+func rewriteResult(path, scriptResult, secret string, edit func(map[string]any)) error {
 	data, err := os.ReadFile(scriptResult)
 	if err != nil {
 		return err
@@ -126,10 +204,21 @@ func writeRedacted(path, scriptResult, secret string) error {
 	if err := dec.Decode(&v); err != nil {
 		return fmt.Errorf("the browser script's result is not valid JSON: %w", err)
 	}
+	if edit != nil {
+		r, ok := v.(map[string]any)
+		if !ok {
+			return errors.New("the browser script's result is not a JSON object")
+		}
+		edit(r)
+	}
+	if secret != "" {
+		// Never with "": ReplaceAll would put the mark between every character.
+		v = redactValue(v, secret)
+	}
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
-	if err := enc.Encode(redactValue(v, secret)); err != nil {
+	if err := enc.Encode(v); err != nil {
 		return err
 	}
 	return writeAtomic(path, buf.Bytes())

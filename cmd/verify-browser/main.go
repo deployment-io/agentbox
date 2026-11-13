@@ -8,7 +8,8 @@
 // loopback and CGN addresses at dial time), runs the Node script that drives
 // Chromium through that proxy, bounds it by timeout_ms, and moves the
 // script's result into place — or writes status "error" saying why there is
-// none. The contract is docs/VERIFY_BROWSER.md.
+// none. When input.json asks for a screenshot, the script's screenshot of the
+// page the check ended on is moved to /io/screenshot.jpg beside it. The contract is docs/VERIFY_BROWSER.md.
 package main
 
 import (
@@ -88,15 +89,17 @@ func run(ctx context.Context, cfg config) int {
 	}
 	tmpResult := filepath.Join(cfg.ioDir, fmt.Sprintf(".result-%d.tmp.json", os.Getpid()))
 	defer os.Remove(tmpResult)
+	tmpScreenshot := filepath.Join(cfg.ioDir, fmt.Sprintf(".screenshot-%d.tmp.jpg", os.Getpid()))
+	defer os.Remove(tmpScreenshot)
 	outcome := runScript(ctx, scriptRun{
 		node:      cfg.node,
 		script:    cfg.script,
-		args:      []string{filepath.Join(cfg.ioDir, "input.json"), tmpResult, srv.Addr()},
+		args:      []string{filepath.Join(cfg.ioDir, "input.json"), tmpResult, srv.Addr(), tmpScreenshot},
 		timeout:   timeout,
 		grace:     cfg.grace,
 		stderrMax: stderrTailBytes,
 	})
-	return finish(resultPath, tmpResult, outcome, in.secret())
+	return finish(resultPath, tmpResult, tmpScreenshot, outcome, in.secret())
 }
 
 // fail writes an error result, with secret (sign_in's password, or "")

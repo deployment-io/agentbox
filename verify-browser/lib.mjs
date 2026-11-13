@@ -304,19 +304,81 @@ export function normalizeInput(raw) {
     viewport: normalizeViewport(raw.viewport),
     readOnly,
     signIn: normalizeSignIn(raw.sign_in, allowedHosts, readOnly),
+    screenshot: normalizeScreenshot(raw.screenshot),
   };
 }
 
 // normalizeReadOnly validates input.json's optional read_only: absent is
 // false; anything but true or false is an error.
 export function normalizeReadOnly(raw) {
+  return optionalBoolean('read_only', raw);
+}
+
+// normalizeScreenshot validates input.json's optional screenshot as
+// normalizeReadOnly does read_only.
+export function normalizeScreenshot(raw) {
+  return optionalBoolean('screenshot', raw);
+}
+
+function optionalBoolean(name, raw) {
   if (raw === undefined) {
     return false;
   }
   if (typeof raw !== 'boolean') {
-    throw new Error(`read_only must be true or false, got ${JSON.stringify(raw)}`);
+    throw new Error(`${name} must be true or false, got ${JSON.stringify(raw)}`);
   }
   return raw;
+}
+
+// SCREENSHOT_ERRORS are the result's screenshot_error values the script sets
+// (cmd/verify-browser may also set "too large").
+export const SCREENSHOT_ERRORS = Object.freeze({
+  noTime: 'not enough time left',
+  captureFailed: 'the page could not be captured',
+});
+
+// jpegSize returns a JPEG image's {width, height} in pixels, read from its
+// first start-of-frame marker, or null when bytes is not a JPEG it can read.
+export function jpegSize(bytes) {
+  if (!bytes || bytes.length < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8) {
+    return null;
+  }
+  let i = 2;
+  while (i + 4 <= bytes.length) {
+    if (bytes[i] !== 0xff) {
+      return null;
+    }
+    const marker = bytes[i + 1];
+    if (marker === 0xff) {
+      // A fill byte before the marker.
+      i++;
+      continue;
+    }
+    if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd8)) {
+      // Markers without a length.
+      i += 2;
+      continue;
+    }
+    if (marker === 0xd9 || marker === 0xda) {
+      // End of image, or the scan: no frame header before them.
+      return null;
+    }
+    const length = (bytes[i + 2] << 8) | bytes[i + 3];
+    if (length < 2) {
+      return null;
+    }
+    // SOF0 to SOF15, except DHT (C4), JPG (C8) and DAC (CC).
+    if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
+      if (i + 9 > bytes.length) {
+        return null;
+      }
+      const height = (bytes[i + 5] << 8) | bytes[i + 6];
+      const width = (bytes[i + 7] << 8) | bytes[i + 8];
+      return width > 0 && height > 0 ? { width, height } : null;
+    }
+    i += 2 + length;
+  }
+  return null;
 }
 
 // SIGN_IN_LIMITS bound sign_in's email and password, in characters.
@@ -796,7 +858,9 @@ function roundTiming(v) {
 // buildResult assembles a completed result.json from what the browser
 // collected, applying every cap and the verdict. With c.signIn it adds
 // sign_in; when the sign-in failed, every step and assertion is reported as
-// not run.
+// not run. With c.screenshot (set only when the input asked for one) it adds
+// screenshot, {width, height}, or screenshot_error when c.screenshot has an
+// error.
 export function buildResult(c) {
   const result = {
     schema_version: SCHEMA_VERSION,
@@ -844,6 +908,13 @@ export function buildResult(c) {
     if (!result.sign_in.signed_in) {
       result.steps = result.steps.map((s) => ({ ...s, ok: false, error: SIGN_IN_NOT_RUN }));
       result.assertions = result.assertions.map((a) => ({ ...a, passed: false, detail: SIGN_IN_NOT_RUN }));
+    }
+  }
+  if (c.screenshot) {
+    if (c.screenshot.error) {
+      result.screenshot_error = c.screenshot.error;
+    } else {
+      result.screenshot = { width: c.screenshot.width, height: c.screenshot.height };
     }
   }
   result.verdict = computeVerdict(result);
