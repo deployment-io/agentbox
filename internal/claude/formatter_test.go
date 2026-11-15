@@ -374,3 +374,41 @@ func TestHumanLogFormatter_APISignInRedacted(t *testing.T) {
 		t.Errorf("log carries a query string, cookie name or body:\n%s", got)
 	}
 }
+
+func TestFormatStreamJSONLine_StreamEventFormatsToNothing(t *testing.T) {
+	got, ok := formatStreamJSONLine([]byte(partialLine("Hel")))
+	if !ok {
+		t.Fatal("stream_event should return ok=true")
+	}
+	if got != "" {
+		t.Errorf("got %q, want empty", got)
+	}
+}
+
+// A session's stream_event deltas are left out of the human log, but the raw
+// sink still mirrors them.
+func TestHumanLogFormatter_SkipsStreamEvents(t *testing.T) {
+	var sink, raw bytes.Buffer
+	f := newHumanLogFormatter(&sink, nopCloser{&raw})
+	input := `{"type":"system","subtype":"init","model":"claude-opus-4-7","tools":[],"mcp_servers":[],"cwd":"/work"}` + "\n" +
+		partialLine("Hello") + "\n" +
+		partialLine(" there") + "\n" +
+		partialLine(", world.") + "\n" +
+		assistantLine("Hello there, world.") + "\n" +
+		`{"type":"result","subtype":"success","is_error":false,"num_turns":1,"result":"done","duration_ms":100}` + "\n"
+	_, _ = io.WriteString(f, input)
+	_ = f.Close()
+
+	got := sink.String()
+	for _, want := range []string{"[init]", "[text] Hello there, world.", "[done]"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "[stream_event]") || strings.Contains(got, "content_block_delta") {
+		t.Errorf("stream_event leaked into the human log:\n%s", got)
+	}
+	if raw.String() != input {
+		t.Errorf("raw sink should mirror input exactly\n got: %q\nwant: %q", raw.String(), input)
+	}
+}
