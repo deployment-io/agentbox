@@ -219,10 +219,15 @@ func (e humanEvent) format(st *formatState) string {
 		return formatMessageEnvelope(st, e.Message)
 	case "result":
 		return formatResult(e)
+	case "stream_event":
+		return ""
 	default:
 		// Unknown event types pass through with a minimal tag so
 		// information isn't silently dropped — over-logging beats
-		// under-logging per the design constraints.
+		// under-logging per the design constraints. stream_event is the
+		// exception: there is one per streamed token, the chunk forwarder
+		// streams it to the chat, and the "assistant" event carries the
+		// full text.
 		return fmt.Sprintf("[%s]", e.Type)
 	}
 }
