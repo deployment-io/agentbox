@@ -235,6 +235,12 @@ type Config struct {
 	// backend entry with Roles.
 	QAAPISignInTool bool
 
+	// QAEvidence says QA cites the browser checks each criterion's verdict
+	// rests on: the runner sets QA_EVIDENCE=1 for a QA round whose
+	// verify_preview_rendered results carry check_id. True only when
+	// QA_EVIDENCE is "1" and QATarget is QATargetPreview; ignored otherwise.
+	QAEvidence bool
+
 	// QATarget is what a QA run checks: QATargetPreview (previews it deploys
 	// itself — the default) or QATargetProduction (the sites already live in
 	// production, report-only, with the browser read-only). From QA_TARGET,
@@ -667,6 +673,7 @@ func (c *Config) loadQAInputs() error {
 		}
 		c.QAAPIRequestTool = os.Getenv("QA_API_REQUEST_TOOL") == "1"
 		c.QAAPISignInTool = os.Getenv("QA_API_SIGN_IN_TOOL") == "1"
+		c.QAEvidence = os.Getenv("QA_EVIDENCE") == "1"
 	}
 	if len(c.QARepositories) == 0 && len(c.QABackends) == 0 && len(c.QAPreviews) == 0 {
 		return fmt.Errorf("QA_REPOSITORIES is required in %s mode", ModeQA)

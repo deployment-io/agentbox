@@ -75,11 +75,12 @@ func TestBuildEnv_StripsQAInputVars(t *testing.T) {
 	t.Setenv("QA_PREVIEWS", `[{"repository":"0-acme/web","kind":"site","url":"https://d1.cloudfront.net"}]`)
 	t.Setenv("QA_API_REQUEST_TOOL", "1")
 	t.Setenv("QA_API_SIGN_IN_TOOL", "1")
+	t.Setenv("QA_EVIDENCE", "1")
 	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-test")
 
 	env := buildEnv()
 
-	for _, key := range []string{"QA_SPEC", "QA_REPOSITORIES", "QA_TARGET", "QA_URLS", "QA_BACKENDS", "QA_PREVIEWS", "QA_API_REQUEST_TOOL", "QA_API_SIGN_IN_TOOL"} {
+	for _, key := range []string{"QA_SPEC", "QA_REPOSITORIES", "QA_TARGET", "QA_URLS", "QA_BACKENDS", "QA_PREVIEWS", "QA_API_REQUEST_TOOL", "QA_API_SIGN_IN_TOOL", "QA_EVIDENCE"} {
 		for _, kv := range env {
 			if strings.HasPrefix(kv, key+"=") {
 				t.Errorf("%s must be stripped from the agent subprocess env", key)

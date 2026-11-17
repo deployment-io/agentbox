@@ -132,6 +132,18 @@ func hasPreviews(cfg *config.Config) bool {
 	return !production(cfg) && len(cfg.QAPreviews) > 0
 }
 
+// evidence says the run cites check ids: a preview run whose
+// verify_preview_rendered results carry check_id (QA_EVIDENCE). Instruction
+// adds evidenceRule for it when the spec has acceptance criteria, and Lift
+// reads each criterion's "evidence".
+func evidence(cfg *config.Config) bool {
+	return !production(cfg) && cfg.QAEvidence
+}
+
+// evidenceRule is the rule for the block, right after the criteria rule, of
+// a run with evidence and acceptance criteria.
+const evidenceRule = `- Each criterion may add "evidence": up to 3 check_id values of the verify_preview_rendered checks its verdict rests on, most telling first, copied exactly from those checks' results (e.g. ["c4","c7"]). A person reading the result sees each cited check's screenshot beside the criterion, so cite the checks that show it — for a failed criterion, the check that shows it failing. Leave "evidence" out when no browser check bears on the criterion.`
+
 // browserRoles says a QA_PREVIEWS run has a deployed preview — a site, or a
 // backend that serves pages — with roles to sign in as in the browser
 // (verify_preview_rendered's as).
@@ -660,6 +672,9 @@ func Instruction(cfg *config.Config) string {
 		if len(criteria) == 0 {
 			criteriaRule = `- There are no acceptance criteria, so "criteria" is []. A smoke check that finds a page error or a failed first-party request reports it as a finding with location = the production URL path.`
 		}
+	}
+	if evidence(cfg) && len(criteria) > 0 {
+		criteriaRule += "\n" + evidenceRule
 	}
 	return fmt.Sprintf(`
 

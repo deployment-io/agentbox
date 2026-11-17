@@ -500,6 +500,9 @@ var agentboxInputEnv = map[string]bool{
 	// QA_API_SIGN_IN_TOOL is folded into the prompt (the roles and the API
 	// rule's sign-in sentence) and the QA tool allowlist.
 	"QA_API_SIGN_IN_TOOL": true,
+	// QA_EVIDENCE is folded into the QA instruction (the criterion's
+	// "evidence" rule).
+	"QA_EVIDENCE": true,
 }
 
 // agentEnvDenylist are env vars removed from every agent process's
