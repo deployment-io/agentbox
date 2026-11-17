@@ -52,6 +52,7 @@ func setEnv(t *testing.T, want map[string]string) {
 		"QA_PREVIEWS",
 		"QA_API_REQUEST_TOOL",
 		"QA_API_SIGN_IN_TOOL",
+		"QA_EVIDENCE",
 		MCPSocketEnv,
 	}
 	for _, v := range vars {

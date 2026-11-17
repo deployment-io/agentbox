@@ -51,6 +51,11 @@ type QACriterion struct {
 	Criterion string `json:"criterion"`
 	State     string `json:"state"`
 	Reason    string `json:"reason,omitempty"`
+
+	// Evidence are the check_id values of the verify_preview_rendered checks
+	// the verdict rests on, most telling first, so the consumer can show each
+	// check's screenshot beside the criterion. Only in a QA_EVIDENCE run.
+	Evidence []string `json:"evidence,omitempty"`
 }
 
 // WriteQAFailure is WriteFailure for a QA run that never reached the agent:

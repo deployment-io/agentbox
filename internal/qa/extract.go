@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -19,6 +20,7 @@ const (
 	MaxReasonRunes      = 400
 	MaxObservations     = 20
 	MaxObservationRunes = 300
+	MaxEvidence         = 3
 )
 
 // StageQA is the stage every QA finding carries and PassCriteria its pass.
@@ -94,9 +96,10 @@ type parsedTrailer struct {
 }
 
 type parsedCriterion struct {
-	Index  flexInt `json:"index"`
-	State  string  `json:"state"`
-	Reason string  `json:"reason"`
+	Index    flexInt     `json:"index"`
+	State    string      `json:"state"`
+	Reason   string      `json:"reason"`
+	Evidence flexStrings `json:"evidence"`
 }
 
 type parsedFinding struct {
@@ -123,6 +126,33 @@ func (f *flexInt) UnmarshalJSON(b []byte) error {
 	*f = flexInt(n)
 	return nil
 }
+
+// flexStrings accepts a JSON array of strings or a single string, so a
+// malformed "evidence" never discards the whole trailer. An array keeps its
+// string elements and skips any other; anything else is empty.
+type flexStrings []string
+
+func (f *flexStrings) UnmarshalJSON(b []byte) error {
+	*f = nil
+	var one string
+	if err := json.Unmarshal(b, &one); err == nil {
+		*f = flexStrings{one}
+		return nil
+	}
+	var many []json.RawMessage
+	if err := json.Unmarshal(b, &many); err != nil {
+		return nil
+	}
+	for _, m := range many {
+		if err := json.Unmarshal(m, &one); err == nil {
+			*f = append(*f, one)
+		}
+	}
+	return nil
+}
+
+// checkIDRe is a check_id as verify_preview_rendered writes it ("c4").
+var checkIDRe = regexp.MustCompile(`^[a-z0-9_-]{1,16}$`)
 
 // latestTrailer parses the newest <qa> block that is valid JSON.
 func latestTrailer(text string) (parsedTrailer, bool) {
@@ -166,7 +196,7 @@ func Lift(cfg *config.Config, finalMessage string) (*result.QAResult, string) {
 	}
 
 	out.Status, out.StatusReason = liftStatus(parsed.Status, parsed.StatusReason)
-	out.Criteria = liftCriteria(criteria, parsed.Criteria)
+	out.Criteria = liftCriteria(criteria, parsed.Criteria, evidence(cfg))
 	out.Findings = liftFindings(parsed.Findings)
 	out.Observations = liftObservations(parsed.Observations)
 	return out, stripped
@@ -200,7 +230,9 @@ func liftStatus(status, reason string) (string, string) {
 	}
 }
 
-func liftCriteria(criteria []string, reported []parsedCriterion) []result.QACriterion {
+// liftCriteria reads each criterion's evidence only when withEvidence: a run
+// not asked to cite checks has none.
+func liftCriteria(criteria []string, reported []parsedCriterion, withEvidence bool) []result.QACriterion {
 	byIndex := map[int]parsedCriterion{}
 	for _, r := range reported {
 		i := int(r.Index)
@@ -220,7 +252,28 @@ func liftCriteria(criteria []string, reported []parsedCriterion) []result.QACrit
 			continue
 		}
 		state, reason := liftState(r.State, r.Reason)
-		out = append(out, result.QACriterion{Criterion: text, State: state, Reason: reason})
+		c := result.QACriterion{Criterion: text, State: state, Reason: reason}
+		if withEvidence {
+			c.Evidence = liftEvidence(r.Evidence)
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+// liftEvidence keeps the first MaxEvidence distinct ids that look like a
+// check_id, trimmed. None is nil, so the criterion's JSON omits "evidence".
+func liftEvidence(in []string) []string {
+	var out []string
+	for _, id := range in {
+		id = strings.TrimSpace(id)
+		if !checkIDRe.MatchString(id) || slices.Contains(out, id) {
+			continue
+		}
+		out = append(out, id)
+		if len(out) == MaxEvidence {
+			break
+		}
 	}
 	return out
 }

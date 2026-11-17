@@ -426,3 +426,34 @@ func TestLoadQAAPISignInTool(t *testing.T) {
 		t.Error("a production run has QAAPISignInTool")
 	}
 }
+
+// QA_EVIDENCE turns criterion evidence on only when it is "1" and the target
+// is the preview one.
+func TestLoadQAEvidence(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		want  bool
+	}{{"1", true}, {"", false}, {"0", false}, {"true", false}, {" 1 ", false}} {
+		qaEnv(t, map[string]string{"QA_EVIDENCE": tc.value})
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %s", err)
+		}
+		if cfg.QAEvidence != tc.want {
+			t.Errorf("QA_EVIDENCE=%q: QAEvidence = %v", tc.value, cfg.QAEvidence)
+		}
+	}
+	qaEnv(t, map[string]string{
+		"QA_TARGET":       QATargetProduction,
+		"QA_REPOSITORIES": "0-acme/website",
+		"QA_URLS":         "0-acme/website=https://acme.example",
+		"QA_EVIDENCE":     "1",
+	})
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %s", err)
+	}
+	if cfg.QAEvidence {
+		t.Error("a production run has QAEvidence")
+	}
+}
