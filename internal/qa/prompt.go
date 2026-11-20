@@ -126,6 +126,12 @@ const ReasonCookieRefused = "the browser refused the session cookie across previ
 // not built to call.
 const ReasonSiteNotConnected = "this site's preview isn't connected to that backend preview"
 
+// ReasonNoBackendPreview is the not_checked reason of a run given QA_PREVIEWS
+// for a criterion that needs the API a variable listed under a site preview
+// (its backends_not_deployed) points at: deployment.io couldn't deploy a
+// preview of that backend.
+const ReasonNoBackendPreview = "deployment.io couldn't deploy a preview of the backend this needs"
+
 // hasPreviews says the runner deployed every preview of this run itself
 // (QA_PREVIEWS): the run deploys nothing.
 func hasPreviews(cfg *config.Config) bool {
@@ -190,10 +196,10 @@ func servesPages(cfg *config.Config) bool {
 }
 
 // previewKinds says which kinds of preview a QA_PREVIEWS run has: any
-// backend entry, any site with unconnected backends, and any deployed site
-// and backend.
+// backend entry, any site with unconnected backends, any deployed site and
+// backend, and any site with variables that have no backend preview.
 type previewKinds struct {
-	backend, unconnected, deployedSite, deployedBackend bool
+	backend, unconnected, deployedSite, deployedBackend, notDeployed bool
 }
 
 func kindsOf(previews []config.QAPreview) previewKinds {
@@ -205,6 +211,7 @@ func kindsOf(previews []config.QAPreview) previewKinds {
 			k.deployedBackend = k.deployedBackend || p.Error == ""
 		case config.QAPreviewSite:
 			k.unconnected = k.unconnected || len(p.UnconnectedBackends) > 0
+			k.notDeployed = k.notDeployed || (p.Error == "" && len(p.BackendsNotDeployed) > 0)
 			k.deployedSite = k.deployedSite || p.Error == ""
 		}
 	}
@@ -356,12 +363,17 @@ You have no source code and no diff. All you have is the previews listed below, 
 	b.WriteString("\n[Previews — deployed by deployment.io from this change]\n")
 	for _, p := range cfg.QAPreviews {
 		switch {
+		case p.Error != "" && p.Companion:
+			fmt.Fprintf(b, "- %s (backend, not part of this change: an unchanged preview of %s): failed to deploy: %s\n", p.Repository, p.Deployment, p.Error)
 		case p.Error != "":
 			fmt.Fprintf(b, "- %s (%s): failed to deploy: %s\n", p.Repository, p.Kind, p.Error)
 		case p.Kind == config.QAPreviewBackend:
 			kind := "backend"
 			if p.ServesPages {
 				kind = "backend, serves pages"
+			}
+			if p.Companion {
+				kind += ", not part of this change: an unchanged preview of " + p.Deployment + ", deployed so the site previews can call it"
 			}
 			fmt.Fprintf(b, "- %s (%s): %s (health check: %s)\n", p.Repository, kind, p.URL, p.HealthURL)
 			if apiSignInTool(cfg) {
@@ -378,11 +390,15 @@ You have no source code and no diff. All you have is the previews listed below, 
 			}
 			b.WriteString("\n")
 			writeBrowserRoles(b, p.BrowserRoles)
+			writeBackendsNotDeployed(b, p.BackendsNotDeployed)
 		}
 	}
 	var rules []string
 	if kinds.unconnected {
 		rules = append(rules, fmt.Sprintf("A criterion that needs a frontend to use a backend preview it is NOT connected to is not checked, with reason '%s'.", ReasonSiteNotConnected))
+	}
+	if kinds.notDeployed {
+		rules = append(rules, fmt.Sprintf("A criterion that needs the API a variable listed under a site preview points at is not checked, with reason '%s'.", ReasonNoBackendPreview))
 	}
 	if len(rules) > 0 {
 		b.WriteString(strings.Join(rules, " ") + "\n")
@@ -398,6 +414,19 @@ You have no source code and no diff. All you have is the previews listed below, 
 	}
 	if browserRoles(cfg) {
 		b.WriteString(browserSignInRule(backendBrowserRoles(cfg)) + "\n")
+	}
+}
+
+// writeBackendsNotDeployed lists, under a site preview's entry, each of its
+// variables with no backend preview to point at, why, and the API it still
+// calls when the runner knows it.
+func writeBackendsNotDeployed(b *strings.Builder, items []config.QABackendNotDeployed) {
+	for _, item := range items {
+		fmt.Fprintf(b, "  %s still calls whatever API Preview configuration points it at: %s", item.Variable, item.Reason)
+		if item.API != "" {
+			fmt.Fprintf(b, " (%s)", item.API)
+		}
+		b.WriteString("\n")
 	}
 }
 
@@ -651,6 +680,9 @@ func Instruction(cfg *config.Config) string {
 		notChecked = `it needs a login, it is not observable on a preview (an email, a webhook)`
 		if kinds.unconnected {
 			notChecked += `, "` + ReasonSiteNotConnected + `"`
+		}
+		if kinds.notDeployed {
+			notChecked += `, "` + ReasonNoBackendPreview + `"`
 		}
 		if kinds.backend {
 			notChecked += `, ` + apiReasons(cfg)
