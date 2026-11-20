@@ -4,6 +4,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -16,6 +17,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -578,7 +580,11 @@ const (
 // and ServesPages says its front page answered with a web page. A deployed
 // site's BrowserRoles are the roles of its connected backends QA can sign in
 // as in the browser (verify_preview_rendered's as); a deployed backend that
-// serves pages may have BrowserRoles too, each a role of its own.
+// serves pages may have BrowserRoles too, each a role of its own. A Companion
+// backend (deployed or not) is not part of the change: an unchanged preview
+// of Deployment, deployed from its production branch so the site previews can
+// call it. A deployed site's BackendsNotDeployed are the variables it still
+// has with no backend preview to point at.
 type QAPreview struct {
 	Repository          string
 	Kind                string
@@ -590,6 +596,19 @@ type QAPreview struct {
 	Roles               []QARole
 	BrowserRoles        []QABrowserRole
 	ServesPages         bool
+	Companion           bool
+	Deployment          string
+	BackendsNotDeployed []QABackendNotDeployed
+}
+
+// QABackendNotDeployed is one backends_not_deployed item of a QA_PREVIEWS
+// site entry: a variable of the site that still calls whatever API Preview
+// configuration points it at, because deployment.io couldn't deploy a preview
+// of its backend (Reason), and that API (may be empty).
+type QABackendNotDeployed struct {
+	Variable string `json:"variable"`
+	API      string `json:"api"`
+	Reason   string `json:"reason"`
 }
 
 // QARole is one role of a QA_PREVIEWS backend entry: a test user QA can sign
@@ -614,6 +633,16 @@ type QABrowserRole struct {
 const (
 	maxQARoles                 = 10
 	maxQARoleDescriptionLength = 200
+)
+
+// The limits on a QA_PREVIEWS companion's deployment and on a site entry's
+// backends_not_deployed.
+const (
+	maxQADeploymentLength          = 200
+	maxQABackendsNotDeployed       = 20
+	maxQANotDeployedVariableLength = 128
+	maxQANotDeployedAPILength      = 200
+	maxQANotDeployedReasonLength   = 300
 )
 
 // qaRoleName is the form a role name takes.
@@ -754,7 +783,10 @@ func parseQABackends(raw string) ([]QABackend, error) {
 // site names is a backend entry of the array, in at most one of its lists. A
 // backend entry with a url may have "roles" (checkQARoles) and
 // "serves_pages", and a site entry with a url, or a backend entry with
-// serves_pages, may have "browser_roles" (checkQABrowserRoles).
+// serves_pages, may have "browser_roles" (checkQABrowserRoles). A backend
+// entry may have "companion", and a companion must have "deployment"
+// (checkQADeployment); a site entry with a url may have
+// "backends_not_deployed" (checkQABackendsNotDeployed).
 func parseQAPreviews(raw string) ([]QAPreview, error) {
 	var elements []json.RawMessage
 	if err := json.Unmarshal([]byte(raw), &elements); err != nil {
@@ -792,7 +824,10 @@ func parseQAPreviews(raw string) ([]QAPreview, error) {
 				Description string `json:"description"`
 				Backend     string `json:"backend"`
 			} `json:"browser_roles"`
-			ServesPages bool `json:"serves_pages"`
+			ServesPages         bool                   `json:"serves_pages"`
+			Companion           bool                   `json:"companion"`
+			Deployment          string                 `json:"deployment"`
+			BackendsNotDeployed []QABackendNotDeployed `json:"backends_not_deployed"`
 		}
 		if err := json.Unmarshal(element, &e); err != nil {
 			return nil, fmt.Errorf("%s is not a valid preview entry: %v", name, err)
@@ -885,6 +920,47 @@ func parseQAPreviews(raw string) ([]QAPreview, error) {
 				return nil, err
 			}
 		}
+		// encoding/json reads null as false, "" or an empty list, so the new
+		// fields reject it here, before their own checks.
+		for _, field := range []string{"companion", "deployment", "backends_not_deployed"} {
+			if v, ok := fields[field]; ok && string(bytes.TrimSpace(v)) == "null" {
+				return nil, fmt.Errorf("%s has %s null: it must be a value of its type", name, field)
+			}
+		}
+		if _, hasCompanion := fields["companion"]; hasCompanion {
+			if p.Kind != QAPreviewBackend {
+				return nil, fmt.Errorf("%s is a site, so it must not have companion", name)
+			}
+			p.Companion = e.Companion
+		}
+		_, hasDeployment := fields["deployment"]
+		switch {
+		case p.Companion:
+			p.Deployment = strings.TrimSpace(e.Deployment)
+			if err := checkQADeployment(name, p.Deployment); err != nil {
+				return nil, err
+			}
+		case hasDeployment:
+			return nil, fmt.Errorf("%s is not a companion, so it must not have deployment", name)
+		}
+		if _, hasNotDeployed := fields["backends_not_deployed"]; hasNotDeployed {
+			switch {
+			case p.Kind != QAPreviewSite:
+				return nil, fmt.Errorf("%s is a backend, so it must not have backends_not_deployed", name)
+			case p.Error != "":
+				return nil, fmt.Errorf("%s failed to deploy, so it must not have backends_not_deployed", name)
+			}
+			for _, item := range e.BackendsNotDeployed {
+				p.BackendsNotDeployed = append(p.BackendsNotDeployed, QABackendNotDeployed{
+					Variable: strings.TrimSpace(item.Variable),
+					API:      strings.TrimSpace(item.API),
+					Reason:   strings.TrimSpace(item.Reason),
+				})
+			}
+			if err := checkQABackendsNotDeployed(name, p.BackendsNotDeployed); err != nil {
+				return nil, err
+			}
+		}
 		previews = append(previews, p)
 		names = append(names, name)
 	}
@@ -908,6 +984,68 @@ func parseQAPreviews(raw string) ([]QAPreview, error) {
 		}
 	}
 	return previews, nil
+}
+
+// checkQADeployment checks a companion backend entry's deployment, trimmed:
+// not empty, at most maxQADeploymentLength characters and no control
+// characters. name names the entry in the error.
+func checkQADeployment(name, deployment string) error {
+	if deployment == "" {
+		return fmt.Errorf("%s is a companion, so it must have a deployment", name)
+	}
+	if n := utf8.RuneCountInString(deployment); n > maxQADeploymentLength {
+		return fmt.Errorf("%s has a deployment of %d characters: at most %d", name, n, maxQADeploymentLength)
+	}
+	if hasControl(deployment) {
+		return fmt.Errorf("%s has a deployment with a control character", name)
+	}
+	return nil
+}
+
+// checkQABackendsNotDeployed checks a site entry's backends_not_deployed,
+// each item trimmed: at most maxQABackendsNotDeployed, each with a variable
+// no other has, of at most maxQANotDeployedVariableLength characters and no
+// whitespace or control characters; an api (may be empty) of at most
+// maxQANotDeployedAPILength characters; and a reason of at most
+// maxQANotDeployedReasonLength characters, neither with control characters.
+// name names the entry in the error.
+func checkQABackendsNotDeployed(name string, items []QABackendNotDeployed) error {
+	if len(items) > maxQABackendsNotDeployed {
+		return fmt.Errorf("%s has %d backends_not_deployed: at most %d", name, len(items), maxQABackendsNotDeployed)
+	}
+	seen := map[string]bool{}
+	for i, item := range items {
+		what := fmt.Sprintf("%s: backends_not_deployed item %d", name, i+1)
+		switch {
+		case item.Variable == "":
+			return fmt.Errorf("%s has no variable", what)
+		case utf8.RuneCountInString(item.Variable) > maxQANotDeployedVariableLength:
+			return fmt.Errorf("%s has a variable of %d characters: at most %d", what, utf8.RuneCountInString(item.Variable), maxQANotDeployedVariableLength)
+		case strings.IndexFunc(item.Variable, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) >= 0:
+			return fmt.Errorf("%s has variable %q: it must have no whitespace or control characters", what, item.Variable)
+		case seen[item.Variable]:
+			return fmt.Errorf("%s repeats variable %q in backends_not_deployed", name, item.Variable)
+		}
+		seen[item.Variable] = true
+		switch {
+		case utf8.RuneCountInString(item.API) > maxQANotDeployedAPILength:
+			return fmt.Errorf("%s has an api of %d characters: at most %d", what, utf8.RuneCountInString(item.API), maxQANotDeployedAPILength)
+		case hasControl(item.API):
+			return fmt.Errorf("%s has an api with a control character", what)
+		case item.Reason == "":
+			return fmt.Errorf("%s has no reason", what)
+		case utf8.RuneCountInString(item.Reason) > maxQANotDeployedReasonLength:
+			return fmt.Errorf("%s has a reason of %d characters: at most %d", what, utf8.RuneCountInString(item.Reason), maxQANotDeployedReasonLength)
+		case hasControl(item.Reason):
+			return fmt.Errorf("%s has a reason with a control character", what)
+		}
+	}
+	return nil
+}
+
+// hasControl says s has a control character.
+func hasControl(s string) bool {
+	return strings.IndexFunc(s, unicode.IsControl) >= 0
 }
 
 // checkQARoles checks a backend entry's roles: at most maxQARoles, each with a

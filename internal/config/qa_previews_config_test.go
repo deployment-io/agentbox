@@ -457,3 +457,144 @@ func TestLoadQAEvidence(t *testing.T) {
 		t.Error("a production run has QAEvidence")
 	}
 }
+
+// qaCompanion is a deployed companion backend entry with the extra keys
+// given.
+func qaCompanion(extra string) string {
+	return `{"repository":"1-acme/api","kind":"backend","url":"https://d2.cloudfront.net","health_url":"https://d2.cloudfront.net/healthz","companion":true` + extra + `}`
+}
+
+// qaNotDeployedSite is a deployed site entry with the backends_not_deployed
+// given.
+func qaNotDeployedSite(items string) string {
+	return `{"repository":"0-acme/web","kind":"site","url":"https://d1.cloudfront.net","backends_not_deployed":` + items + `}`
+}
+
+func TestLoadQAPreviewsCompanions(t *testing.T) {
+	qaPreviewsEnv(t, `[`+qaCompanion(`,"deployment":"  acme-api (production)  "`)+`,`+
+		`{"repository":"2-acme/auth","kind":"backend","error":"the image build failed","companion":true,"deployment":"acme-auth"},`+
+		`{"repository":"3-acme/jobs","kind":"backend","url":"https://d5.cloudfront.net","health_url":"https://d5.cloudfront.net/healthz","companion":false},`+
+		`{"repository":"0-acme/web","kind":"site","url":"https://d1.cloudfront.net","connected_backends":["1-acme/api"]}]`)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %s", err)
+	}
+	want := []QAPreview{
+		{Repository: "1-acme/api", Kind: QAPreviewBackend, URL: "https://d2.cloudfront.net", HealthURL: "https://d2.cloudfront.net/healthz", Companion: true, Deployment: "acme-api (production)"},
+		{Repository: "2-acme/auth", Kind: QAPreviewBackend, Error: "the image build failed", Companion: true, Deployment: "acme-auth"},
+		{Repository: "3-acme/jobs", Kind: QAPreviewBackend, URL: "https://d5.cloudfront.net", HealthURL: "https://d5.cloudfront.net/healthz"},
+		{Repository: "0-acme/web", Kind: QAPreviewSite, URL: "https://d1.cloudfront.net", ConnectedBackends: []string{"1-acme/api"}},
+	}
+	if !reflect.DeepEqual(cfg.QAPreviews, want) {
+		t.Errorf("QAPreviews = %+v\nwant %+v", cfg.QAPreviews, want)
+	}
+
+	// A deployment of exactly 200 characters (counted as runes) is fine.
+	qaPreviewsEnv(t, `[`+qaCompanion(`,"deployment":"`+strings.Repeat("é", 200)+`"`)+`]`)
+	if _, err := Load(); err != nil {
+		t.Errorf("a 200-character deployment: %v", err)
+	}
+}
+
+func TestLoadQAPreviewsRejectsBadCompanions(t *testing.T) {
+	for _, tc := range []struct {
+		name, raw, want string
+	}{
+		{"on a site entry", `[{"repository":"0-acme/web","kind":"site","url":"https://d1.cloudfront.net","companion":true,"deployment":"acme-web"}]`, `QA_PREVIEWS entry 1 ("0-acme/web") is a site, so it must not have companion`},
+		{"false on a site entry", `[{"repository":"0-acme/web","kind":"site","url":"https://d1.cloudfront.net","companion":false}]`, `QA_PREVIEWS entry 1 ("0-acme/web") is a site, so it must not have companion`},
+		{"on a failed site entry", `[{"repository":"0-acme/web","kind":"site","error":"x","companion":true,"deployment":"acme-web"}]`, `QA_PREVIEWS entry 1 ("0-acme/web") is a site, so it must not have companion`},
+		{"not a bool", `[{"repository":"1-acme/api","kind":"backend","error":"x","companion":"yes","deployment":"acme-api"}]`, `QA_PREVIEWS entry 1 ("1-acme/api") is not a valid preview entry`},
+		{"companion null", `[{"repository":"1-acme/api","kind":"backend","error":"x","companion":null}]`, `QA_PREVIEWS entry 1 ("1-acme/api") has companion null: it must be a value of its type`},
+		{"deployment null", `[` + qaCompanion(`,"deployment":null`) + `]`, `QA_PREVIEWS entry 1 ("1-acme/api") has deployment null: it must be a value of its type`},
+		{"deployment without companion", `[{"repository":"1-acme/api","kind":"backend","url":"https://d2.cloudfront.net","health_url":"https://d2.cloudfront.net/healthz","deployment":"acme-api"}]`, `QA_PREVIEWS entry 1 ("1-acme/api") is not a companion, so it must not have deployment`},
+		{"deployment with companion false", `[{"repository":"1-acme/api","kind":"backend","error":"x","companion":false,"deployment":"acme-api"}]`, `QA_PREVIEWS entry 1 ("1-acme/api") is not a companion, so it must not have deployment`},
+		{"deployment on a site entry", `[{"repository":"0-acme/web","kind":"site","url":"https://d1.cloudfront.net","deployment":"acme-web"}]`, `QA_PREVIEWS entry 1 ("0-acme/web") is not a companion, so it must not have deployment`},
+		{"companion without deployment", `[` + qaCompanion(``) + `]`, `QA_PREVIEWS entry 1 ("1-acme/api") is a companion, so it must have a deployment`},
+		{"failed companion without deployment", `[{"repository":"1-acme/api","kind":"backend","error":"x","companion":true}]`, `QA_PREVIEWS entry 1 ("1-acme/api") is a companion, so it must have a deployment`},
+		{"blank deployment", `[` + qaCompanion(`,"deployment":"  "`) + `]`, `QA_PREVIEWS entry 1 ("1-acme/api") is a companion, so it must have a deployment`},
+		{"201-character deployment", `[` + qaCompanion(`,"deployment":"`+strings.Repeat("a", 201)+`"`) + `]`, `QA_PREVIEWS entry 1 ("1-acme/api") has a deployment of 201 characters: at most 200`},
+		{"control character in deployment", `[` + qaCompanion(`,"deployment":"acme\napi"`) + `]`, `QA_PREVIEWS entry 1 ("1-acme/api") has a deployment with a control character`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			qaPreviewsEnv(t, tc.raw)
+			_, err := Load()
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("err = %v, want one containing %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoadQAPreviewsBackendsNotDeployed(t *testing.T) {
+	qaPreviewsEnv(t, `[`+qaNotDeployedSite(`[`+
+		`{"variable":" VITE_BILLING_URL ","api":" acme-billing ","reason":" the web service is in another region "},`+
+		`{"variable":"VITE_SEARCH_URL","reason":"no web service of the Task's organization serves it"},`+
+		`{"variable":"VITE_AUTH_URL","api":"","reason":"x"}]`)+`]`)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %s", err)
+	}
+	want := []QABackendNotDeployed{
+		{Variable: "VITE_BILLING_URL", API: "acme-billing", Reason: "the web service is in another region"},
+		{Variable: "VITE_SEARCH_URL", Reason: "no web service of the Task's organization serves it"},
+		{Variable: "VITE_AUTH_URL", Reason: "x"},
+	}
+	if got := cfg.QAPreviews[0].BackendsNotDeployed; !reflect.DeepEqual(got, want) {
+		t.Errorf("BackendsNotDeployed = %+v, want %+v", got, want)
+	}
+
+	// 20 items, and each value at its longest (counted as runes), are fine;
+	// so is an empty list.
+	var twenty []string
+	for i := 0; i < 20; i++ {
+		twenty = append(twenty, `{"variable":"V`+strings.Repeat("é", 126)+string(rune('a'+i))+`","api":"`+strings.Repeat("é", 200)+`","reason":"`+strings.Repeat("é", 300)+`"}`)
+	}
+	for name, items := range map[string]string{"20 items": `[` + strings.Join(twenty, ",") + `]`, "empty": `[]`} {
+		qaPreviewsEnv(t, `[`+qaNotDeployedSite(items)+`]`)
+		if _, err := Load(); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}
+
+func TestLoadQAPreviewsRejectsBadBackendsNotDeployed(t *testing.T) {
+	item := func(variable, api, reason string) string {
+		return `{"variable":"` + variable + `","api":"` + api + `","reason":"` + reason + `"}`
+	}
+	var twentyOne []string
+	for i := 0; i < 21; i++ {
+		twentyOne = append(twentyOne, item("V"+string(rune('a'+i)), "", "x"))
+	}
+	for _, tc := range []struct {
+		name, raw, want string
+	}{
+		{"on a backend entry", `[{"repository":"1-acme/api","kind":"backend","url":"https://d2.cloudfront.net","health_url":"https://d2.cloudfront.net/healthz","backends_not_deployed":[` + item("V", "", "x") + `]}]`, `QA_PREVIEWS entry 1 ("1-acme/api") is a backend, so it must not have backends_not_deployed`},
+		{"on a failed backend entry", `[{"repository":"1-acme/api","kind":"backend","error":"x","backends_not_deployed":[]}]`, `QA_PREVIEWS entry 1 ("1-acme/api") is a backend, so it must not have backends_not_deployed`},
+		{"null", `[` + qaNotDeployedSite(`null`) + `]`, `QA_PREVIEWS entry 1 ("0-acme/web") has backends_not_deployed null: it must be a value of its type`},
+		{"on a failed site entry", `[{"repository":"0-acme/web","kind":"site","error":"x","backends_not_deployed":[` + item("V", "", "x") + `]}]`, `QA_PREVIEWS entry 1 ("0-acme/web") failed to deploy, so it must not have backends_not_deployed`},
+		{"empty on a failed site entry", `[{"repository":"0-acme/web","kind":"site","error":"x","backends_not_deployed":[]}]`, `QA_PREVIEWS entry 1 ("0-acme/web") failed to deploy, so it must not have backends_not_deployed`},
+		{"21 items", `[` + qaNotDeployedSite(`[`+strings.Join(twentyOne, ",")+`]`) + `]`, `QA_PREVIEWS entry 1 ("0-acme/web") has 21 backends_not_deployed: at most 20`},
+		{"not a list", `[` + qaNotDeployedSite(`"VITE_API_URL"`) + `]`, `QA_PREVIEWS entry 1 ("0-acme/web") is not a valid preview entry`},
+		{"no variable", `[` + qaNotDeployedSite(`[{"reason":"x"}]`) + `]`, `QA_PREVIEWS entry 1 ("0-acme/web"): backends_not_deployed item 1 has no variable`},
+		{"blank variable", `[` + qaNotDeployedSite(`[`+item(" ", "", "x")+`]`) + `]`, `QA_PREVIEWS entry 1 ("0-acme/web"): backends_not_deployed item 1 has no variable`},
+		{"129-character variable", `[` + qaNotDeployedSite(`[`+item(strings.Repeat("V", 129), "", "x")+`]`) + `]`, `QA_PREVIEWS entry 1 ("0-acme/web"): backends_not_deployed item 1 has a variable of 129 characters: at most 128`},
+		{"variable with whitespace", `[` + qaNotDeployedSite(`[`+item("VITE API_URL", "", "x")+`]`) + `]`, `QA_PREVIEWS entry 1 ("0-acme/web"): backends_not_deployed item 1 has variable "VITE API_URL": it must have no whitespace or control characters`},
+		{"variable with a control character", `[` + qaNotDeployedSite(`[`+item(`VITE\u0007API_URL`, "", "x")+`]`) + `]`, `QA_PREVIEWS entry 1 ("0-acme/web"): backends_not_deployed item 1 has variable "VITE\aAPI_URL": it must have no whitespace or control characters`},
+		{"repeated variable", `[` + qaNotDeployedSite(`[`+item("VITE_API_URL", "", "x")+`,`+item(" VITE_API_URL ", "", "y")+`]`) + `]`, `QA_PREVIEWS entry 1 ("0-acme/web") repeats variable "VITE_API_URL" in backends_not_deployed`},
+		{"201-character api", `[` + qaNotDeployedSite(`[`+item("V", strings.Repeat("a", 201), "x")+`]`) + `]`, `QA_PREVIEWS entry 1 ("0-acme/web"): backends_not_deployed item 1 has an api of 201 characters: at most 200`},
+		{"control character in api", `[` + qaNotDeployedSite(`[`+item("V", `https://api\t.acme.example`, "x")+`]`) + `]`, `QA_PREVIEWS entry 1 ("0-acme/web"): backends_not_deployed item 1 has an api with a control character`},
+		{"no reason", `[` + qaNotDeployedSite(`[{"variable":"V"}]`) + `]`, `QA_PREVIEWS entry 1 ("0-acme/web"): backends_not_deployed item 1 has no reason`},
+		{"empty reason", `[` + qaNotDeployedSite(`[`+item("V", "", " ")+`]`) + `]`, `QA_PREVIEWS entry 1 ("0-acme/web"): backends_not_deployed item 1 has no reason`},
+		{"301-character reason", `[` + qaNotDeployedSite(`[`+item("V", "", strings.Repeat("a", 301))+`]`) + `]`, `QA_PREVIEWS entry 1 ("0-acme/web"): backends_not_deployed item 1 has a reason of 301 characters: at most 300`},
+		{"control character in reason", `[` + qaNotDeployedSite(`[`+item("V", "", `the build\nfailed`)+`]`) + `]`, `QA_PREVIEWS entry 1 ("0-acme/web"): backends_not_deployed item 1 has a reason with a control character`},
+		{"second item bad", `[` + qaNotDeployedSite(`[`+item("V", "", "x")+`,`+item("W", "", "")+`]`) + `]`, `QA_PREVIEWS entry 1 ("0-acme/web"): backends_not_deployed item 2 has no reason`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			qaPreviewsEnv(t, tc.raw)
+			_, err := Load()
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("err = %v, want one containing %q", err, tc.want)
+			}
+		})
+	}
+}
